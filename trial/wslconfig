@@ -1,0 +1,4 @@
+[wsl2]
+memory=20GB
+processors=12
+defaultVhdSize=100GB

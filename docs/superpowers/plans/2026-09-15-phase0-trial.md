@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Base: Ubuntu 26.04 LTS. Fall back to 24.04 only if the 26.04 WSL image or its GPU support is not ready (spec 5.1).
-- WSL2 limits: 20 GB RAM, 12 threads, disk capped at 200 GB (spec 5.1).
+- WSL2 limits: 20 GB RAM, 12 threads, disk capped at 100 GB (spec 5.1; the user set 100 on 2026-09-15).
 - Everything lives in `C:\WSL\ai-os\`. The only other Windows-side file is `%USERPROFILE%\.wslconfig` (spec 5.1).
 - Everything Linux-side is installed by script, never by hand (spec 5.1). For the trial that script is `trial/setup-trial.sh`.
 - No cloud model is called at any point in the trial (spec decision 6).
@@ -74,7 +74,7 @@ Expected: several lines starting `WSL version: 2.x`. If the command errors, stop
 [wsl2]
 memory=20GB
 processors=12
-defaultVhdSize=200GB
+defaultVhdSize=100GB
 ```
 
 Run (PowerShell): `Copy-Item trial\wslconfig $env:USERPROFILE\.wslconfig; wsl --shutdown`

@@ -148,7 +148,7 @@ Other abilities: web browsing, installing and removing software, desktop notific
 
 ### 5.1 The workshop (this laptop)
 - **Machine:** ALIEN, with an Intel Core 7 240H (16 threads), 32 GB RAM, an RTX 5060 Laptop GPU with 8 GB, and 376 GB free disk.
-- **WSL2 limits:** 20 GB RAM, 12 threads, disk capped at 200 GB. Everything lives in one folder, `C:\WSL\ai-os\`.
+- **WSL2 limits:** 20 GB RAM, 12 threads, disk capped at 100 GB (his call, 2026-09-15: the C: drive must keep its headroom). Everything lives in one folder, `C:\WSL\ai-os\`.
 - **Base:** the newest Ubuntu LTS (26.04). Fall back to 24.04 if the trial finds the WSL image or GPU support not ready. Note: 26.04's GNOME has no X11 session at all, so the screen fallback must work through Wayland's permission system; KDE still offers X11, which counts in its favour if GNOME's permissions cannot be remembered.
 - **Trial limits:** the desktop shown through Remote Desktop is a headless session with no real input devices, so permission dialogs and handover may behave a little differently from bare metal. Also, Windows App Control is enforced on this laptop; WSL and Remote Desktop are Microsoft-signed and should pass, but the trial confirms it.
 - **Setup:** everything is installed by one setup script, never by hand.
