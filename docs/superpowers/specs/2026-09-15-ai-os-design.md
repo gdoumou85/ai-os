@@ -248,3 +248,16 @@ None of the engineering above is the hard part. The hard part is whether an 8B l
 - A literal second mouse pointer: tested, and most apps ignore it.
 - Giving the AI jobs from the phone: a later step, not version 1.
 - A general admin shell for the model, in any form.
+
+## 11. Phase 1a status & carry-forwards (2026-09-15)
+
+**Phase 1a (executor spine) is BUILT** on branch `phase1a-executor-spine`: the Rust `executor` crate at `runtime/executor/` — `Action` (JSON), `classify` risk rules (decision 9, pure), SQLite action log, the `Executor` dispatcher (a blocked action never reaches a worker and is always logged; an executed action's outcome is never lost to a logging failure), the real `SandboxWorker` (runs commands as unprivileged `ai-sandbox` via `systemd-run`, no network, workspace-scoped file ops with symlink resolution on both read and write), and a demo binary. 16 unit + 4 integration tests pass; the sandbox read/write escapes found in review are closed.
+
+**Prerequisites for Phase 1b (core loop + model) and the secrets phase — carried forward from the Phase 1a review:**
+1. **Filesystem-confine `RunCommand`.** It is `Auto` and the sandbox is unprivileged + network-isolated but **not** yet jailed to the workspace, so a command like `cat /etc/passwd` still reads outside it (it cannot exfiltrate — network is gated). Before the model runs or any secret exists, jail `RunCommand` to the workspace (mount namespace / `InaccessiblePaths`) or classify it more tightly. This is required for rule 6 (the model never sees a secret).
+2. **Workspace permission model.** How each job workspace grants `ai-sandbox` access (setgid `/data/jobs`, or per-workspace group) is undecided; the orchestrator that creates workspaces owns this.
+3. **Couple the workspace reference.** `Executor` (classification) and `SandboxWorker` (enforcement) hold independent `workspace` fields; the integrator must keep them identical (or refactor so one borrows the other).
+
+**Workshop-only shortcuts that MUST NOT ship to the product (packaging phase):**
+- A sudoers `NOPASSWD: /usr/bin/systemd-run` grant for user `ai` (root-equivalent) — used because the workshop executor runs as `ai`; the product's executor daemon is already privileged and needs no such grant.
+- `/data` was made world-writable (777) so the trial db could be created; the product sets `/data` ownership/permissions properly.
