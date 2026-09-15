@@ -54,7 +54,7 @@ It is never reduced to a chatbot, a command launcher, or a fixed list of workflo
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  USER   desktop chat panel · handed-over windows · phone      │
+│  USER   docked chat rail · handed-over windows · phone        │
 └──────────────────────────────┬───────────────────────────────┘
                                │
 ┌──────────────────────────────▼───────────────────────────────┐
@@ -139,12 +139,27 @@ Other abilities: web browsing, installing and removing software, desktop notific
 - **Files roll back instantly. System changes roll back plus a restart of what changed**, because running programs keep the old version until they restart.
 - **Limit:** unsaved work inside an open program cannot be snapshotted. Decision 9 covers this: the AI asks before closing or discarding a window with unsaved work.
 
-### 4.9 User interface
-- **Firm requirement (his call, 2026-09-15): the user never needs a terminal.** A terminal is a builder's tool; the product must show what it did in a way a non-Linux user reads at a glance. Results are presented *visually* — the finished file opened, the app window shown, the image displayed, a short plain-language summary with a "show me" that opens the actual result — never as raw terminal output. The terminal exists under the hood; the user is never sent to it.
-- A chat panel on the desktop, always available. It shows running jobs, progress and results, and has pause, cancel and take-over buttons. Each finished job shows its result inline: open the file, show the window, display the image, or link straight to it.
-- Handing over a window: the user tells the AI to take that window.
-- Phone: urgent notifications only in version 1.
-- **Open — the "front door" (to decide before Phase 1 ships its chat panel):** whether the primary surface is a desktop chat panel, a voice assistant, or both. Phase 1 builds the chat panel either way; voice is additive. This is the next design decision now the engine is proven.
+### 4.9 User interface — the front door (designed 2026-09-15, brainstormed with mockups)
+
+**Firm requirement (his call): the user never needs a terminal.** A terminal is a builder's tool. The product shows what it did in a way a non-Linux user reads at a glance — never a command, a log, or raw shell output. The terminal exists under the hood; the user is never sent to it.
+
+**Interaction: typed chat first.** Voice is a later additive layer, not version 1.
+
+**Surface: a docked side rail**, pinned to one edge of the desktop (default right, adjustable width), always visible. It is the single place the user talks to the AI OS and watches it work. When the AI uses an app, that app opens beside the rail in the main desktop area.
+
+**Results are always shown visually, as cards in the rail. Four card types cover every job:**
+| Card | When | What it shows |
+|---|---|---|
+| **Done** | a job finished | the real result — image preview, the opened file — with Open / Save-where-you-want / Try again. Never just a filename. |
+| **Building** | a job is running | plain-language steps with ticks (✓ wrote the app, ⟳ testing) and a **Watch it work** button that opens the live app window beside the rail, so it is never a black box. |
+| **Watch** | a background/watch job (4.2) | pinned at the top, quietly updating ("checked 2m ago, no change"). |
+| **Needs your OK** | an action hits the risky-actions rule (decision 9) | stops and asks right in the rail — Send / Cancel / Edit. Anything reversible it just does; only "leaves the machine" or "destroys unsaved work" prompts. |
+
+The rail also carries pause, cancel and take-over controls per running job.
+
+**Handing over a window:** the user tells the AI to take a specific open window (decision 8); the AI works it through program controls (4.4 tier 2).
+
+**Phone:** urgent notifications only in version 1 (decision 11).
 
 ---
 
@@ -202,12 +217,12 @@ Each phase gets its own plan and its own approval.
 
 ## 8. Open questions (not blocking the trial)
 
-- The "front door": desktop chat panel, voice, or both (4.9). Next design decision.
 - The minimum hardware for other computers: decided from the evaluation.
 - Product name.
 
 Settled by the audit: undo uses a snapshot disk on both targets (4.8); "urgent" is fixed when a watch job is created (4.2).
 Settled by Phase 0: GNOME over KDE for the WSL edition (5.1); 8k context floor on 8 GB (4.3); accessibility drives apps but free-text typing needs a seat (4.4).
+Settled by the front-door brainstorm (2026-09-15): typed chat first, a docked side rail, four result-card types, no terminal ever (4.9).
 
 ## 9. The honest risk
 
