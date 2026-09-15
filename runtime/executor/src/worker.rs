@@ -1,4 +1,5 @@
 use crate::action::Action;
+use crate::rules::resolves_inside;
 use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
@@ -39,13 +40,12 @@ impl Worker for FakeWorker {
 /// Runs commands as an unprivileged user, scoped to one workspace, no network.
 /// ponytail: shells out to `systemd-run`; a native cgroup/namespace impl only if this proves too slow.
 ///
-/// Path handling for ReadFile/WriteFile mirrors what `rules::classify` assumed when it let the
-/// action through: `Executor::execute` is the only door (see executor.rs) and it calls the worker
-/// only when classify() returned `Auto` or the caller passed `approved: true` for a `NeedsConfirm`.
-/// A `..`-escaping WriteFile is classified `NeedsConfirm`, so `self.workspace.join(path)` here only
-/// ever runs for such a path once a human (or orchestrator) has approved it — this impl does not
-/// need to re-defend against `..` itself. ReadFile is unconditionally `Auto` in classify() today
-/// (no path check at all), which is a pre-existing gap in rules.rs, not introduced here.
+/// Path handling for ReadFile/WriteFile: `rules::classify` gates both the same way — outside the
+/// workspace needs approval from `Executor::execute` (the only door, see executor.rs) before the
+/// worker is ever called. On top of that, this impl re-checks with `resolves_inside` itself
+/// (defense-in-depth): even a caller that passes `approved: true` for an outside-workspace read/write
+/// gets refused here rather than trusted blindly — the sandbox never touches a path outside its
+/// own workspace, full stop.
 pub struct SandboxWorker {
     pub user: String,
     pub workspace: PathBuf,
@@ -74,22 +74,33 @@ impl Worker for SandboxWorker {
                     Ok(o) => Outcome {
                         ok: o.status.success(),
                         detail: format!(
-                            "exit {}; {}",
+                            "exit {}; stdout: {} stderr: {}",
                             o.status.code().unwrap_or(-1),
-                            String::from_utf8_lossy(&o.stdout).chars().take(500).collect::<String>()
+                            String::from_utf8_lossy(&o.stdout).chars().take(500).collect::<String>(),
+                            String::from_utf8_lossy(&o.stderr).chars().take(500).collect::<String>()
                         ),
                     },
                     Err(e) => Outcome { ok: false, detail: format!("spawn failed: {e}") },
                 }
             }
-            Action::ReadFile { path } => match fs::read_to_string(self.workspace.join(path)) {
-                Ok(s) => Outcome { ok: true, detail: s.chars().take(500).collect() },
-                Err(e) => Outcome { ok: false, detail: e.to_string() },
-            },
-            Action::WriteFile { path, contents } => match fs::write(self.workspace.join(path), contents) {
-                Ok(_) => Outcome { ok: true, detail: "written".into() },
-                Err(e) => Outcome { ok: false, detail: e.to_string() },
-            },
+            Action::ReadFile { path } => {
+                if !resolves_inside(path, &self.workspace) {
+                    return Outcome { ok: false, detail: "path escapes workspace".into() };
+                }
+                match fs::read_to_string(self.workspace.join(path)) {
+                    Ok(s) => Outcome { ok: true, detail: s.chars().take(500).collect() },
+                    Err(e) => Outcome { ok: false, detail: e.to_string() },
+                }
+            }
+            Action::WriteFile { path, contents } => {
+                if !resolves_inside(path, &self.workspace) {
+                    return Outcome { ok: false, detail: "path escapes workspace".into() };
+                }
+                match fs::write(self.workspace.join(path), contents) {
+                    Ok(_) => Outcome { ok: true, detail: "written".into() },
+                    Err(e) => Outcome { ok: false, detail: e.to_string() },
+                }
+            }
             _ => Outcome { ok: false, detail: "sandbox has no hand for this action".into() },
         }
     }
@@ -106,5 +117,23 @@ mod tests {
         let out = w.run(&a);
         assert!(out.ok);
         assert_eq!(w.calls.borrow().len(), 1);
+    }
+
+    fn sandbox() -> SandboxWorker {
+        SandboxWorker { user: "ai-sandbox".into(), workspace: PathBuf::from("/data/jobs/j1") }
+    }
+
+    #[test]
+    fn read_file_escaping_workspace_is_refused() {
+        let out = sandbox().run(&Action::ReadFile { path: "../../etc/passwd".into() });
+        assert!(!out.ok);
+        assert_eq!(out.detail, "path escapes workspace");
+    }
+
+    #[test]
+    fn write_file_escaping_workspace_is_refused() {
+        let out = sandbox().run(&Action::WriteFile { path: "/etc/passwd".into(), contents: "x".into() });
+        assert!(!out.ok);
+        assert_eq!(out.detail, "path escapes workspace");
     }
 }

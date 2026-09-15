@@ -11,7 +11,9 @@ pub enum Risk {
 }
 
 /// Resolve a possibly-relative path against the workspace, without touching disk.
-fn resolves_inside(path: &str, workspace: &Path) -> bool {
+/// `pub(crate)`: also used by `worker::SandboxWorker` as a defense-in-depth check
+/// before it touches the filesystem.
+pub(crate) fn resolves_inside(path: &str, workspace: &Path) -> bool {
     let p = Path::new(path);
     let joined: PathBuf = if p.is_absolute() { p.to_path_buf() } else { workspace.join(p) };
     // Reject any `..` escape by normalizing lexically.
@@ -31,7 +33,14 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
     match action {
         // Sandbox-scoped and network-isolated by construction → reversible → Auto.
         Action::RunCommand { .. } => Risk::Auto,
-        Action::ReadFile { .. } => Risk::Auto,
+        // Reading inside the workspace is harmless; outside is a privacy/secrets leak.
+        Action::ReadFile { path } => {
+            if resolves_inside(path, workspace) {
+                Risk::Auto
+            } else {
+                Risk::NeedsConfirm(format!("reads outside the workspace: {path}"))
+            }
+        }
         // Writing inside the workspace is reversible; outside is "destroys work" territory.
         Action::WriteFile { path, .. } => {
             if resolves_inside(path, workspace) {
@@ -60,6 +69,18 @@ mod tests {
     fn write_inside_workspace_is_auto() {
         let a = Action::WriteFile { path: "out.txt".into(), contents: "x".into() };
         assert_eq!(classify(&a, &ws()), Risk::Auto);
+    }
+
+    #[test]
+    fn read_inside_workspace_is_auto() {
+        let a = Action::ReadFile { path: "out.txt".into() };
+        assert_eq!(classify(&a, &ws()), Risk::Auto);
+    }
+
+    #[test]
+    fn read_outside_workspace_needs_confirm() {
+        let a = Action::ReadFile { path: "/etc/passwd".into() };
+        assert!(matches!(classify(&a, &ws()), Risk::NeedsConfirm(_)));
     }
 
     #[test]
