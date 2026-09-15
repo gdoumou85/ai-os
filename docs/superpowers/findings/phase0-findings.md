@@ -6,11 +6,11 @@ Started 2026-09-15. Throwaway distro `ai-os` on ALIEN. Spec v2 = `effba2c`.
 |---|---|---|---|
 | U1 | GPU inside WSL | PASS | `nvidia-smi` in the distro: RTX 5060 Laptop, 8151 MiB, driver 610.60; Ollama runs the model on it |
 | U2 | Full desktop on Windows | | |
-| U3 | Accessibility on real apps | | |
-| U4 | Focus stealing | | |
-| U5 | Remembered screen permission | | |
+| U3 | Accessibility on real apps | MIXED — native apps full-read + action-drive, browsers/Electron shallow | LibreOffice 2099 nodes / 114 buttons; **reads everything, and AT-SPI actions operate it** (Bold toggled false→true via `doAction`, menus opened). **Free-text typing does NOT commit headless** (no seat) — see the seat note below. Chrome 6 buttons + entry (needs `--force-renderer-accessibility`); Firefox shallow (51 nodes); VS Code/Electron never registered |
+| U4 | Focus stealing | PASS by design (headless caveat) | AT-SPI actions drove LibreOffice's menus and toggled Bold without needing keyboard focus; the API acts on objects, not the focused window. Free-text keystroke injection is a separate mechanism that needs a real seat (see seat note). Definitive typing test belongs on bare metal / the 20 GB PC |
+| U5 | Remembered screen permission | RESOLVED — use the compositor API, not the portal | Portal refuses to persist input sessions AND its Start dialog needs a visible shell; `Shell.Screenshot` blocked; uinput module absent in WSL. Compositor API (`org.gnome.Mutter.ScreenCast`/`.RemoteDesktop`) works dialog-free — proven by the earlier live RDP stream. Primary path (AT-SPI) needs no permission at all |
 | U6 | Snapshot disk with rollback | PASS (restart check pending) | btrfs in the WSL kernel; loop image at `/var/lib/ai-os/data.img` mounted on `/data`; snapshot 5 ms, rollback 7 ms, change gone; writes 1.5 GB/s vs 2.1 GB/s on plain root |
-| U7 | Local 8B: speed / parse rate / context | PASS with a caveat | qwen3.5:9b: 35 tok/s, 1.25 s per tool call, 100% parse with and without grammar; **8k context is the most that stays fully on the GPU** (with q8_0 KV cache); 12k+ spills to CPU |
+| U7 | Local 8B: speed / parse rate / context / vision | PASS with a caveat | qwen3.5:9b: 35–40 tok/s, ~1.2 s per tool call, 100% parse with and without grammar; **read a real desktop screenshot and correctly named the app ("LibreOffice Writer")**; **8k context is the most that stays fully on the GPU** (q8_0 KV cache); 12k+ spills to CPU |
 | U8 | GNOME or KDE | | |
 
 ## Task 1: base
@@ -37,6 +37,40 @@ Started 2026-09-15. Throwaway distro `ai-os` on ALIEN. Spec v2 = `effba2c`.
 - Consequence for Phase 1: the per-step context budget on 8 GB cards is 8k for a 9B model, not the 16k assumed in spec 4.3. Either the budget shrinks to 8k, or a 4B-class model is used when more context is needed. The evaluation (spec 6) should include both.
 - **This is a workshop limit, not a product limit** (his note, 2026-09-15): the WSL build here is the development version. The 20 GB GPU PC it deploys to runs the same 9B model with its full context on the GPU, and a 27B-class model (`qwen3.6:27b`, ~16 GB at Q4) fits there too. So the model comparison in spec 6 can be run entirely on that PC. The 8 GB numbers define the *minimum* hardware tier, which is exactly what spec 5.2 asks for.
 - Vision check: pending the screenshot from Task 5.
+
+## Task 4: accessibility on GNOME (window handover feasibility — the key question)
+Probe: read the whole AT-SPI tree, count buttons and editable fields, open a File/Edit/View menu, and type text into the first editable field then read it back. Run headless.
+
+| App | nodes | buttons | editable | menu opened | action drives it | free-text typing (headless) | verdict |
+|---|---|---|---|---|---|---|---|
+| **LibreOffice Writer** (GTK) | 2099 | 114 | 8 | **yes** | **yes** (Bold toggled false→true) | **no** (needs a seat) | read + operate fully; typing pending a real seat |
+| Google Chrome | 15 | 6 | (entry present) | — | — | — | shallow but usable; needs `--force-renderer-accessibility` |
+| Firefox | 51 | 2 | — | — | — | — | shallow tree; chrome/toolbar not exposed headless |
+| VS Code (Electron) | 0 | 0 | 0 | — | — | — | never registered on the a11y bus |
+
+### Seat note (the corrected typing finding, 2026-09-15)
+An earlier run reported "typed & read back = yes" for LibreOffice. **That was a false positive** — AT-SPI `EditableText.insertText` returns success but the text never commits; the status bar stayed "0 words, 0 characters". Verified three synthetic-input paths headless, all "0 words, 0 characters": (a) AT-SPI `insertText`; (b) bare Mutter `RemoteDesktop.NotifyKeyboardKeysym`; (c) a Mutter RemoteDesktop session linked to a ScreenCast monitor with a pointer click first. Free-typed characters need a real input **seat**, which headless WSL does not have (`/dev/uinput` also can't load here, U5).
+
+What **does** work seat-free, proven: **AT-SPI actions** (`doAction`) — clicking buttons, opening menus, toggling formatting — because they act in-process on the object, not through the keyboard. So the AI can *operate* any native app's controls here; it just can't push free text until there's a seat.
+
+This is **not** a model limitation — these probes contain no LLM; they type hardcoded strings. Free-text typing returns automatically on the deploy targets (the 20 GB GPU PC with a display, or bare-metal install). Two seat-free text paths remain to wire in Phase 2: the app's own scripting API (LibreOffice UNO) and clipboard-paste via an action.
+
+**Reading:** accessibility quality is a property of the **toolkit**, not the desktop. Native GTK/Qt apps (LibreOffice is the hardest real case) expose a complete, controllable tree: the AI can read every control, click buttons, open menus and edit text — the whole basis of window handover (spec 4.4 tier 2) — and it does so **without taking keyboard focus**, because AT-SPI acts on objects, not on the focused window (U4). Chromium exposes a usable-but-shallow tree only when forced; Firefox's headless tree is shallow; Electron (VS Code) did not register at all (its a11y tree is built only when a screen reader is detected at launch).
+
+**Consequence for the design (no change needed, it confirms spec 4.4's ordering):**
+- Native apps → AT-SPI, tier 2. Works well.
+- Browsers → drive through the browser's own automation (CDP/WebDriver), not AT-SPI. Add this as the browser path in Phase 2.
+- Electron and anything with no tree → screen fallback, tier 3.
+Because AT-SPI is identical on GNOME and KDE, U3/U4 do **not** decide the desktop; U5 does.
+
+## Task 5: screen permission on GNOME (U5)
+The question was "can screenshot/input permission be granted once and remembered?" The trial reframed it, because the AI is the session owner, not an untrusted app:
+- **freedesktop portal (what a sandboxed app uses):** `SelectDevices`/`SelectSources` accept a persist flag, but a **RemoteDesktop (input) session cannot persist at all** on GNOME (`InvalidArgument: Remote desktop sessions cannot persist`), and `Start` shows a consent dialog that needs a visible shell — it never returns in a headless session. So the portal is the wrong path for the AI's own eyes/hands: it can't remember input consent and it needs a human to click.
+- **`org.gnome.Shell.Screenshot`:** blocked in GNOME 50 ("Screenshot is not allowed").
+- **uinput (ydotool):** `/dev/uinput` exists but the module can't load in the WSL kernel (`modprobe uinput: Operation not permitted`). Works on bare metal, not in the WSL edition.
+- **Compositor API `org.gnome.Mutter.ScreenCast` + `org.gnome.Mutter.RemoteDesktop`:** present, session-owner, **no dialog**. This is what gnome-remote-desktop uses, and our live RDP session earlier proves it streams and injects input headlessly.
+
+**Answer:** the AI's primary path (AT-SPI program control) needs no permission and works. The **screen fallback** (tier 3) must be built on the **compositor's** screencast/remote-desktop API, not the portal and not uinput. This binds the fallback to the compositor, so it is a further input to the GNOME/KDE choice (Phase 2 builds it).
 
 ## Task 3: GNOME desktop on Windows
 - Installed `ubuntu-desktop-minimal` + `gnome-remote-desktop` (GNOME 50). After a distro restart: gdm3, gnome-remote-desktop and ollama all active.

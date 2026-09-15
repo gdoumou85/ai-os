@@ -91,7 +91,8 @@ apps() {
 }
 
 kde() {
-  apt-get install -y kde-plasma-desktop plasma-workspace-wayland xdg-desktop-portal-kde konsole kate
+  # Plasma 6: the Wayland session is in kwin-wayland + plasma-workspace, not a separate -wayland pkg
+  apt-get install -y kde-plasma-desktop kwin-wayland plasma-workspace xdg-desktop-portal-kde konsole kate
 }
 
 snapshot() {

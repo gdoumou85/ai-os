@@ -22,6 +22,17 @@ export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME
 export GNOME_ACCESSIBILITY=1 ACCESSIBILITY_ENABLED=1 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
 EOF
 gsettings set org.gnome.desktop.interface toolkit-accessibility true
+# the portal services are activated by the user manager and must know this is a GNOME Wayland session,
+# otherwise xdg-desktop-portal loads no backend and RemoteDesktop/ScreenCast are missing
+systemctl --user set-environment XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=$display GNOME_ACCESSIBILITY=1
+dbus-update-activation-environment --systemd XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=$display
+# xdg-desktop-portal-gnome is PartOf=graphical-session.target, which only a real gnome-session raises;
+# for the trial, allow raising it by hand (the product runs a proper session and will not need this)
+mkdir -p ~/.config/systemd/user/graphical-session.target.d
+printf '[Unit]\nRefuseManualStart=no\n' > ~/.config/systemd/user/graphical-session.target.d/manual.conf
+systemctl --user daemon-reload
+systemctl --user start graphical-session.target
+systemctl --user restart xdg-desktop-portal-gnome xdg-desktop-portal 2>/dev/null || true
 systemctl --user is-active ai-headless-shell.service
 echo "WAYLAND_DISPLAY=$display"
 busctl --user list | grep -E 'org.a11y|org.gnome.Mutter.RemoteDesktop|org.gnome.Mutter.ScreenCast|org.gnome.Shell.Screenshot' || true

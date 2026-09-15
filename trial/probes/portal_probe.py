@@ -45,22 +45,19 @@ def call(iface, method, sig, args, opts):
     return got["res"]
 
 
-restore = open(TOKEN_FILE).read().strip() if os.path.exists(TOKEN_FILE) else None
-result["dialog_expected"] = restore is None
+# A RemoteDesktop (input-injection) session on GNOME cannot persist; persist is a ScreenCast-only
+# feature. So this probe just proves input + capture work through the portal once; the "is the
+# permission remembered" question for capture is answered by screencast_persist.py.
+result["dialog_expected"] = True
 
 res = call(RD, "CreateSession", "(a{sv})", (), {"session_handle_token": GLib.Variant("s", f"s{int(time.time())}")})
 session = res["session_handle"]
-dev_opts = {"types": GLib.Variant("u", 7), "persist_mode": GLib.Variant("u", 2)}
-src_opts = {"types": GLib.Variant("u", 1), "persist_mode": GLib.Variant("u", 2)}
-if restore:
-    dev_opts["restore_token"] = src_opts["restore_token"] = GLib.Variant("s", restore)
+dev_opts = {"types": GLib.Variant("u", 7), "persist_mode": GLib.Variant("u", 0)}
+src_opts = {"types": GLib.Variant("u", 1), "persist_mode": GLib.Variant("u", 0)}
 call(RD, "SelectDevices", "(oa{sv})", (session,), dev_opts)
 call(SC, "SelectSources", "(oa{sv})", (session,), src_opts)
 res = call(RD, "Start", "(osa{sv})", (session, ""), {})
-token = res.get("restore_token")
-result["restore_token_saved"] = bool(token)
-if token:
-    open(TOKEN_FILE, "w").write(token)
+result["restore_token_saved"] = False  # not applicable to an input session on GNOME
 streams = res.get("streams", [])
 result["stream_started"] = len(streams) > 0
 
