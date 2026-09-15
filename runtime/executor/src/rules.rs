@@ -31,7 +31,11 @@ pub(crate) fn resolves_inside(path: &str, workspace: &Path) -> bool {
 
 pub fn classify(action: &Action, workspace: &Path) -> Risk {
     match action {
-        // Sandbox-scoped and network-isolated by construction → reversible → Auto.
+        // Auto because it's unprivileged and network-isolated (cannot exfiltrate), BUT it is
+        // not yet filesystem-confined to the workspace — an unprivileged, cwd-locked,
+        // no-network, ProtectHome sandbox can still read/write ai-sandbox-accessible files
+        // outside the workspace (e.g. `cat /etc/passwd`). Confining it (mount namespace /
+        // InaccessiblePaths) is a prerequisite before the model/secrets phase.
         Action::RunCommand { .. } => Risk::Auto,
         // Reading inside the workspace is harmless; outside is a privacy/secrets leak.
         Action::ReadFile { path } => {

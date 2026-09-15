@@ -22,6 +22,10 @@ impl<W: Worker> Executor<W> {
     }
 
     /// The one door. Classify, refuse unconfirmed risky actions, run the rest, log everything.
+    ///
+    /// Invariant: an executed action is never lost — a logging failure is reported to
+    /// stderr but the outcome is still returned; only the blocked path may fail on
+    /// logging since nothing ran.
     pub fn execute(&self, job_id: &str, action: &Action, approved: bool) -> Result<ExecOutcome, LogError> {
         match classify(action, &self.workspace) {
             Risk::NeedsConfirm(reason) if !approved => {
@@ -31,7 +35,10 @@ impl<W: Worker> Executor<W> {
             _ => {
                 let outcome = self.worker.run(action);
                 let tag = if outcome.ok { "ok" } else { "error" };
-                self.log.append(job_id, action, &format!("{tag}: {}", outcome.detail))?;
+                // ponytail: log-failure branch is not unit-tested (needs failure-injection infra; out of scope this wave).
+                if let Err(e) = self.log.append(job_id, action, &format!("{tag}: {}", outcome.detail)) {
+                    eprintln!("executor: failed to log action outcome: {e}");
+                }
                 Ok(ExecOutcome::Ran(outcome))
             }
         }
