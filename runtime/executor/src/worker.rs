@@ -44,11 +44,26 @@ impl Worker for FakeWorker {
 /// workspace needs approval from `Executor::execute` (the only door, see executor.rs) before the
 /// worker is ever called. On top of that, this impl re-checks with `resolves_inside` itself
 /// (defense-in-depth): even a caller that passes `approved: true` for an outside-workspace read/write
-/// gets refused here rather than trusted blindly — the sandbox never touches a path outside its
-/// own workspace, full stop.
+/// gets refused here rather than trusted blindly.
+///
+/// `resolves_inside` is a cheap early reject, but it's purely lexical — it can't see that an
+/// in-workspace path component is a symlink pointing outside (e.g. a sandboxed `RunCommand` plants
+/// `ln -s /etc/shadow leak`, then `ReadFile{path:"leak"}` is lexically inside but would follow the
+/// link). The real guard is `fs::canonicalize`, done right before the fs op: it resolves symlinks
+/// and `..`, and only then is the result checked against the canonicalized workspace. With that,
+/// the sandbox never touches a path outside its own workspace, full stop.
 pub struct SandboxWorker {
     pub user: String,
     pub workspace: PathBuf,
+}
+
+impl SandboxWorker {
+    /// Canonicalize the workspace itself once per call, as an `Outcome`-shaped error so call
+    /// sites can just `?`-style propagate it with `match ... { Err(out) => return out }`.
+    fn canonical_workspace(&self) -> Result<PathBuf, Outcome> {
+        fs::canonicalize(&self.workspace)
+            .map_err(|e| Outcome { ok: false, detail: format!("cannot resolve workspace: {e}") })
+    }
 }
 
 impl Worker for SandboxWorker {
@@ -87,7 +102,20 @@ impl Worker for SandboxWorker {
                 if !resolves_inside(path, &self.workspace) {
                     return Outcome { ok: false, detail: "path escapes workspace".into() };
                 }
-                match fs::read_to_string(self.workspace.join(path)) {
+                let ws_canon = match self.canonical_workspace() {
+                    Ok(p) => p,
+                    Err(out) => return out,
+                };
+                // The target must exist to be read, so canonicalize it directly — this resolves
+                // any symlink in the path (including the final component) before we check it.
+                let target_canon = match fs::canonicalize(self.workspace.join(path)) {
+                    Ok(p) => p,
+                    Err(_) => return Outcome { ok: false, detail: "cannot resolve path".into() },
+                };
+                if !target_canon.starts_with(&ws_canon) {
+                    return Outcome { ok: false, detail: "path escapes workspace".into() };
+                }
+                match fs::read_to_string(target_canon) {
                     Ok(s) => Outcome { ok: true, detail: s.chars().take(500).collect() },
                     Err(e) => Outcome { ok: false, detail: e.to_string() },
                 }
@@ -96,7 +124,31 @@ impl Worker for SandboxWorker {
                 if !resolves_inside(path, &self.workspace) {
                     return Outcome { ok: false, detail: "path escapes workspace".into() };
                 }
-                match fs::write(self.workspace.join(path), contents) {
+                let ws_canon = match self.canonical_workspace() {
+                    Ok(p) => p,
+                    Err(out) => return out,
+                };
+                let target = self.workspace.join(path);
+                // A file that doesn't exist yet can't be canonicalized, so canonicalize its
+                // parent instead (catches a symlinked parent dir) and keep the file's own plain
+                // name from the (already lexically-checked) target — file_name() rejects "..",
+                // "." and anything that isn't a single normal component.
+                let file_name = match target.file_name() {
+                    Some(n) => n,
+                    None => return Outcome { ok: false, detail: "invalid file name".into() },
+                };
+                let parent = match target.parent() {
+                    Some(p) => p,
+                    None => return Outcome { ok: false, detail: "invalid file name".into() },
+                };
+                let parent_canon = match fs::canonicalize(parent) {
+                    Ok(p) => p,
+                    Err(_) => return Outcome { ok: false, detail: "cannot resolve path".into() },
+                };
+                if !parent_canon.starts_with(&ws_canon) {
+                    return Outcome { ok: false, detail: "path escapes workspace".into() };
+                }
+                match fs::write(parent_canon.join(file_name), contents) {
                     Ok(_) => Outcome { ok: true, detail: "written".into() },
                     Err(e) => Outcome { ok: false, detail: e.to_string() },
                 }
