@@ -103,6 +103,7 @@ It is never reduced to a chatbot, a command launcher, or a fixed list of workflo
 - The model's tool calls are forced through a grammar (JSON schema) so they always parse. Small models otherwise emit a broken call every few percent of steps, which is enough to wreck a long job.
 - A bigger model on another machine (pc-worker, 20 GB) is a "remote local" option: private, same switch as cloud, and the cheapest way to prove that a better model gives better results.
 - Cloud is a switch per job (decision 6). It is never a silent fallback.
+- **Future (his idea, 2026-09-15) — free-cloud model pool with failover:** when the user has cloud switched on, the AI can draw from a maintained list of free-tier cloud models and **rotate to the next when one runs out of quota**, so a job on cloud does not stall on a single provider's limit. This is a routing layer over the runner, the same shape as existing LLM-gateway/fallback-chain projects; it changes nothing about the per-job cloud switch or "the model never sees a secret" (the executor holds the keys and picks the provider). Not in the near-term phases; noted so the model layer is built to allow a swappable provider list.
 
 ### 4.4 Hands and senses (the basic abilities)
 Tried in this order, most dependable first:
