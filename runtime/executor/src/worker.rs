@@ -49,8 +49,12 @@ impl Worker for FakeWorker {
 /// `resolves_inside` is a cheap early reject, but it's purely lexical — it can't see that an
 /// in-workspace path component is a symlink pointing outside (e.g. a sandboxed `RunCommand` plants
 /// `ln -s /etc/shadow leak`, then `ReadFile{path:"leak"}` is lexically inside but would follow the
-/// link). The real guard is `fs::canonicalize`, done right before the fs op: it resolves symlinks
-/// and `..`, and only then is the result checked against the canonicalized workspace. With that,
+/// link). The real guard runs right before each fs op: `ReadFile` fully canonicalizes the target
+/// (it must already exist, so this resolves every symlink in the path, leaf included) and checks
+/// it against the canonicalized workspace. `WriteFile` can't canonicalize a target that may not
+/// exist yet, so it canonicalizes the *parent* instead (catching a symlinked parent dir) and then,
+/// separately, refuses outright if the leaf itself already exists as a symlink — otherwise
+/// `fs::write` would still follow it out of the workspace even with a checked parent. With both,
 /// the sandbox never touches a path outside its own workspace, full stop.
 pub struct SandboxWorker {
     pub user: String,
@@ -108,6 +112,10 @@ impl Worker for SandboxWorker {
                 };
                 // The target must exist to be read, so canonicalize it directly — this resolves
                 // any symlink in the path (including the final component) before we check it.
+                // ponytail: TOCTOU window between this check and the read below — a swap of the
+                // (now-plain) target back into a symlink in between would slip through. Acceptable
+                // for now since the interface runs one action at a time; revisit if concurrent
+                // access to the same workspace is ever added.
                 let target_canon = match fs::canonicalize(self.workspace.join(path)) {
                     Ok(p) => p,
                     Err(_) => return Outcome { ok: false, detail: "cannot resolve path".into() },
@@ -148,7 +156,24 @@ impl Worker for SandboxWorker {
                 if !parent_canon.starts_with(&ws_canon) {
                     return Outcome { ok: false, detail: "path escapes workspace".into() };
                 }
-                match fs::write(parent_canon.join(file_name), contents) {
+                // The parent check alone isn't enough: if the leaf itself already exists as a
+                // symlink, `fs::write` opens without O_NOFOLLOW and happily follows it out of the
+                // workspace. `symlink_metadata` (unlike `metadata`/`canonicalize`) does not follow
+                // the final component, so this sees the link itself rather than what it points to.
+                // ponytail: TOCTOU window between this check and the write below — swapping a
+                // plain file for a symlink in between would slip through. Acceptable for now since
+                // the interface runs one action at a time; revisit if concurrent workspace access
+                // is ever added.
+                let leaf = parent_canon.join(file_name);
+                match fs::symlink_metadata(&leaf) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Outcome { ok: false, detail: "refusing to write through a symlink".into() };
+                    }
+                    Ok(_) => {}                                    // exists, plain file: fine to overwrite
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // doesn't exist yet: fine to create
+                    Err(e) => return Outcome { ok: false, detail: e.to_string() },
+                }
+                match fs::write(&leaf, contents) {
                     Ok(_) => Outcome { ok: true, detail: "written".into() },
                     Err(e) => Outcome { ok: false, detail: e.to_string() },
                 }

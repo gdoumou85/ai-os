@@ -43,9 +43,44 @@ fn symlink_escaping_workspace_is_refused_on_read() {
     // points at a world-readable file outside it (/etc/hostname — readable by anyone, so a
     // refusal below can only be our own workspace guard, not a permissions error).
     let plant = w.run(&Action::RunCommand {
-        argv: vec!["ln".into(), "-s".into(), "/etc/hostname".into(), "leak".into()],
+        argv: vec!["ln".into(), "-sf".into(), "/etc/hostname".into(), "leak".into()],
     });
     assert!(plant.ok, "failed to plant the symlink: {}", plant.detail);
     let out = w.run(&Action::ReadFile { path: "leak".into() });
     assert!(!out.ok, "a symlink out of the workspace must be refused, not followed: {}", out.detail);
+}
+
+#[test]
+fn symlink_escaping_workspace_is_refused_on_write() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let ws = PathBuf::from("/data/jobs/it4");
+    std::fs::create_dir_all(&ws).unwrap();
+    assert!(std::process::Command::new("chgrp").arg("ai-sandbox").arg(&ws).status().unwrap().success());
+    assert!(std::process::Command::new("chmod").arg("0770").arg(&ws).status().unwrap().success());
+
+    // A pre-populated, world-writable target outside the workspace: if the write below slipped
+    // through the symlink, it would land here, and the assertion at the end is unambiguous either
+    // way (not a permissions error masking the result).
+    let outside = PathBuf::from("/tmp/ai-os-it4-outside-target");
+    std::fs::write(&outside, "original").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o666)).unwrap();
+    }
+
+    let w = SandboxWorker { user: "ai-sandbox".into(), workspace: ws };
+    // Sandboxed command plants a symlink whose leaf ("leak") is lexically inside the workspace
+    // but already exists as a link to something outside it.
+    let plant = w.run(&Action::RunCommand {
+        argv: vec!["ln".into(), "-sf".into(), outside.display().to_string(), "leak".into()],
+    });
+    assert!(plant.ok, "failed to plant the symlink: {}", plant.detail);
+
+    let out = w.run(&Action::WriteFile { path: "leak".into(), contents: "pwned".into() });
+    assert!(!out.ok, "a write through a symlink leaf must be refused, not followed: {}", out.detail);
+
+    let contents = std::fs::read_to_string(&outside).unwrap();
+    assert_eq!(contents, "original", "outside target must be untouched by the refused write");
+
+    let _ = std::fs::remove_file(&outside);
 }
