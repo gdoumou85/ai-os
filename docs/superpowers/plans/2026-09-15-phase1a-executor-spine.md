@@ -56,21 +56,18 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "1"
 ```
 
-- [ ] **Step 3: Create the lib root with the module list**
+- [ ] **Step 3: Create the lib root (empty — each later task adds its own `pub mod` line)**
 
 `runtime/executor/src/lib.rs`:
 ```rust
-pub mod action;
-pub mod rules;
-pub mod log;
-pub mod worker;
-pub mod executor;
+//! The executor: the single safe door every AI action goes through.
+//! Modules are declared by the task that creates each one (action, rules, log, worker, executor).
 ```
 
 - [ ] **Step 4: Verify it compiles**
 
 Run: `cd runtime && cargo build`
-Expected: FAIL — the modules do not exist yet ("file not found for module `action`"). This confirms the module wiring; the next tasks create each file.
+Expected: PASS — an empty library crate compiles. (Each subsequent task adds its module file *and* the matching `pub mod` line to `lib.rs`, so the crate compiles after every task.)
 
 - [ ] **Step 5: Commit**
 
@@ -85,6 +82,7 @@ git commit -m "feat(executor): workspace + crate skeleton"
 
 **Files:**
 - Create: `runtime/executor/src/action.rs`
+- Modify: `runtime/executor/src/lib.rs` — add the line `pub mod action;`
 
 **Interfaces:**
 - Produces: `enum Action` with serde JSON (de)serialization. Variants for the spine: `RunCommand { argv: Vec<String> }`, `ReadFile { path: String }`, `WriteFile { path: String, contents: String }` (workspace-scoped by classification), and one that leaves the machine to prove the rule: `HttpPost { url: String, body: String }`.
@@ -142,6 +140,7 @@ git commit -m "feat(executor): Action type with tagged JSON"
 
 **Files:**
 - Create: `runtime/executor/src/rules.rs`
+- Modify: `runtime/executor/src/lib.rs` — add the line `pub mod rules;`
 - Test: same file, `#[cfg(test)]`
 
 **Interfaces:**
@@ -254,6 +253,7 @@ git commit -m "feat(executor): risky-action classification (decision 9)"
 
 **Files:**
 - Create: `runtime/executor/src/log.rs`
+- Modify: `runtime/executor/src/lib.rs` — add the line `pub mod log;`
 
 **Interfaces:**
 - Consumes: `Action` (Task 2).
@@ -366,6 +366,7 @@ git commit -m "feat(executor): SQLite action log"
 
 **Files:**
 - Create: `runtime/executor/src/worker.rs`
+- Modify: `runtime/executor/src/lib.rs` — add the line `pub mod worker;`
 
 **Interfaces:**
 - Consumes: `Action` (Task 2).
@@ -443,6 +444,7 @@ git commit -m "feat(executor): Worker trait + FakeWorker"
 
 **Files:**
 - Create: `runtime/executor/src/executor.rs`
+- Modify: `runtime/executor/src/lib.rs` — add the line `pub mod executor;`
 
 **Interfaces:**
 - Consumes: `Action` (2), `classify`/`Risk` (3), `ActionLog` (4), `Worker`/`Outcome` (5).
