@@ -1,7 +1,7 @@
 # AI OS — Design
 
 **Date:** 2026-09-15
-**Status:** Design for review, version 2 after the engineering audit. Nothing is built or installed.
+**Status:** Version 3 — Phase 0 trial complete, findings folded in. The design held up; the changes below are corrections to measured numbers and one new requirement, not a redesign. Findings: `../findings/phase0-findings.md`. Nothing beyond the throwaway trial distro is built.
 
 ---
 
@@ -99,7 +99,7 @@ It is never reduced to a chatbot, a command launcher, or a fixed list of workflo
 
 ### 4.3 Model layer
 - A model runner (llama.cpp or Ollama class) loads model files and runs them on the GPU. It makes no decisions; it is an engine part. The product uses the runner's Vulkan build as the fallback so AMD and Intel GPUs work; NVIDIA is not assumed.
-- One multimodal model is loaded (decision 13). On 8 GB an 8B model leaves room for roughly 16k tokens of context, so every step gets a fixed budget: job state, the searched ability entries, and the latest evidence must fit. This is why the ability map is searched, never read whole.
+- One multimodal model is loaded (decision 13). **Measured in Phase 0:** on 8 GB, a 9B model keeps **8k tokens** fully on the GPU (with a q8_0 KV cache + flash attention), not the 16k first assumed — 12k+ spills to the CPU and slows the loop. So the per-step budget on the 8 GB workshop tier is 8k: job state, the searched ability entries, and the latest evidence must fit. This is why the ability map is searched, never read whole. The 20 GB deploy target runs the same model at full context and fits a 27B-class model too, so the tight budget is a minimum-hardware floor, not a design limit.
 - The model's tool calls are forced through a grammar (JSON schema) so they always parse. Small models otherwise emit a broken call every few percent of steps, which is enough to wreck a long job.
 - A bigger model on another machine (pc-worker, 20 GB) is a "remote local" option: private, same switch as cloud, and the cheapest way to prove that a better model gives better results.
 - Cloud is a switch per job (decision 6). It is never a silent fallback.
@@ -107,8 +107,10 @@ It is never reduced to a chatbot, a command launcher, or a fixed list of workflo
 ### 4.4 Hands and senses (the basic abilities)
 Tried in this order, most dependable first:
 1. **Direct:** commands, files, system services, program command lines and APIs.
-2. **Program controls:** the accessibility layer, which exposes buttons, fields, menus and text. This is how window handover works (decision 8).
-3. **Screen:** screenshot plus a pixel click. Only a fallback, and it is clearly shown to the user while it happens. On Wayland (the only option on GNOME in 26.04) this goes through the desktop's permission system, so the consent must be granted once and remembered; if the desktop cannot remember it, this path is asked for per session.
+2. **Program controls:** the accessibility layer, which exposes buttons, fields, menus and text. This is how window handover works (decision 8). **Phase 0 split this into two mechanisms that behave differently:**
+   - **Reading and operating controls** (clicking buttons, opening menus, toggling settings) works through accessibility *actions*, which run in-process and need no input device. Proven headless: the AI read a full LibreOffice tree and toggled its Bold button. This is the dependable core of handover.
+   - **Typing free text** into a field is separate: it needs a real input *seat* (a live display with keyboard). Headless WSL has none, so free-typing did not commit there. It works on any real display — the 20 GB PC or bare metal. Two seat-free text routes are built in Phase 2 as the workshop path and as belt-and-braces everywhere: the program's own scripting API (e.g. LibreOffice UNO) and clipboard-paste via an action.
+3. **Screen:** screenshot plus a pixel click. Only a fallback, and it is clearly shown to the user while it happens. **Phase 0 finding:** on Wayland this must use the **compositor's own screencast/remote-desktop API** (GNOME's Mutter, KDE's KWin), not the freedesktop portal — the portal cannot remember input consent and needs a human to click its dialog, while the compositor API serves the session owner with no dialog. Screen capture through it is proven (a real screenshot was produced and the model read it). The AI's primary path (accessibility) needs no permission at all.
 
 Other abilities: web browsing, installing and removing software, desktop notifications, Telegram messages to the user.
 
@@ -138,9 +140,11 @@ Other abilities: web browsing, installing and removing software, desktop notific
 - **Limit:** unsaved work inside an open program cannot be snapshotted. Decision 9 covers this: the AI asks before closing or discarding a window with unsaved work.
 
 ### 4.9 User interface
-- A chat panel on the desktop, always available. It shows running jobs, progress and results, and has pause, cancel and take-over buttons.
+- **Firm requirement (his call, 2026-09-15): the user never needs a terminal.** A terminal is a builder's tool; the product must show what it did in a way a non-Linux user reads at a glance. Results are presented *visually* — the finished file opened, the app window shown, the image displayed, a short plain-language summary with a "show me" that opens the actual result — never as raw terminal output. The terminal exists under the hood; the user is never sent to it.
+- A chat panel on the desktop, always available. It shows running jobs, progress and results, and has pause, cancel and take-over buttons. Each finished job shows its result inline: open the file, show the window, display the image, or link straight to it.
 - Handing over a window: the user tells the AI to take that window.
 - Phone: urgent notifications only in version 1.
+- **Open — the "front door" (to decide before Phase 1 ships its chat panel):** whether the primary surface is a desktop chat panel, a voice assistant, or both. Phase 1 builds the chat panel either way; voice is additive. This is the next design decision now the engine is proven.
 
 ---
 
@@ -149,10 +153,11 @@ Other abilities: web browsing, installing and removing software, desktop notific
 ### 5.1 The workshop (this laptop)
 - **Machine:** ALIEN, with an Intel Core 7 240H (16 threads), 32 GB RAM, an RTX 5060 Laptop GPU with 8 GB, and 376 GB free disk.
 - **WSL2 limits:** 20 GB RAM, 12 threads, disk capped at 100 GB (his call, 2026-09-15: the C: drive must keep its headroom). Everything lives in one folder, `C:\WSL\ai-os\`.
-- **Base:** the newest Ubuntu LTS (26.04). Fall back to 24.04 if the trial finds the WSL image or GPU support not ready. Note: 26.04's GNOME has no X11 session at all, so the screen fallback must work through Wayland's permission system; KDE still offers X11, which counts in its favour if GNOME's permissions cannot be remembered.
-- **Trial limits:** the desktop shown through Remote Desktop is a headless session with no real input devices, so permission dialogs and handover may behave a little differently from bare metal. Also, Windows App Control is enforced on this laptop; WSL and Remote Desktop are Microsoft-signed and should pass, but the trial confirms it.
+- **Base:** the newest Ubuntu LTS (26.04), confirmed working in Phase 0. 26.04's GNOME is Wayland-only (no X11 session), which is why the screen fallback uses the compositor API (4.4 tier 3).
+- **Desktop choice (Phase 0 decision): GNOME.** It is proven end-to-end in this environment — headless shell renders apps, accessibility reads and drives them, the compositor screencast produced a real screenshot. KDE is the candidate to revisit on bare metal: its `KWin.ScreenShot2` is a cleaner, dialog-free capture, but a bare KDE compositor is not a full session, so apps did not render in the WSL workshop. The choice is reversible — accessibility, the primary path, is identical on both.
+- **Trial limits (measured, not guessed):** the workshop runs a **headless, invisible** session — no Remote Desktop, no screen shown on Windows (his call, 2026-09-15). It has no real input seat, so free-text typing does not commit here (4.4 tier 2); everything else — reading and operating apps, capture, the model, snapshot — works. Windows App Control is enforced on this laptop; WSL passed.
 - **Setup:** everything is installed by one setup script, never by hand.
-- **Desktop:** WSL normally shows single Linux apps as Windows windows, not a whole desktop. The workshop runs a full Linux desktop and shows it on Windows through a Remote Desktop window.
+- **Seeing an app when needed:** WSL shows any single Linux window as a normal Windows window through WSLg. The AI's own work runs in the invisible session; nothing is displayed unless the user asks to see a specific window. Bare metal has a real screen and none of this applies.
 - **Removal:** unregister the distro, switch WSL off, delete the folder.
 - **User step needed:** installing WSL needs admin rights and a reboot.
 
@@ -184,7 +189,7 @@ Each phase gets its own plan and its own approval.
 
 | Phase | What | Output |
 |---|---|---|
-| **0. Trial** (throwaway) | Answer the unknowns: GPU inside WSL; a full desktop on Windows; accessibility quality in GNOME vs KDE on real apps (Firefox, LibreOffice, VS Code, Chromium), including whether working a window steals the user's keyboard focus; whether Wayland's screenshot and input permission can be granted once and remembered; a snapshot disk mounted into WSL with rollback proven; one multimodal 8B model measured for speed per step, tool-call parse rate with a grammar, and how much context fits | A findings report and the GNOME/KDE choice |
+| **0. Trial** (throwaway) — **DONE 2026-09-15** | Answered the unknowns: GPU inside WSL ✓; accessibility reads + operates native apps ✓ (typing needs a real seat); screen fallback via the compositor API ✓; snapshot disk with rollback ✓; a 9B multimodal model at 35–40 tok/s, 100% grammar-forced parse, 8k context on 8 GB ✓; desktop = GNOME. Full-desktop-on-Windows dropped as not needed | `../findings/phase0-findings.md`; desktop = GNOME |
 | 1. Foundation | Core loop, executor, direct abilities, undo, chat panel | It can do system jobs and prove them |
 | 2. Handover | Program controls (accessibility) plus the screen fallback | It can work a window the user hands it |
 | 3. Skills | Ability map, skills library, learning new skills | It improves on repeated jobs |
@@ -197,11 +202,12 @@ Each phase gets its own plan and its own approval.
 
 ## 8. Open questions (not blocking the trial)
 
-- GNOME or KDE: the trial decides, based on how well real apps expose their controls and whether screen permissions can be remembered.
+- The "front door": desktop chat panel, voice, or both (4.9). Next design decision.
 - The minimum hardware for other computers: decided from the evaluation.
 - Product name.
 
 Settled by the audit: undo uses a snapshot disk on both targets (4.8); "urgent" is fixed when a watch job is created (4.2).
+Settled by Phase 0: GNOME over KDE for the WSL edition (5.1); 8k context floor on 8 GB (4.3); accessibility drives apps but free-text typing needs a seat (4.4).
 
 ## 9. The honest risk
 
