@@ -162,6 +162,17 @@ The rail also carries pause, cancel and take-over controls per running job.
 
 **Phone:** urgent notifications only in version 1 (decision 11).
 
+### 4.10 Implementation stack (decided 2026-09-15)
+
+The runtime is **system software that ships to machines we do not control**, so the stack is chosen for safe, self-contained distribution, not for familiarity. The actual model inference runs in the runner (llama.cpp/Ollama) as a separate process reached over HTTP, so the runtime language does no ML itself — it orchestrates the OS.
+
+- **Language: Rust** for the whole shippable runtime — the core loop, the executor and its workers, the job manager, the daemon, and the chat rail (native GTK4, matching the GNOME choice). Chosen for: one self-contained binary (no interpreter or dependency hell on a stranger's machine), memory safety with no GC for the privileged executor that holds admin rights and secrets, low footprint for a long-running service, and first-class Linux integration (D-Bus via zbus, Wayland, GTK4).
+- **Python is confined to the offline fine-tuning tooling (Phase 6)**, which never ships as part of the runtime.
+- **Sandbox isolation:** a separate Linux user plus `systemd-run` scoped limits (proven available in Phase 0), not Docker — lighter and already present on the base.
+- **Action protocol:** the model emits JSON actions against a fixed schema, grammar-forced (decision 13); the executor is a dispatcher that matches each action to a coded handler. No shell strings are ever executed.
+- **State store: SQLite** — one file, survives restarts and model swaps (4.1), no server to run.
+- **Model runner:** llama.cpp/Ollama class, talked to over HTTP; its Vulkan build is the cross-GPU fallback (4.3).
+
 ---
 
 ## 5. Where it runs
