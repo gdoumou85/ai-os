@@ -63,8 +63,10 @@ $A remove-dir /data/housekeeping/keep-t1c
 # not become a folder the sandbox user can then fill on its own.
 echo x | $A write-file /etc/ai-os-t1c/x >/dev/null 2>&1
 [ "$(stat -c %U /etc/ai-os-t1c 2>&1)" = root ] && ok "new /etc dir stays root's" || bad "new /etc dir owner: $(stat -c %U:%G /etc/ai-os-t1c 2>&1)"
-# The file goes; the empty directory stays, on purpose — nothing in the menu removes a directory
-# outside /data and /home/ai, which is the same boundary this check is about.
+# The file goes; the empty directory stays — nothing in the menu removes a directory outside
+# /data and /home/ai, which is the same boundary this check is about. `trial/setup-admin.sh`
+# rmdir's it at the start, so a reinstall-then-test run really creates it again; without that
+# step this check would be asserting about a directory that was already there.
 $A remove-file /etc/ai-os-t1c/x
 [ "$($A sandbox-run --net=none --cwd=/data/housekeeping -- id -un)" = ai-sandbox ] && ok "sandbox-run uid" || bad "sandbox-run uid"
 $A sandbox-run --net=none --cwd=/data/housekeeping -- getent hosts example.com >/dev/null 2>&1 && bad "net=none leaks" || ok "net=none blocked"

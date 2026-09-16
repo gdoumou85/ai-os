@@ -2,6 +2,11 @@
 # Phase 1c admin setup. Run as root inside the ai-os distro. Idempotent.
 set -euo pipefail
 repo=${AI_OS_REPO:-/mnt/c/Users/gdoum/Desktop/projects/ai-os}
+# test-admin.sh's "new /etc dir stays root's" check leaves an empty /etc/ai-os-t1c behind:
+# nothing in the wrapper's menu removes a directory outside /data and /home/ai, which is the
+# boundary that check is about. Clear it here so a reinstall-then-test run really exercises the
+# case again instead of asserting about a directory that was already there.
+rmdir /etc/ai-os-t1c 2>/dev/null || true
 apt-get install -y python3-venv npm cargo curl
 install -m 0755 -o root -g root "$repo/runtime/admin/ai-os-admin" /usr/local/libexec/ai-os-admin
 sed -i 's/\r$//' /usr/local/libexec/ai-os-admin

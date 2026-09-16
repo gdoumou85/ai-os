@@ -382,12 +382,15 @@ impl<M: Model> Engine<M> {
             return Ok(Outcome::err(format!("unknown setting '{key}'; known settings: projects_root")));
         }
         // The constructor's own root counts as a root: a test (and a machine with a custom
-        // AI_OS_PROJECTS) lives outside /data and /home/ai, and its own root is not an escape.
+        // AI_OS_PROJECTS) lives outside /data, and its own root is not an escape.
         let default_root = self.default_root.display().to_string();
         let mut roots: Vec<&str> = executor::rules::AI_ROOTS.to_vec();
         roots.push(&default_root);
         if !executor::rules::under_any(value, &roots) {
-            return Ok(Outcome::err(format!("projects_root must be an absolute path under /data, /home/ai, or the projects root ({default_root})")));
+            // The reason names only what `under_any` above actually accepts. Naming /home/ai
+            // here told the model a value the same call had just refused was legal, and it
+            // spent its next step trying it again.
+            return Ok(Outcome::err(format!("projects_root must be an absolute path under /data or the projects root ({default_root})")));
         }
         let previous = self.store.set_setting(key, value)?;
         Ok(Outcome::ok(format!("setting {key} = {value}")).with_undo(UndoEntry::Setting { key: key.into(), previous }))
@@ -1236,6 +1239,27 @@ mod tests {
         // prompt[i] elicits move[i]; the failed act is move[2], so its reason reaches move[3]'s
         // prompt (the brief's index was one turn early).
         assert!(prompts[3].user.contains("unknown setting") && prompts[3].user.contains("projects_root"), "{}", prompts[3].user);
+    }
+
+    #[test]
+    fn projects_root_under_home_ai_is_refused_and_the_reason_names_only_what_is_allowed() {
+        // /home/ai left `AI_ROOTS` in the 1c fix wave (design §3), so this value is refused —
+        // and the reason must not go on offering it, or the model reads a refusal as a hint.
+        let (mut e, _, _) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::SetSetting { key: "projects_root".into(), value: "/home/ai".into() }),
+            Move::GiveUp { reason: "x".into(), missing: "y".into() },
+        ], "root-home");
+        e.handle("put projects in my home").unwrap();
+        assert_eq!(e.store.get_setting("projects_root").unwrap(), None, "the setting was not applied");
+        let prompts = e.model.prompts.borrow();
+        // The prompt echoes the action itself, "/home/ai" and all — the claim here is about the
+        // REASON, so it is read out of the line the refusal wrote.
+        let reason = prompts[3].user.lines()
+            .find(|l| l.contains("projects_root must be an absolute path"))
+            .unwrap_or_else(|| panic!("the refusal must reach the model: {}", prompts[3].user));
+        assert!(reason.contains("under /data"), "{reason}");
+        let offered = &reason[reason.find("must be an absolute path").unwrap()..];
+        assert!(!offered.contains("/home/ai"), "the refusal must not name the value it just refused: {reason}");
     }
 
     #[test]
