@@ -28,7 +28,7 @@ pub fn lines(event: &Event) -> Vec<String> {
         | Event::Failed { text, .. } | Event::Stopped { text, .. } | Event::Busy { text, .. } => vec![text.clone()],
         Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } => vec![],
         Event::NeedsAnswer { questions, .. } => questions.iter().map(|q| format!("Question: {q}")).collect(),
-        Event::NeedsOk { why, .. } => vec![format!("Needs your OK: {why}. Say yes to allow it, or anything else to refuse.")],
+        Event::NeedsOk { why, .. } => vec![format!("Needs your OK: {why}. Say yes to allow it, no to refuse, or ask me about it.")],
         Event::Undone { name, lines, notes, .. } => {
             let mut v = vec![format!("Undoing the last job ({name}):")];
             v.extend(lines.iter().map(|l| l.text.clone()));

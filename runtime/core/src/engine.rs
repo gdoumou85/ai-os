@@ -289,6 +289,11 @@ impl<M: Model> Engine<M> {
                 return self.fail_predates_folder(job);
             }
             if is_stop(text) {
+                // A stop reaches the engine through both doors at once: the service arms the flag
+                // (it lands between steps) and queues the word (it lands here). Whichever arrives
+                // first ends the job; clearing the flag here is what stops the other one from
+                // announcing the same stop a second time.
+                self.stop.store(false, Ordering::SeqCst);
                 let message = format!("Stopped the job in {}.", display_name(&job));
                 return self.finish(job, State::Cancelled, message);
             }
@@ -328,6 +333,12 @@ impl<M: Model> Engine<M> {
                     return self.run_turns(job);
                 }
             }
+        }
+        // Nothing open, and the word is stop: a fixed answer, never a model call. The front door
+        // below is a `start`-capable grammar, so handing "stop" to a 9B could start a job with it.
+        if is_stop(text) {
+            self.emit(Event::Said { text: "Nothing is running now.".into() });
+            return Ok(());
         }
         // Idle: the model decides — chat, or work.
         let p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &self.store.recent_messages(4)?, text);
@@ -921,6 +932,32 @@ mod tests {
         // The trailing Ask is now consumed by the real loop (job pauses waiting_answer),
         // so "Stop." cancels on a second handle() call — one model call per handle().
         assert_eq!(e.model.prompts.borrow().len(), 2);
+    }
+
+    #[test]
+    fn stop_with_nothing_running_is_answered_by_the_engine_and_never_by_the_model() {
+        // The front door is a `start`-capable grammar: handing it "stop" is how a 9B starts a
+        // job called stop. The word is fixed in every state, so no model is asked.
+        let (mut e, _, _) = engine_with(vec![], "idle-stop");
+        let ev = e.handle_events("stop").unwrap();
+        assert_eq!(ev, vec![Event::Said { text: "Nothing is running now.".into() }], "{ev:?}");
+        assert!(e.model.prompts.borrow().is_empty(), "stop reached the model");
+    }
+
+    #[test]
+    fn stop_while_a_job_waits_stops_it_once_and_leaves_no_flag_armed() {
+        // Both doors at once: the service arms the flag AND queues the word. The job is waiting
+        // for an answer, so the flag has nothing to land between — the word ends the job, and it
+        // must clear the flag on its way out or the next job would start with a stop pending.
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["which language?".into()] }], "waiting-stop");
+        e.handle("make p").unwrap();
+        assert!(matches!(e.open_job().unwrap().unwrap().state, State::WaitingAnswer));
+        let flag = e.stop_flag();
+        flag.store(true, Ordering::SeqCst);
+        let ev = e.handle_events("stop").unwrap();
+        assert_eq!(ev.iter().filter(|x| matches!(x, Event::Stopped { .. })).count(), 1, "{ev:?}");
+        assert!(!flag.load(Ordering::SeqCst), "the stop flag outlived the stop it belongs to");
+        assert!(e.open_job().unwrap().is_none());
     }
 
     use executor::action::Action;

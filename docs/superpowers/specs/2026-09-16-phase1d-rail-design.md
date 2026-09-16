@@ -147,7 +147,7 @@ Parent-spec §5.1 addition at close-out: the rail and apps opened from it use th
 5. **The screenshot**: the real `ai-os-rail` on the Windows desktop showing a real job's Building card mid-tick, a Needs your OK, and a Done card with Open and Undo, captured through the Windows-side computer-use screenshot and saved to `docs/superpowers/findings/phase1d-rail.png`. Without it the rail is not reported as verified (his rule).
 6. **Him**: opens the rail, gives it a job in his own words, watches it, presses Open on a file, presses Undo.
 
-Test commands stay as in 1c (inside the distro; no Rust on Windows). The rail crate is built only in the distro; its tests run there too.
+Test commands stay as in 1c (inside the distro; no Rust on Windows). The rail crate is built only in the distro; its tests run there too. One ripple from the rail being a workspace member: `cargo test --workspace` now needs the GTK4 dev headers (`libgtk-4-dev`, which `trial/setup-rail.sh` installs); a per-crate run such as `cargo test -p aios-core` stays headless and needs none of them.
 
 ### Results (2026-09-16)
 
@@ -160,7 +160,7 @@ All of it inside the `ai-os` distro as user `ai`, `runtime/` as the working dire
 - **Script 3, undo** — two `undone` lines, both ok: "Undo removed /etc/ai-os-live-1d.txt (it did not exist before)" and "Restored the files of /data/projects/rail-live from before the job". The `/etc` file was gone from disk.
 - **Script 4, busy and stop** — a second client's message mid-job was answered `busy` without reaching the model, and `stop` landed as `stopped` within a step.
 
-**Nine runs went into getting there, and six gaps the failures exposed were fixed in the code — never in the test, and no assertion was ever loosened.** In order:
+**Nine runs went into getting there, and seven gaps the failures exposed were fixed in the code — never in the test, and no assertion was ever loosened.** In order:
 
 1. **`make_dir` for a folder inside the project (run 1).** The 9B planned `make_dir src` for a folder in its own workspace. `make_dir` is the privileged hand and the wrapper takes absolute paths outside the workspace only, so the approval gate would have spent the user's yes on an action that then fails. The executor now refuses **any** `make_dir` the hand cannot carry out, before classification: one that resolves inside the working directory is sent to `run_command mkdir -p …`, and one whose path is merely relative — `../x` as much as `src` — is refused for being relative, because the hand that would run it works from no working directory of the model's. That is the rule the system prompt states ("`make_dir` is never used with a relative path") enforced rather than asked for; `wrong_hand` has named the right hand this way since 1c.
 2. **A file outside the project written with `echo` (run 2).** Told to write `/etc/ai-os-live-1d.txt`, the model ran `echo hello /etc/ai-os-live-1d.txt`. In the sealed sandbox that command succeeds — echo printed two words — and the model then read back a file that was never written and gave up. `wrong_hand` now catches the writing programs (`echo`, `printf`, `tee`, `touch`, `dd`, `truncate`, `chmod`, `chown`) aimed at an absolute path outside `/data`, and `cp`/`mv` judged on their **last** path alone, which is the one they write to. So `cp /etc/hosts notes.txt` copies the machine into the project and is as free as `cat` is, while `cp a.txt /etc/x` is sent to `write_file`. Reads of the machine, and anything under `/data`, stay free.
@@ -189,4 +189,4 @@ The acceptance hangs rather than fails when the engine waits where the script ex
 - Changed-files by content (not mtime); files the admin hand wrote outside the folder listed on the Done card (the undo report covers them today).
 - A D-Bus front for the service (revisit when Phase 2 brings zbus in).
 - Multiple engines/users; the socket is per-user by construction.
-- The `busy` answer is service-side: a stop that arrives in the same instant the engine finishes a job is queued and then means "no job to stop" — the engine's existing answer covers that.
+- The `busy` answer is service-side: a stop that arrives in the same instant the engine finishes a job is queued and then means "no job to stop" — the engine answers that itself, "Nothing is running now.", with no model call, and the service's flag clear is silent.

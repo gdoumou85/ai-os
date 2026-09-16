@@ -95,6 +95,13 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
     let (ready, engine_ready) = channel::<Arc<AtomicBool>>();
     let sh = shared.clone();
     std::thread::spawn(move || {
+        // The engine thread IS the service. If it ever ends — a panic in the store, a poisoned
+        // mutex, the command channel closing — the whole process must end with it: an accept loop
+        // still running over a dead engine drops every client without a word, systemd's
+        // `Restart=on-failure` never fires, and `bind` then refuses a manual restart because
+        // something is still answering on the socket. A release build aborts on panic before this
+        // is reached (runtime/Cargo.toml); this is the same end for a debug build, which unwinds.
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let sink_sh = sh.clone();
         let mut engine = make(Box::new(move |ev| { sink_sh.update_mirror(ev); sink_sh.broadcast(ev); }));
         // A store read that fails here would leave `hello` answering "nothing open" while a real
@@ -109,21 +116,21 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         let _ = ready.send(engine.stop_flag());
         if let Err(e) = engine.resume() { eprintln!("engine: resume failed: {e}"); }
         sh.running.store(false, Ordering::SeqCst);
-        if engine.stop_flag().swap(false, Ordering::SeqCst) {
-            sh.broadcast(&Event::Said { text: "Nothing is running now.".into() });
-        }
+        engine.stop_flag().swap(false, Ordering::SeqCst);
         for cmd in rx {
             let Command::Say(text) = cmd;
             sh.running.store(true, Ordering::SeqCst);
             let r = engine.handle_events(&text);
             sh.running.store(false, Ordering::SeqCst);
-            // A stop that arrived after the job had already ended on its own: say so, do not
-            // leave the flag armed for the next job.
-            if engine.stop_flag().swap(false, Ordering::SeqCst) {
-                sh.broadcast(&Event::Said { text: "Nothing is running now.".into() });
-            }
+            // Silent: the queued word is what answers the user (the engine says "Nothing is
+            // running now." itself, in every state). This only makes sure a flag nothing
+            // consumed cannot survive into the next job.
+            engine.stop_flag().swap(false, Ordering::SeqCst);
             if let Err(e) = r { sh.broadcast(&Event::Said { text: format!("(something went wrong: {e})") }); }
         }
+        }));
+        eprintln!("engine: the engine thread {} — exiting so the service is restarted", if ended.is_err() { "panicked" } else { "ended" });
+        std::process::exit(1);
     });
     let stop = engine_ready.recv().expect("the engine thread builds the engine");
     let mut next_id = 1u64;
