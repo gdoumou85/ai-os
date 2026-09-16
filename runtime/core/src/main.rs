@@ -1,6 +1,7 @@
-use aios_core::engine::Engine;
+use aios_core::engine::{Engine, HOUSEKEEPING_DIR};
 use aios_core::model::OllamaModel;
 use aios_core::store::Store;
+use executor::admin::AdminWorker;
 use executor::worker::{SandboxWorker, Worker};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -11,7 +12,12 @@ fn main() {
     let root = PathBuf::from(std::env::var("AI_OS_PROJECTS").unwrap_or_else(|_| "/data/projects".into()));
     let store = Store::open(&db).expect("open store");
     let mut engine = Engine::new(store, OllamaModel::local(&model), root, Some(db),
-        Box::new(|ws| Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>));
+        Box::new(|ws| (
+            Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
+            Box::new(AdminWorker) as Box<dyn Worker>,
+        )),
+        PathBuf::from(HOUSEKEEPING_DIR),
+        PathBuf::from("/data/snapshots"));
     // Builder's front (1b spec §9): the 1d rail draws this same conversation as cards.
     let stdin = std::io::stdin();
     loop {

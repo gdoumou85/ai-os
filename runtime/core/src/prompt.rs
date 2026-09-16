@@ -11,9 +11,15 @@ Rules:
 - Say what you understood before you act.
 - Work from the project's BLUEPRINT.md: read it to find what to change and where. After each change, update BLUEPRINT.md in place (replace lines, never pile on; keep it as small as possible). Create it first for a new project.
 - Edit code in place with edit_file (quote the exact passage). Use write_file only for new files. Use read_file with from_line/lines to read the part you need.
-- A step that failed once will fail again. Read the reason and do something different, or replan. Only give_up as a last resort, and say what was missing.
+- A step that failed once will fail again. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
-- If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.";
+- If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.
+- Install software with `install` (apt), never with run_command apt. Enable, disable or restart services with `service`. Language packages (pip, npm, crates) come through `fetch_packages`: the sandbox has no other network.
+- Make a folder outside the working directory with `make_dir`, never `run_command mkdir`: the sandbox can only write inside the working directory, so mkdir there reports a read-only filesystem.
+- The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`), never by an absolute path: an absolute path leaves the workspace and needs the user's yes.
+- A file outside the project needs the user's yes (reading under /etc is free); say in one line why you need it.
+- Remove software with `remove` and change a setting with `set_setting`; both are hands like the rest, not run_command.
+- The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.";
 
 fn join_instructions(instructions: &[String]) -> String {
     if instructions.is_empty() { "(none)".into() } else { instructions.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n") }
@@ -25,11 +31,13 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(S
     };
     let recent_txt = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
     let user = format!(
-        "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk) or start (new work: give project, new_project, description, goal, creative, understood). \
-         Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself.\n\nUser says: {}",
+        "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk), start (new work: give project, new_project, description, goal, creative, understood), or \
+         housekeep (the machine itself: folders, settings, tools; give goal, understood). \
+         Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself. \
+         The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, recent_txt, message
     );
-    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start"] }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"] }
 }
 
 /// The moves legal right now, by job state and mode (decision 13): sent as `Prompt::allowed` so
@@ -101,9 +109,14 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     let plan = if job.plan.is_empty() { "(no plan yet)".into() } else {
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
-    let bp = match blueprint {
-        Some(b) => b.chars().take(3000).collect::<String>(),
-        None => "(no blueprint yet — create BLUEPRINT.md with write_file before changing anything else)".into(),
+    let (header, bp_block) = if job.housekeeping {
+        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data and /home/ai, and a check out there reports what the sandbox cannot see, not what is not there. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) make_dir the folder, 2) set_setting projects_root=<that absolute path>, 3) done with make_dir (or run_command ls) as the check, and that job is not done until the setting is set.".to_string(), String::new())
+    } else {
+        let bp = match blueprint {
+            Some(b) => b.chars().take(3000).collect::<String>(),
+            None => "(no blueprint yet — create BLUEPRINT.md with write_file before changing anything else)".into(),
+        };
+        (format!("Project: {} (its folder is the working directory)", job.project), format!("\n\nBLUEPRINT.md:\n{bp}"))
     };
     let hint = match job.state {
         State::Asking => "Legal moves now: ask (1-3 questions) or plan (if you have no questions).",
@@ -114,9 +127,14 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     // The bounded last-run note (1b spec §6.6): fix first, prove it, then the goal.
     let last = last_run.map(|l| format!("\n\nLAST RUN in this project ended badly:\n{}\nFix this first and prove it with a check, then carry on with the goal.", l.chars().take(1500).collect::<String>())).unwrap_or_default();
     let mode = if job.creative { "creative (do not ask; decide yourself)" } else { "ask" };
+    // `Goal` is the model's own paraphrase from the front door, and it drops what it did not
+    // think mattered ("…where all my projects will live from now on" became "for project
+    // storage"). The words the user actually used go right under it. Jobs saved before 1c
+    // carry none, and then the line is simply not there.
+    let verbatim = if job.request.is_empty() { String::new() } else { format!("The user asked (verbatim): {}\n", job.request) };
     let user = format!(
-        "Machine: Ubuntu Linux (python3, apt; no `python`).\nStanding instructions:\n{}\n\nProject: {} (its folder is the working directory)\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}\n\nBLUEPRINT.md:\n{}{}\n\nSteps so far:\n{}{}\n\n{}",
-        join_instructions(instructions), job.project, job.goal, mode, job.understood, answers, plan, bp, last, summarise_steps(job), note, hint
+        "Machine: Ubuntu Linux (python3, no `python`; apt via install; pip/npm/cargo via fetch_packages).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
+        join_instructions(instructions), header, job.goal, verbatim, mode, job.understood, answers, plan, bp_block, last, summarise_steps(job), note, hint
     );
     Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job) }
 }
@@ -140,12 +158,72 @@ mod tests {
         assert!(p.user.contains("primes — prime printer"));
         assert!(p.user.contains("older reply"));
         assert!(p.user.ends_with("add a menu"));
-        assert!(p.user.contains("reply") && p.user.contains("start"), "front door names its two legal moves");
+        assert!(p.user.contains("reply") && p.user.contains("start") && p.user.contains("housekeep"), "front door names its three legal moves");
+        // The live run's finding: "prepare a folder where all my projects will live from now on"
+        // reached the job as "create a folder for project storage" — the standing half of the
+        // request was summarised away at the door, and the job could not act on what it never saw.
+        assert!(p.user.contains("The goal carries the whole of what the user asked for"), "{}", p.user);
+    }
+
+    #[test]
+    fn front_door_allows_housekeep() {
+        let p = front_door(&[], &[], &[], "hi");
+        assert_eq!(p.allowed, vec!["reply", "start", "housekeep"]);
+    }
+
+    #[test]
+    fn system_rules_mention_the_new_hands() {
+        assert!(SYSTEM.contains("install"));
+        assert!(SYSTEM.contains("fetch_packages"));
+        // The live run's first finding: without this the 9B tried `run_command mkdir /data/work`,
+        // read "Read-only file system" as the machine's truth and gave up on the whole job.
+        assert!(SYSTEM.contains("make_dir"));
+        // Third finding: absolute paths for the project's own files put every write one level
+        // above the workspace, so each one needed an approval and nothing landed in the project.
+        assert!(SYSTEM.contains("relative to the working directory"));
+        // Reading /etc is Auto (rules::classify), so the flat "needs the user's yes" sent the
+        // model asking for approvals it never needed.
+        assert!(SYSTEM.contains("reading under /etc is free"));
+        // The two hands the list left out: the model reached for run_command instead.
+        assert!(SYSTEM.contains("`remove`") && SYSTEM.contains("`set_setting`"));
+    }
+
+    #[test]
+    fn the_job_turn_carries_the_users_own_words_not_only_the_paraphrase() {
+        let mut j = Job::new("p", "/data/projects/p", "Create a folder at /data/work for project storage.", false, "u");
+        assert!(!job_turn(&[], &j, None, None).user.contains("verbatim"), "a job with no recorded request says nothing");
+        j.request = "Prepare a folder at /data/work where all my projects will live from now on".into();
+        let user = job_turn(&[], &j, None, None).user;
+        assert!(user.contains("The user asked (verbatim): Prepare a folder at /data/work where all my projects will live from now on"), "{user}");
+        // Right under the goal, so the paraphrase and the words it came from are read together.
+        assert!(user.find("Goal:").unwrap() < user.find("The user asked (verbatim):").unwrap(), "{user}");
+        assert!(user.find("The user asked (verbatim):").unwrap() < user.find("Mode:").unwrap(), "{user}");
+    }
+
+    #[test]
+    fn housekeeping_job_turn_has_no_project_no_blueprint() {
+        let mut j = Job::new("scratch", "/data/projects/scratch", "prepare /data/work", false, "Housekeeping: preparing /data/work");
+        j.housekeeping = true;
+        let p = job_turn(&[], &j, None, None);
+        assert!(p.user.contains("no project, no blueprint"), "{}", p.user);
+        assert!(!p.user.contains("no blueprint yet"), "{}", p.user);
+        // The live run's second finding: told only "no blueprint", the 9B still wrote and then
+        // re-read a BLUEPRINT.md in the folder it had just made, and never reached the setting.
+        assert!(p.user.contains("never write or read a BLUEPRINT.md"), "{}", p.user);
+        // The setting recipe is conditional on the user's request being about where projects
+        // live — a housekeeping job that installs a tool has no setting to reach — and inside
+        // that condition it is ordered, because the 9B needs the order (§11 Results).
+        assert!(p.user.contains("If the user's request is about where projects live from now on"), "{}", p.user);
+        assert!(p.user.contains("1) make_dir the folder, 2) set_setting projects_root"), "{}", p.user);
+        assert!(p.user.contains("that job is not done until the setting is set"), "{}", p.user);
+        // Third finding: with no way to look outside the scratch folder, the 9B invented a file
+        // to read as its check (`/etc/settings.conf`) and gave up when it could not be read.
+        assert!(p.user.contains("cannot see outside the scratch folder"), "{}", p.user);
     }
 
     #[test]
     fn job_turn_carries_goal_answers_plan_blueprint_and_state_hint() {
-        let mut j = Job::new("primes", "print ten primes", false, "Starting primes");
+        let mut j = Job::new("primes", "/data/projects/primes", "print ten primes", false, "Starting primes");
         j.answers.push(("Which language?".into(), "python".into()));
         j.plan = vec!["write primes.py".into(), "run it".into()];
         j.state = State::Working;
@@ -158,14 +236,14 @@ mod tests {
         assert!(p.user.contains("done needs a check"));
         assert!(p.user.contains("act"), "working state hints the legal moves");
         assert!(!p.user.contains("LAST RUN"), "no last-run section when there is no note");
-        let asking = Job::new("primes", "g", false, "u");
+        let asking = Job::new("primes", "/data/projects/primes", "g", false, "u");
         assert!(job_turn(&[], &asking, None, None).user.contains("no blueprint yet"));
         assert!(job_turn(&[], &asking, None, None).user.contains("ask"));
     }
 
     #[test]
     fn last_run_note_is_shown_with_the_fix_first_rule() {
-        let j = Job::new("primes", "g", true, "u");
+        let j = Job::new("primes", "/data/projects/primes", "g", true, "u");
         let p = job_turn(&[], &j, None, Some("goal: print primes\nfailed at plan step 2\nlast error: NameError: prmes"));
         assert!(p.user.contains("LAST RUN"));
         assert!(p.user.contains("NameError: prmes"));
@@ -174,7 +252,7 @@ mod tests {
 
     #[test]
     fn older_steps_are_summarised_and_blueprint_is_capped() {
-        let mut j = Job::new("p", "g", true, "u");
+        let mut j = Job::new("p", "/data/projects/p", "g", true, "u");
         for i in 0..9 {
             j.steps.push(StepRecord { plan_step: 1, action: Action::RunCommand { argv: vec![format!("cmd{i}")] }, ok: i != 2, detail: format!("detail-{i}") });
         }
@@ -191,7 +269,7 @@ mod tests {
     /// as a byte count, not re-serialised whole.
     #[test]
     fn a_large_write_file_step_does_not_blow_the_prompt_budget() {
-        let mut j = Job::new("p", "g", true, "u");
+        let mut j = Job::new("p", "/data/projects/p", "g", true, "u");
         let big = "x".repeat(20_000);
         j.steps.push(StepRecord { plan_step: 1, action: Action::WriteFile { path: "big.py".into(), contents: big }, ok: true, detail: "written".into() });
         let p = job_turn(&[], &j, None, None);
@@ -201,28 +279,28 @@ mod tests {
 
     #[test]
     fn allowed_moves_are_narrowed_by_state_and_mode() {
-        let mut asking = Job::new("p", "g", false, "u");
+        let mut asking = Job::new("p", "/data/projects/p", "g", false, "u");
         asking.state = State::Asking;
         assert_eq!(job_turn(&[], &asking, None, None).allowed, vec!["ask", "plan"]);
 
-        let mut planning_creative = Job::new("p", "g", true, "u");
+        let mut planning_creative = Job::new("p", "/data/projects/p", "g", true, "u");
         planning_creative.state = State::Planning;
         assert_eq!(job_turn(&[], &planning_creative, None, None).allowed, vec!["plan"]);
 
-        let mut planning_not_creative = Job::new("p", "g", false, "u");
+        let mut planning_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         planning_not_creative.state = State::Planning;
         assert_eq!(job_turn(&[], &planning_not_creative, None, None).allowed, vec!["ask", "plan"]);
 
-        let mut working_creative = Job::new("p", "g", true, "u");
+        let mut working_creative = Job::new("p", "/data/projects/p", "g", true, "u");
         working_creative.state = State::Working;
         assert_eq!(job_turn(&[], &working_creative, None, None).allowed, vec!["act", "replan", "done", "give_up"]);
 
-        let mut working_not_creative = Job::new("p", "g", false, "u");
+        let mut working_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         working_not_creative.state = State::Working;
         assert_eq!(job_turn(&[], &working_not_creative, None, None).allowed, vec!["ask", "act", "replan", "done", "give_up"]);
 
         let p = front_door(&[], &[], &[], "hi");
-        assert_eq!(p.allowed, vec!["reply", "start"]);
+        assert_eq!(p.allowed, vec!["reply", "start", "housekeep"]);
     }
 
     /// `allowed_moves` and `front_door`'s `allowed` are hand-typed move-name lists, separate from
@@ -241,23 +319,23 @@ mod tests {
 
         check(&front_door(&[], &[], &[], "hi"));
 
-        let mut asking = Job::new("p", "g", false, "u");
+        let mut asking = Job::new("p", "/data/projects/p", "g", false, "u");
         asking.state = State::Asking;
         check(&job_turn(&[], &asking, None, None));
 
-        let mut planning_creative = Job::new("p", "g", true, "u");
+        let mut planning_creative = Job::new("p", "/data/projects/p", "g", true, "u");
         planning_creative.state = State::Planning;
         check(&job_turn(&[], &planning_creative, None, None));
 
-        let mut planning_not_creative = Job::new("p", "g", false, "u");
+        let mut planning_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         planning_not_creative.state = State::Planning;
         check(&job_turn(&[], &planning_not_creative, None, None));
 
-        let mut working_creative = Job::new("p", "g", true, "u");
+        let mut working_creative = Job::new("p", "/data/projects/p", "g", true, "u");
         working_creative.state = State::Working;
         check(&job_turn(&[], &working_creative, None, None));
 
-        let mut working_not_creative = Job::new("p", "g", false, "u");
+        let mut working_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         working_not_creative.state = State::Working;
         check(&job_turn(&[], &working_not_creative, None, None));
     }

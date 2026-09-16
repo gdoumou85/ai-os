@@ -56,10 +56,31 @@ pub struct Job {
     pub last_code_change: usize,
     pub last_blueprint_update: usize,
     pub outcome_text: String,
+    /// True for a housekeeping job (machine-level: folders, settings, tools) — no project, no
+    /// blueprint. `#[serde(default)]`: a job saved before this field existed must still
+    /// deserialise (I3; standing convention — see `declined_actions`).
+    #[serde(default)]
+    pub housekeeping: bool,
+    /// The job's own workspace — the folder every one of its actions runs in. Carried on the
+    /// job rather than derived from `project`, so moving the projects root (or a project) never
+    /// silently redirects a job that is already running. `#[serde(default)]`: see
+    /// `declined_actions` (I3).
+    #[serde(default)]
+    pub folder: String,
+    /// True when this job's `Start` created the project folder — what Task 9 needs to tell
+    /// whether undoing the job means removing the folder or only putting its files back.
+    #[serde(default)]
+    pub new_project: bool,
+    /// What the user actually typed to start this job, word for word. `goal` is the model's own
+    /// paraphrase and loses what it did not think mattered — the live 1c run watched "where all
+    /// my projects will live from now on" become "for project storage", and a job cannot act on
+    /// what it never saw. `#[serde(default)]`: see `declined_actions` (I3).
+    #[serde(default)]
+    pub request: String,
 }
 
 impl Job {
-    pub fn new(project: &str, goal: &str, creative: bool, understood: &str) -> Job {
+    pub fn new(project: &str, folder: &str, goal: &str, creative: bool, understood: &str) -> Job {
         let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         let counter = JOB_COUNTER.fetch_add(1, Ordering::Relaxed);
         Job {
@@ -70,9 +91,20 @@ impl Job {
             pending_action: None, pending_reason: String::new(), failed_actions: vec![],
             declined_actions: vec![], rejections: 0, replans: 0,
             note_to_model: None, last_code_change: 0, last_blueprint_update: 0,
-            outcome_text: String::new(),
+            outcome_text: String::new(), housekeeping: false,
+            folder: folder.into(), new_project: false, request: String::new(),
         }
     }
+
+    /// A machine-level job: no project, no blueprint, and a folder the caller hands it
+    /// (Task 8 wires `/data/housekeeping`). Never creative — housekeeping touches the machine,
+    /// so the model gets its chance to ask first.
+    pub fn new_housekeeping(folder: &str, goal: &str, understood: &str) -> Job {
+        let mut job = Job::new("", folder, goal, false, understood);
+        job.housekeeping = true;
+        job
+    }
+
     pub fn is_open(&self) -> bool { !matches!(self.state, State::Done | State::Failed | State::Cancelled) }
 }
 
@@ -82,8 +114,8 @@ mod tests {
 
     #[test]
     fn two_jobs_made_back_to_back_never_collide() {
-        let a = Job::new("p", "g", true, "u");
-        let b = Job::new("p", "g", true, "u");
+        let a = Job::new("p", "/data/projects/p", "g", true, "u");
+        let b = Job::new("p", "/data/projects/p", "g", true, "u");
         assert_ne!(a.id, b.id, "same project, same millisecond is possible — the counter must still separate them");
     }
 
@@ -91,7 +123,7 @@ mod tests {
     /// Both fields must default rather than fail deserialisation.
     #[test]
     fn job_without_replans_or_declined_actions_keys_still_deserialises() {
-        let job = Job::new("p", "g", true, "u");
+        let job = Job::new("p", "/data/projects/p", "g", true, "u");
         let mut value = serde_json::to_value(&job).unwrap();
         let obj = value.as_object_mut().unwrap();
         assert!(obj.remove("replans").is_some());
@@ -99,5 +131,21 @@ mod tests {
         let back: Job = serde_json::from_value(value).unwrap();
         assert_eq!(back.replans, 0);
         assert!(back.declined_actions.is_empty());
+    }
+
+    /// I3 again, for the three keys this task adds: a job saved before `folder`,
+    /// `housekeeping` and `new_project` existed has none of them in its JSON.
+    #[test]
+    fn job_without_the_new_keys_still_deserialises() {
+        let job = Job::new("p", "/data/projects/p", "g", true, "u");
+        let mut value = serde_json::to_value(&job).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        assert!(obj.remove("folder").is_some());
+        assert!(obj.remove("housekeeping").is_some());
+        assert!(obj.remove("new_project").is_some());
+        let back: Job = serde_json::from_value(value).unwrap();
+        assert!(back.folder.is_empty());
+        assert!(!back.housekeeping);
+        assert!(!back.new_project);
     }
 }

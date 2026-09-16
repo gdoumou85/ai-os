@@ -20,6 +20,12 @@ pub enum Move {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember: Option<String>,
     },
+    Housekeep {
+        goal: String,
+        understood: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remember: Option<String>,
+    },
     Ask { questions: Vec<String> },
     Plan { steps: Vec<String> },
     Act { step: usize, action: Action },
@@ -39,9 +45,16 @@ mod tests {
             r#"{"move":"reply","text":"hi"}"#,
             r#"{"move":"reply","text":"noted","remember":"always use python3"}"#,
             r#"{"move":"start","project":"primes","new_project":true,"description":"prime printer","goal":"print 10 primes","creative":false,"understood":"Starting a new project primes"}"#,
+            r#"{"move":"housekeep","goal":"prepare /data/work","understood":"Housekeeping: preparing /data/work"}"#,
             r#"{"move":"ask","questions":["Which language?"]}"#,
             r#"{"move":"plan","steps":["write primes.py","run it"]}"#,
             r#"{"move":"act","step":1,"action":{"kind":"write_file","path":"primes.py","contents":"print(2)"}}"#,
+            r#"{"move":"act","step":1,"action":{"kind":"install","packages":["cowsay"]}}"#,
+            r#"{"move":"act","step":1,"action":{"kind":"remove","packages":["cowsay"]}}"#,
+            r#"{"move":"act","step":1,"action":{"kind":"service","name":"nginx","do":"enable"}}"#,
+            r#"{"move":"act","step":1,"action":{"kind":"make_dir","path":"/data/work"}}"#,
+            r#"{"move":"act","step":1,"action":{"kind":"fetch_packages","manager":"pip","packages":["tabulate"]}}"#,
+            r#"{"move":"act","step":1,"action":{"kind":"set_setting","key":"projects_root","value":"/data/work"}}"#,
             r#"{"move":"replan","steps":["use a loop instead"],"why":"recursion overflowed"}"#,
             r#"{"move":"done","summary":"printed them","check":{"kind":"run_command","argv":["python3","primes.py"]}}"#,
             r#"{"move":"give_up","reason":"no compiler","missing":"gcc"}"#,
@@ -66,7 +79,7 @@ mod tests {
         let v = crate::schema::value();
         let names: Vec<String> = v["oneOf"].as_array().unwrap().iter()
             .map(|o| o["properties"]["move"]["enum"][0].as_str().unwrap().to_string()).collect();
-        assert_eq!(names, ["reply", "start", "ask", "plan", "act", "replan", "done", "give_up"]);
+        assert_eq!(names, ["reply", "start", "housekeep", "ask", "plan", "act", "replan", "done", "give_up"]);
     }
 
     #[test]
@@ -74,7 +87,7 @@ mod tests {
         // step/from_line/lines back `usize` fields; a grammar-valid negative would fail
         // serde_json parsing, breaking "grammar-forced means always parses" (decision 13).
         let v = crate::schema::value();
-        assert_eq!(v["oneOf"][4]["properties"]["step"]["minimum"], 1);
+        assert_eq!(v["oneOf"][5]["properties"]["step"]["minimum"], 1);
         assert_eq!(v["$defs"]["action"]["oneOf"][1]["properties"]["from_line"]["minimum"], 1);
         assert_eq!(v["$defs"]["action"]["oneOf"][1]["properties"]["lines"]["minimum"], 1);
     }

@@ -108,15 +108,21 @@ fn other_projects_and_the_database_are_invisible() {
     let home = w.run(&Action::RunCommand { argv: vec!["ls".into(), "/home/ai".into()] });
     assert!(!home.ok, "the user's home must be hidden: {}", home.detail);
     // C1: /mnt must be hidden too, not just ProtectHome/ProtectSystem's own targets — on this
-    // WSL2 dev workshop it's where the whole Windows profile lives. Checked one level down
-    // (`/mnt/c/Users`, not bare `/mnt`): WSL mounts the drive at `/mnt/c`, so a bare `ls /mnt`
-    // only ever lists mount names ("c", "wsl", …) and would pass either way — it never actually
-    // exercises the leak. "!out.detail.contains(\"c\")" would also be too weak (matches almost
-    // anything); assert on the real Windows-profile marker instead. Either assertion path covers
-    // it: the path is refused outright, or it "succeeds" but the failure text (which echoes the
-    // refused path back) is all there is — no directory contents ever come through.
-    let mnt = w.run(&Action::RunCommand { argv: vec!["ls".into(), "/mnt/c/Users".into()] });
-    assert!(!mnt.ok || !mnt.detail.contains("gdoum"), "/mnt must be hidden from the sandbox: {}", mnt.detail);
+    // WSL2 dev workshop it's where the whole Windows profile lives. Hiding /mnt/c alone would
+    // leave every other drive and /mnt/wsl readable, so the jail replaces /mnt outright with an
+    // empty read-only tmpfs. Both halves are checked: the Windows drive is gone, AND nothing
+    // else has quietly survived under /mnt — the only thing bound back in is the DNS file, so
+    // the listing may contain `wsl` and nothing more.
+    let mnt_c = w.run(&Action::RunCommand { argv: vec!["ls".into(), "/mnt/c".into()] });
+    assert!(!mnt_c.ok, "the Windows drive must be gone from the sandbox: {}", mnt_c.detail);
+    let mnt = w.run(&Action::RunCommand { argv: vec!["ls".into(), "/mnt".into()] });
+    assert!(mnt.ok, "{}", mnt.detail);
+    let listing = mnt.detail.trim_start_matches("exit 0; stdout: ").trim_end_matches("stderr: ");
+    assert!(
+        listing.split_whitespace().all(|e| e == "wsl"),
+        "/mnt must be an empty tmpfs apart from the bound-back DNS file: {}",
+        mnt.detail
+    );
     let _ = std::fs::remove_file("/data/it-jail-db.sqlite");
     let _ = std::fs::remove_dir_all("/data/projects/it-jail-a");
     let _ = std::fs::remove_dir_all("/data/projects/it-jail-b");
@@ -144,4 +150,28 @@ fn failure_detail_carries_the_end_of_the_error_output() {
     assert!(out.detail.contains("exit 3"), "{}", out.detail);
     assert!(out.detail.contains("THE-REAL-REASON"), "the reason lives at the END of the output: {}", out.detail);
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn etc_is_readable_unprivileged_but_not_shadow() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let w = SandboxWorker { user: "ai-sandbox".into(), workspace: PathBuf::from("/data/housekeeping") };
+    let fstab = w.run(&Action::ReadFile { path: "/etc/fstab".into(), from_line: None, lines: None });
+    assert!(fstab.ok, "{}", fstab.detail);
+    // /etc is full of symlinks out of itself: os-release is really /usr/lib/os-release, and a
+    // guard pinned to /etc alone would refuse it.
+    let os = w.run(&Action::ReadFile { path: "/etc/os-release".into(), from_line: None, lines: None });
+    assert!(os.ok, "{}", os.detail);
+    assert!(os.detail.contains("Ubuntu"), "{}", os.detail);
+    assert!(!w.run(&Action::ReadFile { path: "/etc/shadow".into(), from_line: None, lines: None }).ok);
+    assert!(!w.run(&Action::ReadFile { path: "/home/ai/.bashrc".into(), from_line: None, lines: None }).ok, "outside workspace and not /etc");
+}
+
+#[test]
+fn dollar_survives_argv() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let w = SandboxWorker { user: "ai-sandbox".into(), workspace: PathBuf::from("/data/housekeeping") };
+    let o = w.run(&Action::RunCommand { argv: vec!["printf".into(), "%s".into(), "${HOME}".into()] });
+    assert!(o.ok, "{}", o.detail);
+    assert!(o.detail.contains("${HOME}"), "{}", o.detail);
 }

@@ -49,13 +49,30 @@ impl ActionLog {
     }
 
     pub fn append(&self, job_id: &str, action: &Action, outcome: &str) -> Result<i64, LogError> {
+        self.insert(job_id, &serde_json::to_string(action)?, outcome)
+    }
+
+    /// A line with no action behind it (an undo, say). `action_json` is JSON `null` so a
+    /// reader parsing the column still gets valid JSON, and no real action can collide with it.
+    pub fn append_text(&self, job_id: &str, text: &str) -> Result<i64, LogError> {
+        self.insert(job_id, "null", text)
+    }
+
+    fn insert(&self, job_id: &str, action_json: &str, outcome: &str) -> Result<i64, LogError> {
         self.ensure_job(job_id)?;
-        let json = serde_json::to_string(action)?;
         self.conn.execute(
             "INSERT INTO actions(job_id, action_json, outcome, at) VALUES (?1, ?2, ?3, ?4)",
-            (job_id, json, outcome, Self::now()),
+            (job_id, action_json, outcome, Self::now()),
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Every row of a job in the order it happened: `(action_json, outcome)`. `action_json` is
+    /// the literal column — JSON `null` for a line with no action behind it (`append_text`).
+    pub fn rows_for(&self, job_id: &str) -> Result<Vec<(String, String)>, LogError> {
+        let mut q = self.conn.prepare("SELECT action_json, outcome FROM actions WHERE job_id = ?1 ORDER BY id")?;
+        let rows = q.query_map([job_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn count_for_job(&self, job_id: &str) -> Result<i64, LogError> {
@@ -79,5 +96,11 @@ mod tests {
         assert!(id > 0);
         assert_eq!(log.count_for_job("j1").unwrap(), 1);
         assert_eq!(log.count_for_job("other").unwrap(), 0);
+        log.append_text("j1", "undo: put it back").unwrap();
+        let rows = log.rows_for("j1").unwrap();
+        assert_eq!(rows.len(), 2, "in the order they happened: {rows:?}");
+        assert!(rows[0].0.contains("run_command") && rows[0].1 == "ok: exit 0", "{rows:?}");
+        assert_eq!(rows[1], ("null".to_string(), "undo: put it back".to_string()));
+        assert!(log.rows_for("other").unwrap().is_empty());
     }
 }

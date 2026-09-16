@@ -2,14 +2,20 @@ use crate::job::{Job, State, StepRecord};
 use crate::model::{Model, ModelError};
 use crate::moves::Move;
 use crate::prompt;
+use crate::snapshot::{self, RealSnapshotter, Snapshotter};
 use crate::store::{Store, StoreError};
 use executor::action::Action;
 use executor::executor::{ExecOutcome, Executor};
 use executor::log::{ActionLog, LogError};
-use executor::worker::Worker;
+use executor::undo::UndoEntry;
+use executor::worker::{Outcome, Worker};
 use std::path::{Path, PathBuf};
 
-pub type WorkerFactory = Box<dyn Fn(&Path) -> Box<dyn Worker>>;
+/// One project folder in, the two hands that serve it out: (sandbox, admin).
+pub type WorkerFactory = Box<dyn Fn(&Path) -> (Box<dyn Worker>, Box<dyn Worker>)>;
+
+/// The scratch folder a housekeeping job works in — the machine's own jobs have no project.
+pub const HOUSEKEEPING_DIR: &str = "/data/housekeeping";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -22,9 +28,17 @@ pub enum EngineError {
 pub struct Engine<M: Model> {
     pub store: Store,
     pub model: M,
-    projects_root: PathBuf,
+    /// Where a *new* project lands when the `projects_root` setting says nothing.
+    default_root: PathBuf,
     log_path: Option<String>,
     workers: WorkerFactory,
+    /// The workspace every housekeeping job runs in (it has no project folder).
+    housekeeping_dir: PathBuf,
+    /// Where a job's read-only project snapshot goes — the files undo puts back.
+    snapshots_dir: PathBuf,
+    /// The files half of undo. A seam so the job-start ordering and the undo report can be
+    /// proven without btrfs; the real one is `snapshot::RealSnapshotter`.
+    snapshotter: Box<dyn Snapshotter>,
 }
 
 pub fn sanitize_project_name(raw: &str) -> String {
@@ -66,38 +80,67 @@ pub fn is_stop(text: &str) -> bool {
     STOP_PHRASES.contains(&normalize(text).as_str())
 }
 
+/// "Put the last job back." Exact phrases only, like `is_stop` — which is also what refuses a
+/// negation ("don't undo") and a sentence that merely contains the word ("undo is a word"):
+/// neither is on the list, and undoing a job by accident is not a mistake we can offer back.
+pub fn is_undo(text: &str) -> bool {
+    const UNDO_PHRASES: [&str; 13] = [
+        "undo", "undo that", "undo it", "undo the last job", "undo last job",
+        "roll back", "rollback", "put it back", "revert",
+        "please undo", "undo please", "undo it please", "undo that please",
+    ];
+    UNDO_PHRASES.contains(&normalize(text).as_str())
+}
+
+/// What to call a job in a line the user reads. A housekeeping job has no project, so
+/// `job.project` is the empty string — "Stopped the job in ." is not a sentence.
+fn display_name(job: &Job) -> &str {
+    if job.housekeeping { "housekeeping" } else { &job.project }
+}
+
 impl<M: Model> Engine<M> {
-    pub fn new(store: Store, model: M, projects_root: PathBuf, log_path: Option<String>, workers: WorkerFactory) -> Self {
-        Self { store, model, projects_root, log_path, workers }
+    pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf, snapshots_dir: PathBuf) -> Self {
+        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir, snapshotter: Box::new(RealSnapshotter) }
     }
+
+    /// Swap the files half of undo. Tests only in practice; kept off `new` so the six call
+    /// sites that want the real thing keep saying nothing about it.
+    pub fn with_snapshotter(mut self, s: Box<dyn Snapshotter>) -> Self {
+        self.snapshotter = s;
+        self
+    }
+
+    pub fn housekeeping_dir(&self) -> &Path { &self.housekeeping_dir }
 
     /// I3: a store error here used to be swallowed (`.ok().flatten()`) — a job left unreadable
     /// (a corrupt row, a locked file) looked exactly like "no job open", so the engine would
     /// silently start a fresh one over it. Propagate instead.
     pub fn open_job(&self) -> Result<Option<Job>, EngineError> { Ok(self.store.open_job()?) }
 
-    fn workspace(&self, project: &str) -> PathBuf { self.projects_root.join(project) }
+    /// The job's own folder, as recorded on the job — never recomputed from the project name,
+    /// so moving the root (or a project) cannot redirect a job that is already running.
+    fn workspace(&self, job: &Job) -> PathBuf { PathBuf::from(&job.folder) }
+
+    /// Where a new project's folder goes. A store error is propagated, not read as "unset":
+    /// that would quietly put the project under the wrong root (I3's lesson).
+    fn projects_root(&self) -> Result<PathBuf, EngineError> {
+        Ok(match self.store.get_setting("projects_root")? {
+            Some(p) => PathBuf::from(p),
+            None => self.default_root.clone(),
+        })
+    }
 
     /// One executor per project folder: classification and enforcement share the same
     /// workspace path by construction (parent §11 item 3).
-    pub(crate) fn executor_for(&self, project: &str) -> Result<Executor<Box<dyn Worker>>, EngineError> {
-        let ws = self.workspace(project);
+    pub(crate) fn executor_for(&self, job: &Job) -> Result<Executor<Box<dyn Worker>>, EngineError> {
+        let ws = self.workspace(job);
         let log = match &self.log_path { Some(p) => ActionLog::open(p)?, None => ActionLog::open_in_memory()? };
-        Ok(Executor::new((self.workers)(&ws), log, ws))
+        let (sandbox, admin) = (self.workers)(&ws);
+        Ok(Executor::new(sandbox, admin, log, ws))
     }
 
-    fn create_project_folder(&self, project: &str) -> Result<(), EngineError> {
-        let ws = self.workspace(project);
-        std::fs::create_dir_all(&ws)?;
-        // Shared with the sandbox user (1b spec §7). Best effort: in tests there is no such group.
-        // ponytail: shells out to chgrp/chmod; fine for one folder per project.
-        let _ = std::process::Command::new("chgrp").arg("ai-sandbox").arg(&ws).status();
-        let _ = std::process::Command::new("chmod").arg("2770").arg(&ws).status();
-        Ok(())
-    }
-
-    pub(crate) fn read_blueprint(&self, project: &str) -> Option<String> {
-        std::fs::read_to_string(self.workspace(project).join("BLUEPRINT.md")).ok()
+    pub(crate) fn read_blueprint(&self, job: &Job) -> Option<String> {
+        std::fs::read_to_string(self.workspace(job).join("BLUEPRINT.md")).ok()
     }
 
     /// The only entry point: one user message in, the lines to show the user out.
@@ -109,9 +152,28 @@ impl<M: Model> Engine<M> {
     }
 
     fn handle_inner(&mut self, text: &str) -> Result<Vec<String>, EngineError> {
-        if let Some(mut job) = self.open_job()? {
+        let open = self.open_job()?;
+        // Undo is deterministic, like stop and the approvals: no model call either way. It is
+        // one job at a time here too — a running job's changes are not finished being made, so
+        // there is nothing coherent to put back yet.
+        if is_undo(text) {
+            return match open {
+                Some(_) => Ok(vec!["Finish or stop the current job first, then say undo.".into()]),
+                None => self.undo_last(),
+            };
+        }
+        if let Some(mut job) = open {
+            // A job saved before 1c recorded folders has none, so every one of its actions would
+            // run in the process's own directory. Fail it on sight — no model call, and not
+            // through `finish`, which would drop a LAST_RUN.md in that same directory.
+            if job.folder.is_empty() {
+                job.state = State::Failed;
+                job.outcome_text = "This job predates the folder record; please start it again.".into();
+                self.store.save_job(&job)?;
+                return Ok(vec![job.outcome_text]);
+            }
             if is_stop(text) {
-                let message = format!("Stopped the job in {}.", job.project);
+                let message = format!("Stopped the job in {}.", display_name(&job));
                 return self.finish(job, State::Cancelled, message);
             }
             match job.state {
@@ -145,15 +207,64 @@ impl<M: Model> Engine<M> {
             Move::Start { project, new_project: _, description, goal, creative, understood, remember } => {
                 let name = sanitize_project_name(&project);
                 let existing = self.store.get_project(&name)?;
-                if existing.is_none() { self.create_project_folder(&name)?; }
+                let is_new = existing.is_none();
+                // An existing project keeps the folder it was created in. Recomputing it from the
+                // root re-homed the project on every start, overwriting the stored folder (1b bug).
+                let folder = match &existing {
+                    Some(p) => PathBuf::from(&p.folder),
+                    None => self.projects_root()?.join(&name),
+                };
+                // A new project folder is a btrfs subvolume where the filesystem allows one —
+                // that is what makes this project's files undoable at all.
+                // A folder that is already there is not this project's: `create_project_dir`
+                // refuses it rather than hand someone else's directory to the sandbox user.
+                if is_new {
+                    if let Err(e) = snapshot::create_project_dir(&folder) {
+                        return Ok(vec![format!("I could not start *{name}*: {e}")]);
+                    }
+                }
                 let desc = existing.map(|p| p.description).unwrap_or(description);
-                self.store.upsert_project(&name, &self.workspace(&name).display().to_string(), &desc)?;
+                let folder = folder.display().to_string();
+                self.store.upsert_project(&name, &folder, &desc)?;
                 // I6: `remember` on a `start` move was saved silently — only the `Reply` arm told
                 // the user. Same "(Noted for the future: …)" line here, computed before the value
                 // moves into `add_instruction`.
                 let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
                 if let Some(r) = remember { self.store.add_instruction(&r)?; }
-                let job = Job::new(&name, &goal, creative, &understood);
+                let mut job = Job::new(&name, &folder, &goal, creative, &understood);
+                job.new_project = is_new;
+                // The model's `goal` is its paraphrase; this is what the user actually said.
+                job.request = text.to_string();
+                // The files as they were before this job touched them — taken BEFORE the job
+                // row exists. A snapshot that fails after the job is saved leaves an open job
+                // whose files nothing can put back; this way the job never starts at all. A
+                // plain-folder project (pre-1c, or any non-btrfs machine) gets no snapshot and
+                // no row — undo says so rather than pretending the files were covered.
+                let snap = match self.snapshotter.take(Path::new(&folder), &self.snapshots_dir, &job.id) {
+                    Ok(s) => s,
+                    Err(e) => return Ok(vec![format!("I could not start *{name}*: the files could not be put safe first ({e}).")]),
+                };
+                self.store.save_job(&job)?;
+                if let Some(snap) = snap {
+                    self.store.add_undo(&job.id, &UndoEntry::ProjectSnapshot { folder: folder.clone(), snapshot: snap.display().to_string() })?;
+                }
+                let mut out = vec![understood];
+                if let Some(n) = note { out.push(n); }
+                out.extend(self.run_turns(job)?);
+                Ok(out)
+            }
+            // The machine itself: no project row, no blueprint, one shared scratch folder.
+            Move::Housekeep { goal, understood, remember } => {
+                let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
+                if let Some(r) = remember { self.store.add_instruction(&r)?; }
+                // The sandbox works in this folder too, so when the engine is the first thing to
+                // create it, it gets the same group and mode a project folder gets. A folder the
+                // setup script already made is left exactly as it is.
+                let fresh = !self.housekeeping_dir.exists();
+                std::fs::create_dir_all(&self.housekeeping_dir)?;
+                if fresh { snapshot::share_with_sandbox(&self.housekeeping_dir); }
+                let mut job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
+                job.request = text.to_string();
                 self.store.save_job(&job)?;
                 let mut out = vec![understood];
                 if let Some(n) = note { out.push(n); }
@@ -178,10 +289,75 @@ impl<M: Model> Engine<M> {
         Ok(vec![text])
     }
 
+    /// "Undo that": put back everything the most recent finished job changed, newest change
+    /// first, and say in plain words what was put back — and what could not be.
+    ///
+    /// A reversal that fails is reported and marked applied all the same: it must not be retried
+    /// blindly the next time the user says undo, and every other row still runs.
+    fn undo_last(&mut self) -> Result<Vec<String>, EngineError> {
+        let job = match self.store.last_undoable_job()? {
+            Some(j) => j,
+            None => return Ok(vec!["Nothing left to undo.".into()]),
+        };
+        let rows = self.store.unapplied_undo(&job.id)?;
+        // One executor for the whole reversal, like one job's worth of work: `executor_for`
+        // opens the action log, which is not something to do once per row.
+        let exec = self.executor_for(&job)?;
+        let mut out = vec![format!("Undoing the last job ({}):", display_name(&job))];
+        for (row_id, entry) in rows {
+            // Settings and snapshots are the engine's own: no worker holds either. Everything
+            // else was done by the privileged hand, so the privileged hand puts it back.
+            let engine_lane = matches!(entry, UndoEntry::ProjectSnapshot { .. } | UndoEntry::Setting { .. });
+            let result = match &entry {
+                // `snap`, not `snapshot`: the module of that name is what does the work.
+                UndoEntry::ProjectSnapshot { folder, snapshot: snap } => {
+                    self.snapshotter.restore(Path::new(folder), Path::new(snap)).map_err(|e| e.to_string())
+                }
+                UndoEntry::Setting { key, previous } => match previous {
+                    Some(value) => self.store.set_setting(key, value).map(|_| ()).map_err(|e| e.to_string()),
+                    None => self.store.delete_setting(key).map_err(|e| e.to_string()),
+                },
+                other => match exec.reverse(&job.id, other)? {
+                    o if o.ok => Ok(()),
+                    o => Err(o.detail),
+                },
+            };
+            // `Executor::reverse` logs the admin lane itself; the engine's own two kinds would
+            // otherwise leave no trace at all of having been put back.
+            if engine_lane {
+                let (tag, detail) = match &result { Ok(()) => ("ok", "put back".to_string()), Err(d) => ("error", d.clone()) };
+                if let Err(e) = exec.log_text(&job.id, &format!("undo: {entry:?}: {tag}: {detail}")) {
+                    eprintln!("core: failed to log an undo: {e}");
+                }
+            }
+            out.push(match result {
+                Ok(()) => entry.describe(),
+                Err(detail) => format!("Could not undo: {} — left as is ({detail})", entry.describe()),
+            });
+            // The change is already put back, so a store that cannot record it is the end of the
+            // run — but the user still gets every line earned so far rather than an error page.
+            if let Err(e) = self.store.mark_undo_applied(row_id) {
+                out.push(format!("Undo stopped early: {e}"));
+                return Ok(out);
+            }
+        }
+        out.push("Not covered: unsaved work in open programs; files written outside the project; a package version the archive no longer carries (a reinstall takes the current one).".into());
+        // A plain project folder (it predates 1c, or the filesystem is not btrfs) never had a
+        // snapshot taken, so its files were not covered. Asked of the folder itself rather than
+        // of the rows: an undo run that has already put the snapshot back has no row left to
+        // read, and would otherwise start claiming the files were never covered.
+        if !job.housekeeping && !snapshot::is_subvolume(Path::new(&job.folder)) {
+            out.push(format!("Files in *{}* were not covered: the project predates undo.", job.project));
+        }
+        Ok(out)
+    }
+
     /// The bounded last-run note (1b spec §6.6): written from the record when a job ends
     /// badly, wiped when a job in the project is proven done. Never more than one file.
     fn write_or_wipe_last_run(&self, job: &Job) {
-        let path = self.workspace(&job.project).join("LAST_RUN.md");
+        // A housekeeping job has no project folder to leave a note in.
+        if job.housekeeping { return; }
+        let path = self.workspace(job).join("LAST_RUN.md");
         match job.state {
             State::Done => { let _ = std::fs::remove_file(&path); }
             State::Failed | State::Cancelled => {
@@ -199,11 +375,32 @@ impl<M: Model> Engine<M> {
         }
     }
 
+    /// The engine's own lane (`executor::Lane::Engine`): a setting is a row in our store, so no
+    /// worker can apply it. One known key so far; an unknown one names what is known.
+    fn apply_setting(&self, key: &str, value: &str) -> Result<Outcome, EngineError> {
+        if key != "projects_root" {
+            return Ok(Outcome::err(format!("unknown setting '{key}'; known settings: projects_root")));
+        }
+        // The constructor's own root counts as a root: a test (and a machine with a custom
+        // AI_OS_PROJECTS) lives outside /data, and its own root is not an escape.
+        let default_root = self.default_root.display().to_string();
+        let mut roots: Vec<&str> = executor::rules::AI_ROOTS.to_vec();
+        roots.push(&default_root);
+        if !executor::rules::under_any(value, &roots) {
+            // The reason names only what `under_any` above actually accepts. Naming /home/ai
+            // here told the model a value the same call had just refused was legal, and it
+            // spent its next step trying it again.
+            return Ok(Outcome::err(format!("projects_root must be an absolute path under /data or the projects root ({default_root})")));
+        }
+        let previous = self.store.set_setting(key, value)?;
+        Ok(Outcome::ok(format!("setting {key} = {value}")).with_undo(UndoEntry::Setting { key: key.into(), previous }))
+    }
+
     fn reject(&self, job: &mut Job, why: &str) -> Result<Option<Vec<String>>, EngineError> {
         job.rejections += 1;
         job.note_to_model = Some(format!("your last move was rejected: {why}"));
         if job.rejections >= Self::MAX_REJECTIONS {
-            let text = format!("I gave up on {}: I kept answering in a way the system could not accept ({why}).", job.project);
+            let text = format!("I gave up on {}: I kept answering in a way the system could not accept ({why}).", display_name(job));
             return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
         }
         self.store.save_job(job)?;
@@ -241,7 +438,33 @@ impl<M: Model> Engine<M> {
             let earlier = job.steps.iter().rev().find(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).map(|s| s.detail.clone()).unwrap_or_default();
             return self.reject(job, &format!("that exact action already failed with: {earlier} — work around it or replan"));
         }
-        let exec = self.executor_for(&job.project)?;
+        let exec = self.executor_for(job)?;
+        // `SetSetting` never reaches a worker (executor::lane -> Lane::Engine): the engine applies
+        // it and records it with `log_only`. A failure counts like any other failed step.
+        if let Action::SetSetting { key: name, value } = &action {
+            let outcome = self.apply_setting(name, value)?;
+            // Same invariant as `Executor::execute`: the setting is already written, so a logging
+            // failure must not abort the turn — that would lose both the step and the undo row,
+            // leaving a changed setting nothing can put back.
+            if let Err(e) = exec.log_only(&job.id, &action, &format!("{}: {}", if outcome.ok { "ok" } else { "error" }, outcome.detail)) {
+                eprintln!("core: failed to log a setting change: {e}");
+            }
+            job.rejections = 0;
+            job.note_to_model = None;
+            job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
+            if outcome.ok {
+                if let Some(entry) = outcome.undo { self.store.add_undo(&job.id, &entry)?; }
+            } else {
+                job.failed_actions.push(key);
+                let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
+                if fails >= Self::MAX_FAILS_PER_STEP {
+                    let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", display_name(job), outcome.detail);
+                    return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
+                }
+            }
+            self.store.save_job(job)?;
+            return Ok(None);
+        }
         match exec.execute(&job.id, &action, approved)? {
             ExecOutcome::Blocked(reason) => {
                 job.rejections = 0; // a legal act needing approval is a valid move, not a rejection
@@ -255,11 +478,18 @@ impl<M: Model> Engine<M> {
                 job.rejections = 0;
                 job.note_to_model = None;
                 job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
+                // Not gated on `outcome.ok`: a worker records an undo entry only when it really
+                // changed something, and a change made by an action that then failed is exactly
+                // the one the user most needs put back.
+                if let Some(u) = outcome.undo.clone() { self.store.add_undo(&job.id, &u)?; }
                 if outcome.ok {
-                    match Self::is_blueprint(&action) {
-                        Some(true) => job.last_blueprint_update = job.steps.len(),
-                        Some(false) => job.last_code_change = job.steps.len(),
-                        None => {}
+                    // A housekeeping job has no blueprint, so neither counter means anything to it.
+                    if !job.housekeeping {
+                        match Self::is_blueprint(&action) {
+                            Some(true) => job.last_blueprint_update = job.steps.len(),
+                            Some(false) => job.last_code_change = job.steps.len(),
+                            None => {}
+                        }
                     }
                     // Something changed on disk, so an earlier failure may now succeed:
                     // re-running the same command after a fix is legitimate (spike finding).
@@ -271,7 +501,7 @@ impl<M: Model> Engine<M> {
                     job.failed_actions.push(key);
                     let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
                     if fails >= Self::MAX_FAILS_PER_STEP {
-                        let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", job.project, outcome.detail);
+                        let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", display_name(job), outcome.detail);
                         return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
                     }
                 }
@@ -285,7 +515,7 @@ impl<M: Model> Engine<M> {
         let (plan_step, action) = match job.pending_action.take() { Some(p) => p, None => { job.state = State::Working; return self.run_turns(job); } };
         job.state = State::Working;
         if job.steps.len() >= Self::MAX_STEPS {
-            let text = format!("I gave up on {}: {} steps without finishing.", job.project, Self::MAX_STEPS);
+            let text = format!("I gave up on {}: {} steps without finishing.", display_name(&job), Self::MAX_STEPS);
             return self.finish(job, State::Failed, text);
         }
         if approved {
@@ -302,11 +532,11 @@ impl<M: Model> Engine<M> {
     fn run_turns(&mut self, mut job: Job) -> Result<Vec<String>, EngineError> {
         loop {
             if job.steps.len() >= Self::MAX_STEPS {
-                let text = format!("I gave up on {}: {} steps without finishing.", job.project, Self::MAX_STEPS);
+                let text = format!("I gave up on {}: {} steps without finishing.", display_name(&job), Self::MAX_STEPS);
                 return self.finish(job, State::Failed, text);
             }
-            let last_run = std::fs::read_to_string(self.workspace(&job.project).join("LAST_RUN.md")).ok();
-            let p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job.project).as_deref(), last_run.as_deref());
+            let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
+            let p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
             let mv = self.model.next_move(&p)?;
             let rejected = match (job.state, mv) {
                 (State::Asking, Move::Ask { questions }) | (State::Working, Move::Ask { questions }) | (State::Planning, Move::Ask { questions }) if !job.creative => {
@@ -335,7 +565,7 @@ impl<M: Model> Engine<M> {
                 (State::Working, Move::Replan { steps, why }) => {
                     job.replans += 1;
                     if job.replans > Self::MAX_REPLANS {
-                        let text = format!("I gave up on {}: the plan kept changing ({} replans) without progress.", job.project, job.replans);
+                        let text = format!("I gave up on {}: the plan kept changing ({} replans) without progress.", display_name(&job), job.replans);
                         return self.finish(job, State::Failed, text);
                     }
                     job.plan = steps; job.rejections = 0;
@@ -347,8 +577,28 @@ impl<M: Model> Engine<M> {
                     None
                 }
                 (State::Working, Move::Done { summary, check }) => {
-                    if job.last_code_change > job.last_blueprint_update {
+                    // The absolute gate: a new project must leave a real BLUEPRINT.md behind,
+                    // whether or not this job happened to change code — the counters only
+                    // compare steps to each other, so a job that never wrote a file passed the
+                    // old rule with no blueprint at all. Housekeeping has no project and no
+                    // blueprint, so neither rule applies to it.
+                    //
+                    // Order: the step-counter rule first. Both rules are true at once whenever a
+                    // new project has changed code and has no root blueprint yet; the counter
+                    // rule is the older contract (I5's test pins its wording), and either message
+                    // asks for the same next move. The absolute rule still catches every case the
+                    // counters cannot see — including a new project that wrote no file at all.
+                    let gate = if job.housekeeping {
+                        None
+                    } else if job.last_code_change > job.last_blueprint_update {
                         Some("update BLUEPRINT.md for what you changed before saying done".to_string())
+                    } else if job.new_project && !self.workspace(&job).join("BLUEPRINT.md").exists() {
+                        Some("create BLUEPRINT.md for this new project before saying done".to_string())
+                    } else {
+                        None
+                    };
+                    if let Some(why) = gate {
+                        Some(why)
                     } else {
                         let key_step = job.plan.len().max(1);
                         match self.perform(&mut job, key_step, check, false, true)? {
@@ -365,11 +615,11 @@ impl<M: Model> Engine<M> {
                     }
                 }
                 (State::Working, Move::GiveUp { reason, missing }) => {
-                    return self.finish(job.clone(), State::Failed, format!("I gave up on {}: {reason}. Missing: {missing}.", job.project));
+                    return self.finish(job.clone(), State::Failed, format!("I gave up on {}: {reason}. Missing: {missing}.", display_name(&job)));
                 }
                 (_, Move::Act { .. }) | (_, Move::Done { .. }) | (_, Move::Replan { .. }) | (_, Move::GiveUp { .. }) => Some("give a plan first".to_string()),
                 (_, Move::Plan { .. }) => Some("not now".to_string()),
-                (_, Move::Reply { .. }) | (_, Move::Start { .. }) => Some("a job is running: use ask, plan, act, replan, done or give_up".to_string()),
+                (_, Move::Reply { .. }) | (_, Move::Start { .. }) | (_, Move::Housekeep { .. }) => Some("a job is running: use ask, plan, act, replan, done or give_up".to_string()),
             };
             if let Some(why) = rejected {
                 if let Some(stop) = self.reject(&mut job, &why)? { return Ok(stop); }
@@ -434,6 +684,16 @@ mod tests {
     }
 
     #[test]
+    fn undo_words() {
+        assert!(is_undo("undo"));
+        assert!(is_undo("Undo that."));
+        assert!(is_undo("roll back"));
+        assert!(is_undo("Please undo!")); assert!(is_undo("undo that please"));
+        assert!(!is_undo("don't undo"));
+        assert!(!is_undo("undo is a word"));
+    }
+
+    #[test]
     fn stop_cancels_an_open_job_through_handle() {
         let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()] }], "cancel");
         e.handle("make p").unwrap();
@@ -485,9 +745,26 @@ mod tests {
         ], "reuse");
         e.handle("make p").unwrap();
         assert!(e.open_job().unwrap().is_none());
+        let folder = e.store.get_project("p").unwrap().unwrap().folder;
+        // Moving the root for *new* projects must not move a project that already has a folder.
+        let other = crate::testing::temp_root("reuse-other");
+        e.store.set_setting("projects_root", &other.display().to_string()).unwrap();
         e.handle("add a menu to p").unwrap();
         assert_eq!(e.store.list_projects().unwrap().len(), 1, "same project row, not a second one");
         assert_eq!(e.store.list_projects().unwrap()[0].description, "prime printer", "the original description is kept");
+        assert_eq!(e.store.get_project("p").unwrap().unwrap().folder, folder, "the stored folder is read back, never recomputed from the root");
+    }
+
+    #[test]
+    fn new_projects_land_under_the_projects_root_setting() {
+        let (mut e, _, root) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "projects-root");
+        let other = crate::testing::temp_root("projects-root-other");
+        e.store.set_setting("projects_root", &other.display().to_string()).unwrap();
+        e.handle("make p").unwrap();
+        let row = e.store.get_project("p").unwrap().unwrap();
+        assert_eq!(row.folder, other.join("p").display().to_string());
+        assert!(other.join("p").is_dir());
+        assert!(!root.join("p").exists(), "the constructor's root is only the default, not the answer");
     }
 
     #[test]
@@ -553,9 +830,9 @@ mod tests {
             start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("python3")), done(run("python3")),
         ], "check");
         rec.outcomes.borrow_mut().extend([
-            Outcome { ok: true, detail: "ok".into() },                 // blueprint write
-            Outcome { ok: false, detail: "Traceback… NameError".into() }, // first check fails
-            Outcome { ok: true, detail: "2 3 5 7".into() },             // second check passes
+            Outcome::ok("ok"),                    // blueprint write
+            Outcome::err("Traceback… NameError"), // first check fails
+            Outcome::ok("2 3 5 7"),               // second check passes
         ]);
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -571,8 +848,8 @@ mod tests {
             act(1, run("cc")), act(1, write("BLUEPRINT.md")), done(run("true")),
         ], "retry");
         rec.outcomes.borrow_mut().extend([
-            Outcome { ok: true, detail: "ok".into() },
-            Outcome { ok: false, detail: "gcc: not found".into() },
+            Outcome::ok("ok"),
+            Outcome::err("gcc: not found"),
         ]);
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -593,9 +870,9 @@ mod tests {
             act(2, write("BLUEPRINT.md")), done(run("python3")),
         ], "retry-after-fix");
         rec.outcomes.borrow_mut().extend([
-            Outcome { ok: true, detail: "ok".into() },
-            Outcome { ok: false, detail: "NameError: prnt".into() },
-            Outcome { ok: true, detail: "edited".into() },
+            Outcome::ok("ok"),
+            Outcome::err("NameError: prnt"),
+            Outcome::ok("edited"),
         ]);
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -607,7 +884,7 @@ mod tests {
         let (mut e, rec, _) = engine_with(vec![
             start("p", true), plan(), act(1, run("a")), act(1, run("b")), act(1, run("c")), act(1, run("d")),
         ], "three");
-        for _ in 0..4 { rec.outcomes.borrow_mut().push_back(Outcome { ok: false, detail: "boom".into() }); }
+        for _ in 0..4 { rec.outcomes.borrow_mut().push_back(Outcome::err("boom")); }
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
         assert_eq!(rec.calls.borrow().len(), 3);
@@ -689,7 +966,7 @@ mod tests {
             Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "make it work".into(), creative: true, understood: "Continuing p".into(), remember: None },
             plan(), act(1, write("BLUEPRINT.md")), done(run("python3")),
         ], "lastrun");
-        rec.outcomes.borrow_mut().push_back(Outcome { ok: false, detail: "exit 1; stderr: NameError: prmes".into() });
+        rec.outcomes.borrow_mut().push_back(Outcome::err("exit 1; stderr: NameError: prmes"));
         e.handle("make p").unwrap();
         let note = std::fs::read_to_string(root.join("p").join("LAST_RUN.md")).expect("LAST_RUN.md written by the loop");
         assert!(note.contains("NameError: prmes") && note.contains("the script crashes") && note.contains("a working loop"), "{note}");
@@ -708,9 +985,10 @@ mod tests {
         drop(e);
         // New engine, same store: the answer must land on the saved job.
         let rec = crate::testing::Recorder::default();
-        let r2 = rec.clone();
+        let housekeeping = root.join("housekeeping");
+        let snapshots = root.join("snapshots");
         let mut e2 = Engine::new(store, crate::model::FakeModel::new(vec![plan(), act(1, write("BLUEPRINT.md")), done(run("true"))]), root, None,
-            Box::new(move |_| Box::new(crate::testing::ScriptedWorker(r2.clone())) as Box<dyn Worker>));
+            crate::testing::scripted_workers(&rec), housekeeping, snapshots);
         let out = e2.handle("python").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         assert!(e2.open_job().unwrap().is_none());
@@ -750,10 +1028,10 @@ mod tests {
             done(run("python3")),                        // now passes
         ], "check-then-act");
         rec.outcomes.borrow_mut().extend([
-            Outcome { ok: true, detail: "ok".into() },                    // blueprint write
-            Outcome { ok: false, detail: "NameError: prnt".into() },      // check fails
-            Outcome { ok: true, detail: "edited".into() },                // edit succeeds
-            Outcome { ok: true, detail: "2 3 5 7".into() },                // check passes
+            Outcome::ok("ok"),               // blueprint write
+            Outcome::err("NameError: prnt"), // check fails
+            Outcome::ok("edited"),           // edit succeeds
+            Outcome::ok("2 3 5 7"),          // check passes
         ]);
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -804,8 +1082,8 @@ mod tests {
 
     #[test]
     fn step_cap_is_rechecked_on_the_approval_path() {
-        let (mut e, rec, _) = engine_with(vec![], "cap-approval");
-        let mut job = Job::new("p", "goal", true, "Starting p");
+        let (mut e, rec, root) = engine_with(vec![], "cap-approval");
+        let mut job = Job::new("p", &root.display().to_string(), "goal", true, "Starting p");
         job.plan = vec!["step".into()];
         job.state = State::WaitingApproval;
         for i in 0..25 { job.steps.push(StepRecord { plan_step: 1, action: write(&format!("f{i}")), ok: true, detail: "ok".into() }); }
@@ -855,17 +1133,22 @@ mod tests {
     /// several `executor_for` calls one job makes, and hands the test the path to read directly.
     fn engine_with_log(moves: Vec<Move>, tag: &str) -> (Engine<crate::model::FakeModel>, PathBuf) {
         let rec = crate::testing::Recorder::default();
-        let r2 = rec.clone();
         let root = crate::testing::temp_root(tag);
         let log_path = std::env::temp_dir().join(format!("ai-os-core-{tag}-log-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&log_path);
         let log_path_str = log_path.to_string_lossy().to_string();
+        let housekeeping = root.join("housekeeping");
+        std::fs::create_dir_all(&housekeeping).unwrap();
+        let root_snapshots = root.join("snapshots");
+        std::fs::create_dir_all(&root_snapshots).unwrap();
         let e = Engine::new(
             crate::store::Store::open_in_memory().unwrap(),
             crate::model::FakeModel::new(moves),
             root,
             Some(log_path_str),
-            Box::new(move |_ws| Box::new(crate::testing::ScriptedWorker(r2.clone())) as Box<dyn Worker>),
+            crate::testing::scripted_workers(&rec),
+            housekeeping,
+            root_snapshots,
         );
         (e, log_path)
     }
@@ -892,6 +1175,343 @@ mod tests {
         assert!(outcomes[0].starts_with("blocked:"), "{outcomes:?}");
         assert!(outcomes[1].starts_with("ok:"), "{outcomes:?}");
         let _ = std::fs::remove_file(&log_path);
+    }
+
+    fn housekeep() -> Move {
+        Move::Housekeep {
+            goal: "prepare /data/work for all projects".into(),
+            understood: "Housekeeping: I'll create the folder and make it the projects root".into(),
+            remember: None,
+        }
+    }
+
+    #[test]
+    fn housekeeping_job_has_no_project_no_blueprint_gate_and_no_last_run() {
+        // `/data/work` rather than a temp path: `rules::classify` sends a `make_dir` outside
+        // AI_ROOTS to the approval gate, and the admin recorder never touches the disk anyway.
+        let (mut e, rec, root) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::MakeDir { path: "/data/work".into() }), act(1, write("notes.txt")), done(run("true")),
+        ], "hk");
+        let out = e.handle("prepare a folder for all my projects").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert!(!root.join("LAST_RUN.md").exists() && !e.housekeeping_dir().join("LAST_RUN.md").exists());
+        assert_eq!(rec.admin_calls.borrow().len(), 1, "make_dir went to the admin lane");
+        assert!(e.store.list_projects().unwrap().is_empty(), "no project row");
+    }
+
+    #[test]
+    fn a_housekeeping_job_that_gives_up_still_leaves_no_last_run() {
+        // The Done half above is vacuous: `write_or_wipe_last_run` only ever *writes* for a job
+        // that ended failed or cancelled, so only a housekeeping job that gives up can prove the
+        // `if job.housekeeping { return; }` guard is what keeps the note out of the scratch folder.
+        let (mut e, _, root) = engine_with(vec![
+            housekeep(), plan(), Move::GiveUp { reason: "no disk left".into(), missing: "space on /data".into() },
+        ], "hk-giveup");
+        let out = e.handle("prepare a folder").unwrap();
+        assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
+        assert!(out.last().unwrap().contains("I gave up on housekeeping:"), "a housekeeping job has no project name to print: {out:?}");
+        assert!(!e.housekeeping_dir().join("LAST_RUN.md").exists(), "a housekeeping job has no project folder to leave a note in");
+        assert!(!root.join("LAST_RUN.md").exists());
+        assert!(!PathBuf::from("LAST_RUN.md").exists(), "and none in the process's own directory either");
+    }
+
+    #[test]
+    fn set_setting_moves_new_projects_and_rejects_bad_values() {
+        // `temp_root_path` only names the folder; `engine_with` is what creates it.
+        let (mut e, _, root) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::SetSetting { key: "projects_root".into(), value: crate::testing::temp_root_path("setting").join("work").display().to_string() }), done(run("true")),
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "setting");
+        e.handle("move projects").unwrap();
+        e.handle("make p").unwrap();
+        assert!(root.join("work/p/BLUEPRINT.md").exists(), "new project under the new root");
+        // What Task 9 needs to put the root back: the value the setting held before.
+        let hk = e.store.last_undoable_job().unwrap().expect("the housekeeping job left something to put back");
+        let entries: Vec<UndoEntry> = e.store.unapplied_undo(&hk.id).unwrap().into_iter().map(|(_, en)| en).collect();
+        assert_eq!(entries, vec![UndoEntry::Setting { key: "projects_root".into(), previous: None }]);
+
+        let (mut e2, _, _) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::SetSetting { key: "colour".into(), value: "blue".into() }),
+            Move::GiveUp { reason: "x".into(), missing: "y".into() },
+        ], "badkey");
+        e2.handle("set colour").unwrap();
+        let prompts = e2.model.prompts.borrow();
+        // prompt[i] elicits move[i]; the failed act is move[2], so its reason reaches move[3]'s
+        // prompt (the brief's index was one turn early).
+        assert!(prompts[3].user.contains("unknown setting") && prompts[3].user.contains("projects_root"), "{}", prompts[3].user);
+    }
+
+    #[test]
+    fn projects_root_under_home_ai_is_refused_and_the_reason_names_only_what_is_allowed() {
+        // /home/ai left `AI_ROOTS` in the 1c fix wave (design §3), so this value is refused —
+        // and the reason must not go on offering it, or the model reads a refusal as a hint.
+        let (mut e, _, _) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::SetSetting { key: "projects_root".into(), value: "/home/ai".into() }),
+            Move::GiveUp { reason: "x".into(), missing: "y".into() },
+        ], "root-home");
+        e.handle("put projects in my home").unwrap();
+        assert_eq!(e.store.get_setting("projects_root").unwrap(), None, "the setting was not applied");
+        let prompts = e.model.prompts.borrow();
+        // The prompt echoes the action itself, "/home/ai" and all — the claim here is about the
+        // REASON, so it is read out of the line the refusal wrote.
+        let reason = prompts[3].user.lines()
+            .find(|l| l.contains("projects_root must be an absolute path"))
+            .unwrap_or_else(|| panic!("the refusal must reach the model: {}", prompts[3].user));
+        assert!(reason.contains("under /data"), "{reason}");
+        let offered = &reason[reason.find("must be an absolute path").unwrap()..];
+        assert!(!offered.contains("/home/ai"), "the refusal must not name the value it just refused: {reason}");
+    }
+
+    #[test]
+    fn done_on_a_new_project_without_a_blueprint_file_is_rejected() {
+        let (mut e, _, root) = engine_with(vec![
+            start("p", true), plan(), act(1, run("sed")), done(run("true")), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "absgate");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[4].user.contains("rejected: create BLUEPRINT.md"), "{}", prompts[4].user);
+        assert!(root.join("p/BLUEPRINT.md").exists(), "the scripted worker really wrote it");
+    }
+
+    #[test]
+    fn housekeep_out_of_turn_is_rejected_like_start() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", false), Move::Ask { questions: vec!["Which language?".into()] },
+            housekeep(),                                   // out of turn: a job is already running
+            plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "hk-out-of-turn");
+        e.handle("make it").unwrap();
+        let out = e.handle("python").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[3].user.contains("rejected: a job is running"), "{}", prompts[3].user);
+    }
+
+    #[test]
+    fn a_job_saved_before_folders_were_recorded_is_failed_not_resumed() {
+        // Pre-1c rows have no `folder`, so every action would run in the process's own
+        // directory. Fail them on sight, without asking the model.
+        let (mut e, rec, _) = engine_with(vec![], "no-folder");
+        let mut job = Job::new("p", "", "goal", true, "Starting p");
+        job.state = State::Working;
+        e.store.save_job(&job).unwrap();
+        let out = e.handle("carry on").unwrap();
+        assert!(out[0].contains("predates the folder record"), "{out:?}");
+        assert!(e.open_job().unwrap().is_none());
+        assert!(e.model.prompts.borrow().is_empty(), "no model call");
+        assert!(rec.calls.borrow().is_empty());
+        assert!(!PathBuf::from("LAST_RUN.md").exists(), "a folderless job must not drop a note in the current directory");
+    }
+
+    /// `/data/work` rather than a temp path, for the same reason the housekeeping test gives:
+    /// `rules::classify` sends a `make_dir` outside AI_ROOTS to the approval gate, and the admin
+    /// recorder never touches the disk anyway. It is also a legal `projects_root` value.
+    const WORK: &str = "/data/work";
+    fn make_work() -> Move { act(1, Action::MakeDir { path: WORK.into() }) }
+    fn dir_undo() -> Outcome { Outcome::ok("made").with_undo(UndoEntry::DirCreated { path: WORK.into() }) }
+
+    #[test]
+    fn undo_reverses_the_last_jobs_rows_newest_first_and_reports() {
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), make_work(),
+            act(1, Action::SetSetting { key: "projects_root".into(), value: WORK.into() }),
+            done(run("true")),
+        ], "undo");
+        // The admin lane's outcome carries the undo for the folder it made.
+        rec.admin_outcomes.borrow_mut().push_back(dir_undo());
+        e.handle("prep").unwrap();
+        let out = e.handle("undo").unwrap();
+        assert_eq!(rec.reversed.borrow().len(), 1, "the dir reversal went to the admin worker");
+        assert!(out.iter().any(|l| l.contains("projects_root")) && out.iter().any(|l| l.contains("folder")), "{out:?}");
+        assert_eq!(e.store.get_setting("projects_root").unwrap(), None, "setting reversed by the engine");
+        // Newest first: the setting went back before the folder it pointed at was removed.
+        let setting_at = out.iter().position(|l| l.contains("projects_root")).unwrap();
+        let folder_at = out.iter().position(|l| l.contains("Removed the folder")).unwrap();
+        assert!(setting_at < folder_at, "{out:?}");
+        assert_eq!(out[0], "Undoing the last job (housekeeping):", "{out:?}");
+        assert!(out.iter().any(|l| l.contains("Not covered: unsaved work in open programs")), "{out:?}");
+        assert!(!out.iter().any(|l| l.contains("predates undo")), "housekeeping has no project files: {out:?}");
+        assert!(e.handle("undo").unwrap()[0].contains("Nothing left to undo"));
+    }
+
+    #[test]
+    fn undo_while_a_job_is_open_is_refused() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", false), Move::Ask { questions: vec!["Which language?".into()] },
+        ], "undo-open");
+        e.handle("make p").unwrap();
+        let before = e.open_job().unwrap().expect("a job is open");
+        let out = e.handle("undo").unwrap();
+        assert!(out[0].contains("Finish or stop the current job first"), "{out:?}");
+        assert_eq!(e.open_job().unwrap().as_ref(), Some(&before), "the job is untouched");
+        assert_eq!(e.model.prompts.borrow().len(), 2, "refusing undo asks the model nothing");
+    }
+
+    #[test]
+    fn undo_is_not_a_model_call() {
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), make_work(), done(run("true")),
+        ], "undo-no-model");
+        rec.admin_outcomes.borrow_mut().push_back(dir_undo());
+        e.handle("prep").unwrap();
+        let before = e.model.prompts.borrow().len();
+        let out = e.handle("undo").unwrap();
+        assert!(out.iter().any(|l| l.contains("Removed the folder")), "{out:?}");
+        assert_eq!(e.model.prompts.borrow().len(), before, "undo is deterministic, like stop and approvals");
+        // And the same holds for the "nothing to undo" path.
+        e.handle("undo").unwrap();
+        assert_eq!(e.model.prompts.borrow().len(), before);
+    }
+
+    #[test]
+    fn a_failing_reversal_is_reported_and_the_rest_still_run() {
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), make_work(),
+            act(1, Action::Install { packages: vec!["cowsay".into()] }),
+            done(run("true")),
+        ], "undo-partial");
+        rec.admin_outcomes.borrow_mut().push_back(dir_undo());
+        rec.admin_outcomes.borrow_mut().push_back(Outcome::ok("installed").with_undo(UndoEntry::PackagesAdded { packages: vec!["cowsay".into()] }));
+        // Newest first, so the packages row is the one that fails.
+        rec.reverse_outcomes.borrow_mut().push_back(Outcome::err("pacman: database is locked"));
+        e.handle("prep").unwrap();
+        let out = e.handle("undo").unwrap();
+        assert!(out.iter().any(|l| l.contains("Could not undo") && l.contains("cowsay") && l.contains("database is locked")), "{out:?}");
+        assert!(out.iter().any(|l| l.contains("Removed the folder")), "a failed reversal never stops the rest: {out:?}");
+        assert_eq!(rec.reversed.borrow().len(), 2);
+        assert!(e.handle("undo").unwrap()[0].contains("Nothing left to undo"), "a failed row is marked applied, never retried blindly");
+    }
+
+    #[test]
+    fn cancelled_jobs_are_undoable() {
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), make_work(), Move::Ask { questions: vec!["Anything else?".into()] },
+        ], "undo-cancelled");
+        rec.admin_outcomes.borrow_mut().push_back(dir_undo());
+        e.handle("prep").unwrap();
+        assert_eq!(e.open_job().unwrap().unwrap().state, State::WaitingAnswer);
+        let stopped = e.handle("stop").unwrap();
+        assert_eq!(stopped, vec!["Stopped the job in housekeeping.".to_string()], "a housekeeping job has no project name to print");
+        let out = e.handle("undo").unwrap();
+        assert_eq!(rec.reversed.borrow().len(), 1, "a cancelled job is undoable too");
+        assert!(out.iter().any(|l| l.contains("Removed the folder")), "{out:?}");
+    }
+
+    #[test]
+    fn second_undo_reaches_the_previous_job() {
+        fn set_root(value: &str) -> Move { act(1, Action::SetSetting { key: "projects_root".into(), value: value.into() }) }
+        let (mut e, _, _) = engine_with(vec![
+            housekeep(), plan(), set_root("/data/work"), done(run("true")),
+            housekeep(), plan(), set_root("/data/other"), done(run("true")),
+        ], "undo-twice");
+        e.handle("put the projects in /data/work").unwrap();
+        e.handle("no, /data/other").unwrap();
+        assert_eq!(e.store.get_setting("projects_root").unwrap().as_deref(), Some("/data/other"));
+
+        let out = e.handle("undo").unwrap();
+        assert!(out.iter().any(|l| l.contains("Setting projects_root back to /data/work")), "{out:?}");
+        assert_eq!(e.store.get_setting("projects_root").unwrap().as_deref(), Some("/data/work"), "the newest job goes back first");
+        let out = e.handle("undo").unwrap();
+        assert!(out.iter().any(|l| l.contains("Cleared setting projects_root")), "{out:?}");
+        assert_eq!(e.store.get_setting("projects_root").unwrap(), None, "a second undo reaches the job before that");
+        assert!(e.handle("undo").unwrap()[0].contains("Nothing left to undo"));
+    }
+
+    /// I6: the ProjectSnapshot path — the row at job start, the restore on undo, the report
+    /// line — had no unit coverage at all, because a temp root is never btrfs so the real
+    /// `take` always answered `None`. These four go through `FakeSnapshotter`.
+    fn snapshot_job() -> Vec<Move> {
+        vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true"))]
+    }
+
+    #[test]
+    fn a_job_start_records_the_snapshot_it_took() {
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, root) = crate::testing::engine_with_snapshots(snapshot_job(), "snap-row", &snap);
+        e.handle("go").unwrap();
+        let taken = snap.0.taken.borrow().clone();
+        assert_eq!(taken.len(), 1, "one snapshot per job start");
+        assert_eq!(taken[0].0, root.join("p"), "the project's own folder");
+        assert_eq!(taken[0].1, root.join("snapshots"));
+        let job = e.store.last_undoable_job().unwrap().expect("the job finished");
+        let rows = e.store.unapplied_undo(&job.id).unwrap();
+        let row = rows.iter().find_map(|(_, entry)| match entry {
+            UndoEntry::ProjectSnapshot { folder, snapshot } => Some((folder.clone(), snapshot.clone())),
+            _ => None,
+        }).expect("a ProjectSnapshot row");
+        assert_eq!(row.0, root.join("p").display().to_string());
+        assert_eq!(row.1, snap.last_snapshot().display().to_string());
+    }
+
+    #[test]
+    fn undo_restores_the_files_from_that_snapshot() {
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, root) = crate::testing::engine_with_snapshots(snapshot_job(), "snap-undo", &snap);
+        e.handle("go").unwrap();
+        let expected = snap.last_snapshot();
+        let out = e.handle("undo").unwrap();
+        assert_eq!(snap.0.restored.borrow().as_slice(), &[(root.join("p"), expected)], "folder and snapshot, as recorded");
+        assert!(out.iter().any(|l| l.starts_with("Restored the files of") && l.contains("p")), "{out:?}");
+    }
+
+    #[test]
+    fn a_restore_that_fails_is_reported_and_not_retried() {
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, _) = crate::testing::engine_with_snapshots(snapshot_job(), "snap-undo-fail", &snap);
+        e.handle("go").unwrap();
+        snap.0.restore_fails.set(true);
+        let out = e.handle("undo").unwrap();
+        assert!(out.iter().any(|l| l.starts_with("Could not undo:") && l.contains("Restored the files of")), "{out:?}");
+        // The row is marked applied all the same: a second undo reaches the job before this one
+        // (there is none), never this same failing restore again.
+        assert!(e.handle("undo").unwrap()[0].contains("Nothing left to undo"), "the row was left unapplied");
+        assert_eq!(snap.0.restored.borrow().len(), 1, "tried exactly once");
+    }
+
+    #[test]
+    fn a_job_whose_files_cannot_be_put_safe_first_never_starts() {
+        let snap = crate::testing::FakeSnapshotter::default();
+        snap.0.take_fails.set(true);
+        let (mut e, rec, _) = crate::testing::engine_with_snapshots(snapshot_job(), "snap-take-fail", &snap);
+        let out = e.handle("go").unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].contains("could not be put safe first") && out[0].contains("told to fail"), "{out:?}");
+        assert!(e.open_job().unwrap().is_none(), "no job was saved");
+        assert!(e.store.last_undoable_job().unwrap().is_none(), "no job row at all");
+        assert!(rec.calls.borrow().is_empty(), "nothing ran");
+    }
+
+    #[test]
+    fn a_project_never_adopts_a_folder_that_is_already_there() {
+        // C2: `create_project_dir` hands the folder to the sandbox group. A project name alone
+        // must not be able to do that to a folder someone else made.
+        // After `engine_with`: it wipes and recreates the temp root.
+        let (mut e, rec, root) = engine_with(vec![start("bin", true), plan()], "adopt");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin").join("keep.sh"), "mine").unwrap();
+        let out = e.handle("make bin").unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].contains("a folder already exists at") && out[0].contains("choose another project name"), "{out:?}");
+        assert!(e.open_job().unwrap().is_none(), "no job was started");
+        assert_eq!(std::fs::read_to_string(root.join("bin").join("keep.sh")).unwrap(), "mine");
+        assert!(rec.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn undoing_a_project_job_says_the_files_were_not_covered() {
+        // A temp root is never btrfs, so the job got no snapshot row — exactly the pre-1c
+        // plain-folder case the user must be told about.
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")),
+            act(1, Action::Install { packages: vec!["cowsay".into()] }),
+            act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "undo-plain-folder");
+        rec.admin_outcomes.borrow_mut().push_back(Outcome::ok("installed").with_undo(UndoEntry::PackagesAdded { packages: vec!["cowsay".into()] }));
+        e.handle("go").unwrap();
+        let out = e.handle("undo").unwrap();
+        assert_eq!(out[0], "Undoing the last job (p):", "{out:?}");
+        assert!(out.iter().any(|l| l == "Files in *p* were not covered: the project predates undo."), "{out:?}");
     }
 
     #[test]

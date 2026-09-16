@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# ai-os-admin: the ONLY thing user `ai` may run as root. Fixed menu, validated arguments, no shell strings.
+# Workshop transport for Phase 1c; replaced by the privileged executor daemon at packaging.
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+refuse(){ echo "refused: $*" >&2; exit 3; }
+# A trailing - is apt's "remove this instead" suffix, so a name may never end in one.
+# A trailing + is apt's "install this instead" suffix, which is what install already does,
+# and real packages end in it: g++, libstdc++6.
+NAME_RE='^[a-z0-9]([a-z0-9+.@_-]*[a-z0-9+])?$'
+# A .deb path is a file to dpkg, not a package name to apt — and a name that ends in .deb is
+# the model reaching for the wrong hand. Refuse it by name rather than let apt guess.
+names(){ [ $# -gt 0 ] || refuse "no names"; for n in "$@"; do [[ "$n" =~ $NAME_RE ]] || refuse "bad name: $n"
+  case "$n" in *.deb) refuse "a .deb file is not a package name: $n";; esac; done; }
+nonempty(){ [ -n "${1:-}" ] || refuse "empty path"; }
+# The caller owns the directories under /data, so it can plant symlinks there. Never follow one.
+nolink(){ if [ -L "$1" ]; then refuse "symlink not allowed: $1"; fi; }
+# What a path MEANS, as pure string: collapse `.` and `..`, touch no disk, follow nothing.
+lexnorm(){ local IFS=/ c; local -a parts=() out=(); read -ra parts <<< "$1"
+  for c in "${parts[@]}"; do case "$c" in ''|.) ;; ..) [ ${#out[@]} -eq 0 ] || unset 'out[${#out[@]}-1]';; *) out+=("$c");; esac; done
+  echo "/${out[*]}"; }
+# realpath -m: resolves symlinks in the existing prefix, no need for the leaf to exist.
+# A relative path would resolve against the CALLER's cwd, which is not what anyone approved.
+# realpath alone is NOT enough to decide the roots: the caller owns the folders under /data, so
+# it can plant `p -> /etc/cron.d` there, and `/data/…/p/x` would resolve INTO an allowed root and
+# be written as root. So the resolved path must equal the lexical one — any intermediate symlink
+# makes the two differ and is refused. /data, /home/ai and /etc are real directories, so nothing
+# legitimate changes. (`nolink` below still catches the leaf on paths that never reach here.)
+under(){ local p l; [[ "$1" = /* ]] || refuse "relative path: $1"; p=$(realpath -m -- "$1"); l=$(lexnorm "$1")
+  [ "$p" = "$l" ] || refuse "path goes through a symlink: $1"
+  for r in "${@:2}"; do [[ "$p" == "$r" || "$p" == "$r/"* ]] && { echo "$p"; return; }; done; refuse "path outside allowed roots: $1"; }
+not_refused_file(){ case "$1" in /etc/sudoers|/etc/sudoers.d|/etc/sudoers.d/*|/etc/passwd|/etc/shadow|/etc/group|/etc/gshadow) refuse "protected file: $1";; esac; }
+# A new directory under /data belongs to the sandbox, not to root; one under /home/ai to `ai`.
+# Nothing else is handed over: an approved `write-file /etc/foo/bar.conf` creates /etc/foo, and
+# chowning THAT to ai:ai would let the sandbox user drop files into a root-read directory
+# afterwards, without an approval. Outside the two AI roots a new directory stays root's.
+own_dir(){ case "$1" in
+  /data/*)    chown ai:ai-sandbox -- "$1"; chmod 2770 -- "$1" ;;
+  /home/ai/*) chown ai:ai -- "$1" ;;
+esac; }
+verb=${1:-}; shift || true
+case "$verb" in
+  install) [ "${1:-}" = -- ] || refuse "expected --"; shift; names "$@"
+    apt-get install -y -o DPkg::Lock::Timeout=60 -- "$@" ;;
+  remove)  [ "${1:-}" = -- ] || refuse "expected --"; shift; names "$@"
+    for p in "$@"; do
+      case "$p" in btrfs-progs|systemd|sudo) refuse "runtime package: $p";; esac
+      if dpkg-query -W -f '${Essential} ${Priority}\n' -- "$p" 2>/dev/null | grep -Eq '^yes|required$'; then refuse "essential package: $p"; fi
+    done
+    apt-get remove -y -o DPkg::Lock::Timeout=60 -- "$@" ;;
+  pkg-list) dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' | awk '$1=="ii"{print $2}' | sort ;;
+  service) [ $# -eq 2 ] || refuse "service <name> <enable|disable|restart|state>"; names "$1"
+    # Only services. `dbus.socket` passes the name regex and survives the `.service` strip below
+    # unchanged, so it would walk straight past the protected list and take dbus down with it.
+    case "$1" in *.socket|*.timer|*.mount|*.automount|*.target|*.path|*.slice|*.scope|*.swap|*.device)
+      refuse "only .service units: $1";; esac
+    u=${1%.service}   # ollama and ollama.service are the same unit
+    case "$2" in
+      enable)  systemctl enable --now -- "$1" ;;
+      disable) case "$u" in ollama|dbus|gdm*|systemd-*|ssh*|NetworkManager|ai-os*) refuse "protected service: $1";; esac
+               systemctl disable --now -- "$1" ;;
+      restart) systemctl restart -- "$1" ;;
+      state)   e=$(systemctl is-enabled -- "$1" 2>/dev/null || true); a=$(systemctl is-active -- "$1" 2>/dev/null || true); echo "${e:-unknown} ${a:-unknown}" ;;
+      *) refuse "unknown service action: $2" ;;
+    esac ;;
+  read-file)  [ $# -eq 1 ] || refuse "read-file <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"
+    # A FIFO under /data is the caller's to create, and `cat` on one blocks forever — as root,
+    # holding the executor's call open with it. Only a regular file is ever read.
+    [ -f "$p" ] || refuse "not a regular file: $p"
+    cat -- "$p" ;;
+  # mkdir, never install -d: install -d resets an existing directory's mode (2770 -> 755).
+  write-file) [ $# -eq 1 ] || refuse "write-file <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"
+    if [ -d "$p" ]; then refuse "is a directory: $p"; fi
+    # An existing file keeps its own mode and owner: rewriting a 0600 /etc file must not leave
+    # it world-readable. Only a file this call creates gets the defaults further down.
+    keep=""; if [ -f "$p" ] && ! [ -L "$p" ]; then keep=$(stat -c '%a %U:%G' -- "$p"); fi
+    d=$(dirname -- "$p"); newdir=""
+    if [ ! -d "$d" ]; then
+      nolink "$d"; [ -d "$(dirname -- "$d")" ] || refuse "parent directory missing: $d"
+      mkdir -- "$d"; newdir=$d
+    fi
+    # mktemp -u picks the name; set -C makes the create O_EXCL, so a planted file or symlink
+    # at that name fails the redirect instead of being written through.
+    t=$(mktemp -u -- "$p.ai-os.XXXXXX"); trap 'rm -f -- "$t"' EXIT
+    umask 0077; set -C; cat > "$t"; set +C
+    nolink "$p"; mv -f -- "$t" "$p"
+    if [ -f "$p" ] && ! [ -L "$p" ]; then
+      if [ -n "$keep" ]; then chmod "${keep%% *}" -- "$p"; chown "${keep#* }" -- "$p"
+      else case "$p" in
+        /data/*)    chown ai:ai-sandbox -- "$p"; chmod 0660 -- "$p" ;;
+        /home/ai/*) chown ai:ai -- "$p"; chmod 0644 -- "$p" ;;
+        *)          chmod 0644 -- "$p" ;;
+      esac; fi
+    else refuse "not a regular file after write: $p"; fi
+    [ -z "$newdir" ] || own_dir "$newdir" ;;
+  remove-file) [ $# -eq 1 ] || refuse "remove-file <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"; rm -f -- "$p" ;;
+  make-dir)   [ $# -eq 1 ] || refuse "make-dir <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /data /home/ai); [ -d "$(dirname -- "$p")" ] || refuse "parent directory missing: $p"
+    # Only a directory this call creates is handed to the sandbox. `make-dir` on one that is
+    # already there is a no-op, never a re-owning: an existing root-owned folder under /data
+    # must not become writable by the sandbox just because the AI named it.
+    if [ -d "$p" ]; then exit 0; fi
+    mkdir -p -- "$p"; own_dir "$p" ;;
+  remove-dir) [ $# -eq 1 ] || refuse "remove-dir <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /data /home/ai); rmdir -- "$p" ;;
+  sandbox-run)
+    net=none; cwd=""; envs=()
+    while [ $# -gt 0 ]; do case "$1" in
+      --net=*) net=${1#--net=};; --cwd=*) cwd=${1#--cwd=};; --env=*) envs+=("--setenv=${1#--env=}");;
+      --) shift; break;; *) refuse "bad sandbox-run option: $1";; esac; shift; done
+    [ $# -gt 0 ] || refuse "no command"; [ -n "$cwd" ] || refuse "no cwd"; cwd=$(under "$cwd" /data /home/ai)
+    netprops=(--property=PrivateNetwork=yes)
+    if [ "$net" != none ]; then
+      netprops=(--property=IPAddressDeny=any)
+      IFS=, read -ra ips <<< "$net"; for ip in "${ips[@]}"; do
+        [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] || refuse "bad ip: $ip"; netprops+=("--property=IPAddressAllow=$ip"); done
+    fi
+    args=(); for a in "$@"; do args+=("${a//\$/\$\$}"); done   # systemd expands ${VAR} in argv
+    # PATH carries /usr/games, which systemd's default PATH leaves out: that is where apt puts
+    # cowsay and friends, and a program the AI just installed must be one it can then run
+    # (parent rule 7). A caller's own --env comes after, so it can still override it.
+    # /mnt is an empty read-only tmpfs, not merely /mnt/c hidden: on this WSL2 workshop every
+    # Windows drive mounts under /mnt, and /mnt/wsl is the host's own plumbing. The one file
+    # bound back in is what /etc/resolv.conf points at, or an allowlisted fetch could never
+    # resolve anything; the leading `-` ignores it on bare metal, where /mnt/wsl does not exist.
+    exec systemd-run --quiet --pipe --wait --collect --uid=ai-sandbox "--working-directory=$cwd" \
+      "${netprops[@]}" --property=ProtectHome=yes --property=PrivateTmp=yes \
+      --property=ProtectSystem=strict --property=UMask=0002 --property=TemporaryFileSystem=/data:ro \
+      --property=TemporaryFileSystem=/mnt:ro "--property=BindReadOnlyPaths=-/mnt/wsl/resolv.conf" \
+      "--property=InaccessiblePaths=-/media -/srv" "--property=BindPaths=$cwd" "--property=ReadWritePaths=$cwd" \
+      --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games \
+      "${envs[@]}" -- "${args[@]}" ;;
+  *) refuse "unknown verb: ${verb:-<none>}" ;;
+esac
