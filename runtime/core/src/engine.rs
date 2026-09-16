@@ -12,6 +12,7 @@ use executor::log::{ActionLog, LogError};
 use executor::undo::UndoEntry;
 use executor::worker::{Outcome, Worker};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 /// One project folder in, the two hands that serve it out: (sandbox, admin).
 pub type WorkerFactory = Box<dyn Fn(&Path) -> (Box<dyn Worker>, Box<dyn Worker>)>;
@@ -45,6 +46,8 @@ pub struct Engine<M: Model> {
     sink: Box<dyn FnMut(&Event)>,
     /// The events of the `handle_events` call in progress, returned at its end.
     out: Vec<Event>,
+    /// Raised from outside the turn loop to cancel the open job between steps.
+    stop: Arc<AtomicBool>,
 }
 
 /// What the job left behind: entries under `folder` modified at or after `since` (unix
@@ -135,8 +138,11 @@ fn display_name(job: &Job) -> &str {
 
 impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf, snapshots_dir: PathBuf) -> Self {
-        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir, snapshotter: Box::new(RealSnapshotter), sink: Box::new(|_| {}), out: vec![] }
+        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir, snapshotter: Box::new(RealSnapshotter), sink: Box::new(|_| {}), out: vec![], stop: Arc::new(AtomicBool::new(false)) }
     }
+
+    /// A clone of the engine's own stop flag — raise it to cancel the open job between steps.
+    pub fn stop_flag(&self) -> Arc<AtomicBool> { self.stop.clone() }
 
     /// Swap the files half of undo. Tests only in practice; kept off `new` so the six call
     /// sites that want the real thing keep saying nothing about it.
@@ -203,6 +209,19 @@ impl<M: Model> Engine<M> {
         let r = self.handle_inner(text);
         // The events already reached the sink (and every client) even when `r` is an error, so the
         // conversation history must hold them too — record before propagating.
+        let out = std::mem::take(&mut self.out);
+        for l in out.iter().flat_map(crate::event::lines) { self.store.push_message("assistant", &l)?; }
+        r?;
+        Ok(out)
+    }
+
+    /// A job left mid-work (a restart): carry on with it. Nothing open → nothing emitted.
+    pub fn resume(&mut self) -> Result<Vec<Event>, EngineError> {
+        self.out.clear();
+        let job = match self.open_job()? { Some(j) if matches!(j.state, State::Working | State::Planning | State::Asking) => j, _ => return Ok(vec![]) };
+        let r = self.run_turns(job);
+        // Same invariant as `handle_events`: the events already reached the sink even when `r`
+        // is an error, so the conversation history must hold them too — record before propagating.
         let out = std::mem::take(&mut self.out);
         for l in out.iter().flat_map(crate::event::lines) { self.store.push_message("assistant", &l)?; }
         r?;
@@ -514,6 +533,14 @@ impl<M: Model> Engine<M> {
         }
     }
 
+    /// True when the user's stop has landed: the job is finished as Cancelled and reported.
+    fn stopped(&mut self, job: &Job) -> Result<bool, EngineError> {
+        if !self.stop.swap(false, Ordering::SeqCst) { return Ok(false); }
+        let message = format!("Stopped the job in {}.", display_name(job));
+        self.finish(job.clone(), State::Cancelled, message)?;
+        Ok(true)
+    }
+
     /// Run one action through the executor's door and record what happened on the job.
     /// `true` means the job must stop here (waiting for OK / gave up) and the caller must return.
     ///
@@ -523,6 +550,7 @@ impl<M: Model> Engine<M> {
     /// changed. Both still count toward MAX_FAILS_PER_STEP, which caps a stuck check the same
     /// way it caps a stuck act.
     fn perform(&mut self, job: &mut Job, plan_step: usize, action: Action, approved: bool, is_check: bool) -> Result<bool, EngineError> {
+        if self.stopped(job)? { return Ok(true); }
         let key = serde_json::to_string(&action).unwrap_or_default();
         // A human's "no" never expires — not cleared by a later file write, unlike failed_actions.
         if job.declined_actions.contains(&key) {
@@ -631,6 +659,7 @@ impl<M: Model> Engine<M> {
     /// Turn after turn until the job is done, failed, or needs the user (1b spec §3–§4).
     fn run_turns(&mut self, mut job: Job) -> Result<(), EngineError> {
         loop {
+            if self.stopped(&job)? { return Ok(()); }
             if job.steps.len() >= Self::MAX_STEPS {
                 let text = format!("I gave up on {}: {} steps without finishing.", display_name(&job), Self::MAX_STEPS);
                 return self.finish(job, State::Failed, text);
@@ -1747,5 +1776,41 @@ mod tests {
         assert_eq!(files.len(), 20);
         assert!(files[0].path.ends_with("f00.txt"));
         assert!(files[19].path.ends_with("f19.txt"));
+    }
+
+    #[test]
+    fn a_raised_stop_flag_cancels_the_job_between_steps() {
+        // The model would write two files; the flag is raised by the first step's worker call.
+        let (mut e, rec, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(1, write("b.py")), done(run("true"))], "flag");
+        let flag = e.stop_flag();
+        let f2 = flag.clone();
+        // ScriptedWorker records calls; raise the flag once the first call has landed by
+        // scripting the outcome queue: the outcome itself cannot run code, so use a sink.
+        let calls = rec.calls.clone();
+        let mut e = e.with_sink(Box::new(move |ev| if matches!(ev, Event::Step { .. }) && calls.borrow().len() == 1 { f2.store(true, std::sync::atomic::Ordering::SeqCst) }));
+        let ev = e.handle_events("make p").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Stopped { text, .. } if text == "Stopped the job in p."), "{ev:?}");
+        assert_eq!(rec.calls.borrow().len(), 1, "the second write never ran");
+        assert!(e.open_job().unwrap().is_none());
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst), "the flag is cleared once honoured");
+    }
+
+    #[test]
+    fn resume_carries_on_a_job_left_mid_work() {
+        // `last_undoable_job` (below) only finds a job with an unapplied undo row, and a plain
+        // `engine_with` never takes one on this non-btrfs test filesystem — the same reason
+        // `a_job_start_records_the_snapshot_it_took` needs a working `FakeSnapshotter` too.
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, _) = crate::testing::engine_with_snapshots(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "resume", &snap);
+        e.handle("make p").unwrap();
+        // Rewind the saved job to Working with the plan but no steps, like a crash after planning.
+        let mut job = e.store.last_undoable_job().unwrap().unwrap();
+        job.state = State::Working; job.steps.clear(); job.outcome_text.clear();
+        e.store.save_job(&job).unwrap();
+        e.model = crate::model::FakeModel::new(vec![act(1, write("BLUEPRINT.md")), done(run("true"))]);
+        let ev = e.resume().unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert!(e.open_job().unwrap().is_none());
+        assert!(e.resume().unwrap().is_empty(), "nothing open, nothing to resume");
     }
 }
