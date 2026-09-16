@@ -83,6 +83,10 @@ Every model answer is forced into one JSON shape (grammar-forced, decision 13), 
 | `replan` | the revised remaining steps + why | replaces the rest of the plan; job stays *working*. This is how "I can't do it this way" turns into "then this way". |
 | `give_up` | reason **and what was missing** (a tool, a package, a permission, information) | job → *failed*; the missing thing is recorded so the next phase can act on it (1c installs it; Phase 3 learns the workaround) |
 
+**The grammar is narrowed per state (built 2026-09-16, decision 13 applied per call):** the schema sent with each model call lists only the moves legal right now — front door: reply / start; asking: ask / plan; planning: plan (+ ask unless creative); working: act / replan / done / give_up (+ ask unless creative). A 9B does not reliably obey prose ("legal moves now: …"); the grammar makes an out-of-turn move impossible. The loop's own checks below stay as a second line (any model that ignores the schema, and the test fake, still meets them).
+
+**Key order is load-bearing (found 2026-09-16):** the runner's grammar makes the model commit to an object by its *first* key. With keys sorted alphabetically, `start` began with `creative` while `reply` began with `move`; the model reached for `"move"` and was locked into `reply` every time. The discriminator (`move`, `kind`) must be the first property of every variant; the runtime preserves JSON key order and a test pins it. This applies to every grammar-forced schema this system will ever send.
+
 **Rules enforced by the loop, never left to the model:**
 - `done` without a check is rejected and the model is told to include one.
 - `act` before `plan` is rejected.
@@ -152,6 +156,9 @@ This does not limit what the AI can *use*: every program installed on the OS is 
 Also from §11: the executor and the sandbox worker get **one** workspace reference (the job's project folder), set by the loop that creates the job — closing item 3. Item 2 (how the sandbox user is granted each project folder) is decided here: the loop creates each project folder writable by both the sandbox user (commands run as `ai-sandbox`) and the executor's own user (file actions are done in-process) — one shared group on the folder, set once at creation.
 
 ---
+
+## 7b. Loop limits as built (2026-09-16)
+25 steps per job; 3 *different* failed attempts at one plan step; 2 rejected moves in a row; **5 replans per job** (a replan adds no step, so it needed its own cap — a model that only ever replans would otherwise loop forever). A `done` check is proof, not a retry: it may be re-run as-is, but a failed check is recorded so the same command cannot then be run as an `act`. **A human refusal never expires:** a declined action is kept on a separate list that no file change clears. Approval and cancel are fixed word lists with punctuation normalised and a negation veto ("okay so no" and "go away" do not approve; "Stop!" cancels; "stop asking" does not — a listed phrase is required, the safe direction).
 
 ## 8. Firm line, for the parent spec and for 1c
 

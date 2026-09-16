@@ -35,7 +35,7 @@ It is never reduced to a chatbot, a command launcher, or a fixed list of workflo
 | 10 | **"Deterministic" = dependable** | The job gets finished and a check proves it. Exact repeatability applies only to saved procedures, which replay the same steps. |
 | 11 | **Notifications** | Routine messages appear on the desktop. Urgent ones also go to the user's phone through a private Telegram bot. |
 | 12 | **The model has no hands except the executor** | The model only proposes structured actions. The executor runs them through three separate workers (see 4.7): a sandbox for free commands, a desktop worker that can only operate program controls, and an admin worker with a fixed menu of operations. A raw admin shell never exists. |
-| 13 | **One model that reads text and images** | Swapping a text model and a vision model on 8 GB costs seconds per swap and makes a screen-driven loop unusable. One multimodal model is loaded, with a fixed context budget per step. |
+| 13 | **One model that reads text and images** | Swapping a text model and a vision model on 8 GB costs seconds per swap and makes a screen-driven loop unusable. One multimodal model is loaded, with a fixed context budget per step. **Grammar-forced answers, two findings (2026-09-16):** the schema sent with each call is narrowed to the moves legal in that state, because a small model does not reliably obey prose; and the discriminator key must be *first* in every object, because the grammar makes the model commit on the first key — key order is load-bearing and is preserved and tested. |
 
 ---
 
@@ -266,6 +266,17 @@ None of the engineering above is the hard part. The hard part is whether an 8B l
 3. **Couple the workspace reference.** `Executor` (classification) and `SandboxWorker` (enforcement) hold independent `workspace` fields; the integrator must keep them identical (or refactor so one borrows the other).
 
 **Phase 1b design agreed 2026-09-16** — `2026-09-16-phase1b-core-loop-design.md`: conversation front door, job loop with clarifying questions and creative mode, grammar-forced moves (reply / start / ask / plan / act / replan / done-with-check / give_up-naming-what-was-missing), swappable model connection (Ollama first), memory outside the chat (standing instructions, project blueprint, job record), `edit_file` + windowed `read_file`. Items 1–3 above are closed inside 1b (its §7). **Phase 1c scope:** admin worker (install / remove / config / service), the fetch-packages action with registry-only network, undo snapshots.
+
+**Phase 1b BUILT 2026-09-16** on branch `phase1b-core-loop` (design `2026-09-16-phase1b-core-loop-design.md`; §7b/§8b there for the limits and the spike). The live acceptance test passes: qwen3.5:9b, through the real jailed sandbox and with no human, created project `primes`, wrote `BLUEPRINT.md` and `find_primes.py`, ran it, updated the blueprint, and said done with a check whose recorded output holds the tenth prime (≈38 s, 5 steps). Whole-branch review: sound; its fix wave closed the jail's `/mnt` hole (workshop only), job-id collisions, resume-contract defaults, the prompt budget for big writes, a blueprint-gate bypass, a silent `remember`, and pinned the `approved` flag with a test.
+
+**Build order decided 2026-09-16 (his call):** **1c** hands + undo → **1d the rail** → **skills mechanism** (self-growth: he drives it as an average user; the AI never adds a *hand* — hands are our code with safety rules; it adds *skills* built from them). Then the rest.
+
+**Carried forward to 1c / 1d (from the 1b final review):**
+- 1c: **housekeeping is a third request kind** — "prep a folder where all projects live", settings, the machine's own layout — recognised as such, done through the admin hand with a snapshot, and changes a setting rather than creating a project (his question 2026-09-16). Listing and removing standing instructions is admin-hand work too.
+- 1c: narrow the sudoers grant (`ai` → bare `systemd-run`) to a wrapper with a fixed property set before the admin hand runs privileged.
+- 1c: the blueprint gate ignores code changed via `run_command` (e.g. `sed -i`), and a job can finish with no blueprint at all when nothing was written — make the gate absolute for new projects.
+- 1d: the rail needs a third answer while an action waits for OK ("what does it send?" is a question, not a refusal); a message arriving while a job is left mid-work is not yet shown to the model ("interrupt a running job"); an out-of-turn move must never be drawn raw.
+- Small carry-forwards: `edit_file` with an empty `find` gives a confusing message; one HTTP agent per call (no keep-alive); the HTTP error flattens status/transport/decode; standing instructions are unbounded and undeduplicated; `pending_reason`/`note_to_model` not cleared after an approval cycle; `allowed_moves` ↔ `run_turns` are two hand-kept lists (make one table both consult).
 
 **Workshop-only shortcuts that MUST NOT ship to the product (packaging phase):**
 - A sudoers `NOPASSWD: /usr/bin/systemd-run` grant for user `ai` (root-equivalent) — used because the workshop executor runs as `ai`; the product's executor daemon is already privileged and needs no such grant.
