@@ -62,7 +62,7 @@ new → asking → planning → working → checking → done
 
 **One turn of the loop:** build the prompt from the saved job → ask the model for exactly one move (§4) → carry it out → save → repeat. The prompt is trimmed to the 8k budget (parent §4.3): goal, answers, plan, blueprint, and the **last few steps** with their results (results already cut to 500 characters by the executor); older steps are summarised as "step N done / failed".
 
-**Giving up is a fixed count, not the model's mood:** 3 failed attempts at the same plan step, or 25 steps in total, and the job stops as *failed* with a plain-language reason.
+**A failure is told in full, once, and never retried as-is.** A step that fails once will fail again, so the first failure hands the model the whole reason — for commands, the exit code and the *end* of the error output, where the reason lives (the executor's 500-character cut is taken from the tail for failures, not the head). The model must then do something **different**; the loop refuses an action identical to one that already failed on this job ("that exact action already failed with: … — work around it"). **Giving up is a fixed count, not the model's mood:** 3 *different* failed attempts at the same plan step, or 25 steps in total, and the job stops as *failed* with a plain-language reason.
 
 **Crash and restart:** because every turn is saved before the next begins, a job in any state resumes from the database — including one waiting for the user.
 
@@ -86,7 +86,8 @@ Every model answer is forced into one JSON shape (grammar-forced, decision 13), 
 - `done` without a check is rejected and the model is told to include one.
 - `act` before `plan` is rejected.
 - `ask` in creative mode is rejected and the model is told to decide itself.
-- The blueprint (§6.2) is updated **before** the first code change in a project and again before `done`; the loop checks the file changed, and if not, tells the model to do it.
+- An `act` identical to one that already failed on this job is rejected with the earlier failure's reason (§3).
+- The blueprint (§6.2) is the map: the model reads it to find **what** to change and **where**, makes the change, then **updates the blueprint in the same loop** to record that change as done. Enforced: `done` is refused while the blueprint is older than the last code change ("update BLUEPRINT.md for what you just changed"), and the model is reminded right after each code-changing action.
 
 **Action kinds in 1b:** the four the executor already has (run_command / read_file / write_file / http_post) plus one new hand, because a local model on everyday hardware must **edit code in place, never read a whole file, hold it in its head and write it all back**:
 
@@ -118,8 +119,8 @@ Things the user tells it to keep: "always use Python 3", "never ask about colour
 One plain-text file in each project's folder, `BLUEPRINT.md`: what the project is, the decisions made, how to run it, how to check it, what is left. **The code and the blueprint are the truth**, not what the model remembers saying.
 
 Rules:
-- The model **reads it first** every time it works in that project (the loop puts it in the prompt).
-- **Any change to a project updates the blueprint first** — it is the plan the change follows, not a note written afterwards — and again before `done`.
+- The model **reads it first** every time it works in that project (the loop puts it in the prompt) and uses it as the **map to find what to change and where** — instead of reasoning the whole project out again.
+- **Each change is recorded in the blueprint as soon as it lands, in the same loop** — the line for that item is replaced with what is now true — so the blueprint never lags the code and the next job finds it right.
 - It is kept **as small as it can be**.
 - It is edited by **replacing lines, never adding where a line can be replaced**: a decision that changes overwrites the old one; nothing accumulates.
 
@@ -149,7 +150,7 @@ Also from §11: the executor and the sandbox worker get **one** workspace refere
 
 ## 9. How 1b is proven
 
-**Tests with the fake model, no GPU:** chat reply; new project + questions → answer → plan → act → done-with-check; a failing check sends the model back to work; `done` without a check is refused; `act` before `plan` is refused; `ask` in creative mode is refused; three failures on one step gives up; a job waiting for an answer resumes from the database after a restart; a blocked action pauses as waiting-for-approval and runs after "yes"; an existing project is chosen and its blueprint is in the prompt; the blueprint-first rule is enforced; `edit_file` replaces exactly one match and refuses zero or many; a windowed `read_file` returns only the asked lines.
+**Tests with the fake model, no GPU:** chat reply; new project + questions → answer → plan → act → done-with-check; a failing check sends the model back to work; `done` without a check is refused; `act` before `plan` is refused; `ask` in creative mode is refused; a failed command's result carries the tail of its error output; an identical retry of a failed action is refused with the earlier reason; three different failures on one step gives up; `done` is refused while the blueprint is older than the last code change; a job waiting for an answer resumes from the database after a restart; a blocked action pauses as waiting-for-approval and runs after "yes"; an existing project is chosen and its blueprint is in the prompt; the blueprint-first rule is enforced; `edit_file` replaces exactly one match and refuses zero or many; a windowed `read_file` returns only the asked lines.
 
 **One real run, the acceptance test:** the actual local model, the primes job, end to end in the workshop. The proof is the job's record (plan, every step, the check's real output), the project's `BLUEPRINT.md`, and the script it made — reported in plain words, with the record shown.
 

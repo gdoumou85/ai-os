@@ -91,7 +91,7 @@ It is never reduced to a chatbot, a command launcher, or a fixed list of workflo
 ### 4.1 Core
 - Runs the loop **request → understand → inspect → plan → act → verify → adapt** until the job is done or it needs the user.
 - Keeps each job's state written down, not only in the model's head: the goal, the limits, what has been done, the evidence, and what is left. A crash or a model swap loses nothing.
-- Stops a failing approach after a set number of retries and tries another way, or asks the user.
+- A step that fails once will fail again: the first failure hands the model the full reason, and the same action is never retried as-is — it must work around it. After a set number of *different* failed attempts it stops and asks the user.
 
 ### 4.2 Job manager: three kinds of job
 | Kind | Example | What is special about it |
@@ -127,7 +127,7 @@ Other abilities: web browsing, installing and removing software, desktop notific
 ### 4.6 Memory
 - The user (preferences, projects), past jobs, and which methods worked or failed.
 - Stored outside the model, so it survives a model swap.
-- **The chat is not memory** (his rule, 2026-09-16; detail in the Phase 1b design). A local model on an 8k budget cannot carry a long history and the design does not pretend it does. Three places remember instead: **standing instructions** (things the user told it to keep, re-read on every message), the **project blueprint** (one small `BLUEPRINT.md` per project — what it is, the decisions, how to run and check it, what is left; the code and the blueprint are the truth; read first every time it works there; **updated before any change**, kept as small as possible, edited by replacing lines, never piling on), and the **job record** (working memory for the running job only). The model is told: if it is worth remembering, write it down; you will not see this conversation again.
+- **The chat is not memory** (his rule, 2026-09-16; detail in the Phase 1b design). A local model on an 8k budget cannot carry a long history and the design does not pretend it does. Three places remember instead: **standing instructions** (things the user told it to keep, re-read on every message), the **project blueprint** (one small `BLUEPRINT.md` per project — what it is, the decisions, how to run and check it, what is left; the code and the blueprint are the truth; read first every time it works there as the **map to what to change and where**; **updated in the same loop as soon as each change lands**; kept as small as possible; edited by replacing lines, never piling on), and the **job record** (working memory for the running job only). The model is told: if it is worth remembering, write it down; you will not see this conversation again.
 
 ### 4.7 Executor
 - The model's only hands. The core turns model output into structured actions; nothing the model writes is ever run as a shell string with admin rights.
