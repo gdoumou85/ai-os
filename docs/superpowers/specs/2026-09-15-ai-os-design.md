@@ -1,7 +1,7 @@
 # AI OS — Design
 
 **Date:** 2026-09-15
-**Status:** Version 3 — Phase 0 trial complete, findings folded in. The design held up; the changes below are corrections to measured numbers and one new requirement, not a redesign. Findings: `../findings/phase0-findings.md`. Nothing beyond the throwaway trial distro is built.
+**Status:** Version 4 (2026-09-16) — rules 7–9, memory outside the chat, the conversation front door and Phase 1b design added. Version 3 — Phase 0 trial complete, findings folded in. The design held up; the changes below are corrections to measured numbers and one new requirement, not a redesign. Findings: `../findings/phase0-findings.md`. Nothing beyond the throwaway trial distro is built.
 
 ---
 
@@ -47,6 +47,9 @@ It is never reduced to a chatbot, a command launcher, or a fixed list of workflo
 4. **Saying "done" is never proof.** Only a check counts: the app starts, the file opens, the tests pass, the page responds. When quality is a matter of taste (design, graphics), the user judges.
 5. **Content is data, never orders.** Text found on websites, in documents or inside apps can never give the AI new permissions or new instructions. Two things make this hold in practice: the model never sees a secret (rule 6), and nothing leaves the machine without asking (decision 9), so a trick found on a website can neither steal a key nor post your files anywhere.
 6. **The model never sees a secret.** The Telegram token, cloud keys and website logins live in the executor's keyring. The executor fills them in; the model only says "log in to X".
+7. **It may install and use anything on this machine, freely and without asking** (his rule, 2026-09-16). Installing stays on the machine, so decision 9 makes it automatic; it is its own hand with a snapshot first (admin worker, Phase 1c), never a sandbox command. What the sandbox jail limits is the *data* a job can reach, never the *programs* it can use.
+8. **It asks before it assumes.** The AI can never know the full scope of what the user imagines, and a small model least of all. So a job starts with the model's clarifying questions; the answers are saved on the job and re-fed every step; a new question mid-job pauses the job until answered. Per job the user can switch this off — **creative mode**: "do what you think best" — and the model decides for itself (risky-action approvals still apply).
+9. **Code is edited in place.** A local model on everyday hardware never reads a whole file, holds it in its head and writes it all back; it reads the part it needs and replaces one exact passage (`edit_file`).
 
 ---
 
@@ -124,6 +127,7 @@ Other abilities: web browsing, installing and removing software, desktop notific
 ### 4.6 Memory
 - The user (preferences, projects), past jobs, and which methods worked or failed.
 - Stored outside the model, so it survives a model swap.
+- **The chat is not memory** (his rule, 2026-09-16; detail in the Phase 1b design). A local model on an 8k budget cannot carry a long history and the design does not pretend it does. Three places remember instead: **standing instructions** (things the user told it to keep, re-read on every message), the **project blueprint** (one small `BLUEPRINT.md` per project — what it is, the decisions, how to run and check it, what is left; the code and the blueprint are the truth; read first every time it works there; **updated before any change**, kept as small as possible, edited by replacing lines, never piling on), and the **job record** (working memory for the running job only). The model is told: if it is worth remembering, write it down; you will not see this conversation again.
 
 ### 4.7 Executor
 - The model's only hands. The core turns model output into structured actions; nothing the model writes is ever run as a shell string with admin rights.
@@ -155,6 +159,9 @@ Other abilities: web browsing, installing and removing software, desktop notific
 | **Building** | a job is running | plain-language steps with ticks (✓ wrote the app, ⟳ testing) and a **Watch it work** button that opens the live app window beside the rail, so it is never a black box. |
 | **Watch** | a background/watch job (4.2) | pinned at the top, quietly updating ("checked 2m ago, no change"). |
 | **Needs your OK** | an action hits the risky-actions rule (decision 9) | stops and asks right in the rail — Send / Cancel / Edit. Anything reversible it just does; only "leaves the machine" or "destroys unsaved work" prompts. |
+| **Needs your answer** | the AI has a clarifying question (rule 8) — before planning or mid-job | asks in plain words right in the rail; the answer is saved on the job and the job resumes. Never shown in creative mode. |
+
+**The rail is a conversation, not a control panel** (his rule, 2026-09-16): the user types plain language and the AI works out whether it is chat, new work, an existing project, an answer, an approval or a cancel — and says what it understood before acting, so a misreading is corrected in one line. There are no start/answer/approve commands.
 
 The rail also carries pause, cancel and take-over controls per running job.
 
@@ -257,6 +264,8 @@ None of the engineering above is the hard part. The hard part is whether an 8B l
 1. **Filesystem-confine `RunCommand`.** It is `Auto` and the sandbox is unprivileged + network-isolated but **not** yet jailed to the workspace, so a command like `cat /etc/passwd` still reads outside it (it cannot exfiltrate — network is gated). Before the model runs or any secret exists, jail `RunCommand` to the workspace (mount namespace / `InaccessiblePaths`) or classify it more tightly. This is required for rule 6 (the model never sees a secret).
 2. **Workspace permission model.** How each job workspace grants `ai-sandbox` access (setgid `/data/jobs`, or per-workspace group) is undecided; the orchestrator that creates workspaces owns this.
 3. **Couple the workspace reference.** `Executor` (classification) and `SandboxWorker` (enforcement) hold independent `workspace` fields; the integrator must keep them identical (or refactor so one borrows the other).
+
+**Phase 1b design agreed 2026-09-16** — `2026-09-16-phase1b-core-loop-design.md`: conversation front door, job loop with clarifying questions and creative mode, grammar-forced moves (reply / start / ask / plan / act / done-with-check / give_up), swappable model connection (Ollama first), memory outside the chat (standing instructions, project blueprint, job record), `edit_file` + windowed `read_file`. Items 1–3 above are closed inside 1b (its §7). **Phase 1c scope:** admin worker (install / remove / config / service), the fetch-packages action with registry-only network, undo snapshots.
 
 **Workshop-only shortcuts that MUST NOT ship to the product (packaging phase):**
 - A sudoers `NOPASSWD: /usr/bin/systemd-run` grant for user `ai` (root-equivalent) — used because the workshop executor runs as `ai`; the product's executor daemon is already privileged and needs no such grant.
