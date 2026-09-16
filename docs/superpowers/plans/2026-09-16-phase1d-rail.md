@@ -53,17 +53,17 @@
 - Modify: `runtime/Cargo.toml`
 
 **Interfaces:**
-- Produces: `aios_proto::{Event, ChangedFile, FileKind, JobState, StepView, Waiting, UndoLine, Client}` exactly as below. Every later task uses these names.
+- Produces: `aios_proto::{Event, ChangedFile, FileKind, JobState, StepView, Waiting, UndoLine, Request, Client, Reader, Writer}` exactly as below; `Client::split(self) -> (Reader, Writer)`. Every later task uses these names.
 
 - [ ] **Step 1: Add the crate to the workspace**
 
 `runtime/Cargo.toml`:
 ```toml
 [workspace]
-members = ["executor", "proto", "core", "rail"]  # core dir holds package aios-core; rail is added in Task 9
+members = ["executor", "proto", "core"]  # core dir holds package aios-core; "rail" is added in Task 9
 resolver = "2"
 ```
-(Leave `rail` out of `members` until Task 9 creates it, or `cargo` fails: write `members = ["executor", "proto", "core"]` now and add `"rail"` in Task 9.)
+(`rail` joins `members` in Task 9, when it exists; earlier and `cargo` fails.)
 
 `runtime/proto/Cargo.toml`:
 ```toml
@@ -240,27 +240,42 @@ pub enum Request {
     #[serde(rename = "hello")] Hello(serde_json::Map<String, serde_json::Value>),
 }
 
-/// A blocking socket client: one writer, one line-reader. `events()` yields until the service goes away.
-pub struct Client { writer: UnixStream, reader: BufReader<UnixStream> }
+/// One connection: a writer half and a line-reader half over the same socket. `split` hands the
+/// two halves to two threads (a front door types on one and listens on the other); a second
+/// connection for that would be a client the service broadcasts to and nobody reads.
+pub struct Client { writer: Writer, reader: Reader }
+pub struct Writer { stream: UnixStream }
+pub struct Reader { lines: BufReader<UnixStream> }
 
 impl Client {
     pub fn connect(socket: &Path) -> std::io::Result<Client> {
         let s = UnixStream::connect(socket)?;
-        Ok(Client { reader: BufReader::new(s.try_clone()?), writer: s })
+        Ok(Client { reader: Reader { lines: BufReader::new(s.try_clone()?) }, writer: Writer { stream: s } })
     }
+    pub fn split(self) -> (Reader, Writer) { (self.reader, self.writer) }
+    pub fn say(&mut self, text: &str) -> std::io::Result<()> { self.writer.say(text) }
+    pub fn hello(&mut self) -> std::io::Result<()> { self.writer.hello() }
+    pub fn next_event(&mut self) -> Option<Event> { self.reader.next_event() }
+}
+
+impl Writer {
     fn send(&mut self, r: &Request) -> std::io::Result<()> {
         let mut line = serde_json::to_string(r).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
-        self.writer.write_all(line.as_bytes())
+        self.stream.write_all(line.as_bytes())
     }
     pub fn say(&mut self, text: &str) -> std::io::Result<()> { self.send(&Request::Say(text.to_string())) }
     pub fn hello(&mut self) -> std::io::Result<()> { self.send(&Request::Hello(Default::default())) }
+}
+
+impl Reader {
     /// The next event, or `None` when the service closed the connection. A line that is not an
-    /// event is skipped (a newer service may send kinds this client does not know).
+    /// event is skipped (a newer service may send kinds this client does not know). The
+    /// service's extra `seq` key is ignored by serde.
     pub fn next_event(&mut self) -> Option<Event> {
         loop {
             let mut line = String::new();
-            match self.reader.read_line(&mut line) {
+            match self.lines.read_line(&mut line) {
                 Ok(0) | Err(_) => return None,
                 Ok(_) => if let Ok(e) = serde_json::from_str::<Event>(&line) { return Some(e); },
             }
@@ -368,13 +383,13 @@ git commit -m "feat(proto): typed events, job state and the socket client"
         assert_eq!(describe(&Action::HttpPost { url: "https://x".into(), body: "".into() }), "http post to https://x");
         assert_eq!(describe(&Action::Install { packages: vec!["cowsay".into()] }), "installed cowsay");
         assert_eq!(describe(&Action::Remove { packages: vec!["cowsay".into()] }), "removed cowsay");
-        assert_eq!(describe(&Action::Service { name: "nginx".into(), r#do: ServiceDo::Restart }), "service nginx restart");
+        assert_eq!(describe(&Action::Service { name: "nginx".into(), action: ServiceDo::Restart }), "service nginx restart");
         assert_eq!(describe(&Action::MakeDir { path: "/data/work".into() }), "made folder /data/work");
         assert_eq!(describe(&Action::FetchPackages { manager: Manager::Pip, packages: vec!["tabulate".into()] }), "fetched tabulate with pip");
         assert_eq!(describe(&Action::SetSetting { key: "projects_root".into(), value: "/data/work".into() }), "set projects_root = /data/work");
     }
 ```
-Check the exact field names of `Action::ReadFile` and `Action::Service` in `runtime/executor/src/action.rs` before writing; use what is there (`r#do` if the field is `do`).
+Field names are those of `runtime/executor/src/action.rs` (`Service { name, action }`, `ReadFile { path, from_line, lines }`); the path check confirmed every other variant in `describe` matches.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -397,7 +412,8 @@ pub fn describe(action: &Action) -> String {
         Action::HttpPost { url, .. } => format!("http post to {url}"),
         Action::Install { packages } => format!("installed {}", packages.join(" ")),
         Action::Remove { packages } => format!("removed {}", packages.join(" ")),
-        Action::Service { name, r#do } => format!("service {name} {}", match r#do { ServiceDo::Enable => "enable", ServiceDo::Disable => "disable", ServiceDo::Restart => "restart" }),
+        // The field is `action` in Rust; `do` is only its serde name (action.rs:24).
+        Action::Service { name, action } => format!("service {name} {}", match action { ServiceDo::Enable => "enable", ServiceDo::Disable => "disable", ServiceDo::Restart => "restart" }),
         Action::MakeDir { path } => format!("made folder {path}"),
         Action::FetchPackages { manager, packages } => format!("fetched {} with {}", packages.join(" "), match manager { Manager::Pip => "pip", Manager::Npm => "npm", Manager::Cargo => "cargo" }),
         Action::SetSetting { key, value } => format!("set {key} = {value}"),
@@ -453,16 +469,18 @@ pub fn handle_events(&mut self, text: &str) -> Result<Vec<Event>, EngineError> {
     self.store.push_message("user", text)?;
     self.out.clear();
     let r = self.handle_inner(text);
+    // The events already reached the sink (and every client) even when `r` is an error, so the
+    // conversation history must hold them too — record before propagating.
     let out = std::mem::take(&mut self.out);
-    r?;
     for l in out.iter().flat_map(crate::event::lines) { self.store.push_message("assistant", &l)?; }
+    r?;
     Ok(out)
 }
 ```
 3. Return types: every private function that returned `Result<Vec<String>, EngineError>` (`handle_inner`, `finish`, `undo_last`, `resume_after_approval`, `run_turns`) now returns `Result<(), EngineError>` and emits instead; every one that returned `Result<Option<Vec<String>>, EngineError>` (`perform`, `reject`) returns `Result<bool, EngineError>` where `true` means "the job stopped here, return". `finish`, `perform`, `reject` take `&mut self`. Every `return Ok(vec![…])` becomes `self.emit(…); return Ok(())`; every `if let Some(stop) = … { return Ok(stop); }` becomes `if self.perform(…)? { return Ok(()); }`.
 4. Which event where (the mapping is the contract; wording of `text` unchanged):
    - `Reply` → `Said{text}`; the remember note → `Said{"(Noted for the future: …)"}` (both arms, Start/Housekeep too).
-   - `Start`/`Housekeep` accepted → `Understood{job_id: job.id, name: display_name(&job), text: understood, housekeeping}` (before `run_turns`). The "I could not start *name*: …" lines → `Said`.
+   - `Start`/`Housekeep` accepted → `Understood{job_id: job.id, name: display_name(&job), text: understood, housekeeping}` FIRST, then the `Said` note, then `run_turns` — the same order as today's lines (`start_creates_project_folder_and_job_and_says_what_it_understood` pins `out[0]`). The "I could not start *name*: …" lines → `Said`.
    - `Plan` accepted (both the `Plan` arm and `Replan`) → `Plan{job_id, steps: job.plan.clone()}`.
    - In `perform`, after a `StepRecord` is pushed (both the `SetSetting` branch and the `Ran` branch) → `Step{job_id, plan_step, text: describe(&action), ok}`.
    - `Blocked(reason)` → `NeedsOk{job_id, what: describe(&action), why: reason}`.
@@ -518,21 +536,36 @@ git commit -m "feat(core): the engine emits typed events; handle() renders them 
 ```rust
     #[test]
     fn done_lists_the_files_the_job_changed() {
-        let (mut e, _, root) = engine_with(happy_path(), "files");
-        // Something old that the job must not list, and a dependency folder it must skip.
-        let old = root.join("p"); std::fs::create_dir_all(old.join(".venv")).unwrap();
+        // A new project refuses a folder that already exists, so the old files are planted
+        // AFTER a first job created the folder, and the second job is the one measured.
+        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add more".into(), creative: true, understood: "Continuing p".into(), remember: None };
+        let (mut e, _, root) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+            again, plan(), act(1, write("BLUEPRINT.md")), act(1, write("primes.py")), act(1, write("BLUEPRINT.md")), done(run("python3")),
+        ], "files");
+        e.handle("make p").unwrap();
+        let old = root.join("p"); std::fs::create_dir_all(old.join("node_modules")).unwrap();
         std::fs::write(old.join("old.txt"), "x").unwrap();
-        std::fs::write(old.join(".venv").join("lib.py"), "x").unwrap();
+        std::fs::write(old.join("node_modules").join("lib.js"), "x").unwrap();
         let past = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
-        for p in [old.join("old.txt"), old.join(".venv").join("lib.py")] {
+        for p in [old.join("old.txt"), old.join("node_modules").join("lib.js"), old.join("BLUEPRINT.md")] {
             std::fs::File::open(&p).unwrap().set_modified(past).unwrap();
         }
-        let ev = events_of(&mut e, "make it");
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // started_at is whole seconds
+        let ev = events_of(&mut e, "add primes to p");
         let Event::Done { files, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
         let names: Vec<&str> = files.iter().map(|f| f.path.rsplit('/').next().unwrap()).collect();
         assert_eq!(names, vec!["BLUEPRINT.md", "primes.py"], "{files:?}");
         assert!(files.iter().all(|f| f.path.starts_with(old.to_str().unwrap())), "absolute paths");
         assert!(matches!(files[1].kind, aios_proto::FileKind::Text));
+    }
+
+    #[test]
+    fn a_failed_job_does_not_list_the_engines_own_last_run_note() {
+        let (mut e, _, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), Move::GiveUp { reason: "r".into(), missing: "m".into() }], "files-lastrun");
+        let ev = events_of(&mut e, "make p");
+        let Event::Failed { files, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
+        assert!(files.iter().all(|f| !f.path.ends_with("LAST_RUN.md")), "{files:?}");
     }
 
     #[test]
@@ -564,10 +597,11 @@ and in `Job::new`: `started_at: millis as u64 / 1000` — note `millis` is the e
 ```rust
 /// What the job left behind: entries under `folder` modified at or after `since` (unix
 /// seconds), hidden entries and dependency folders skipped, sorted by path, at most 20.
-/// ponytail: mtime, not content — a file touched but unchanged is listed; content diffing
-/// against the snapshot is the upgrade if that ever misleads.
+/// ponytail: mtime in whole seconds, not content — a file touched but unchanged is listed, and
+/// so is one the user touched in the same second the job began; content diffing against the
+/// snapshot is the upgrade if that ever misleads.
 pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
-    const SKIP: [&str; 4] = [".git", ".venv", "node_modules", "target"];
+    const SKIP: [&str; 2] = ["node_modules", "target"]; // hidden names (.git, .venv) are skipped below
     fn walk(dir: &Path, since: u64, out: &mut Vec<ChangedFile>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for entry in rd.flatten() {
@@ -590,7 +624,7 @@ pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
     out
 }
 ```
-In `finish`: `let files = changed_files(&self.workspace(&job), job.started_at);` and put it on the Done/Failed/Stopped event (housekeeping jobs: `self.workspace(&job)` is the housekeeping folder already, since `Job.folder` holds it). Import `aios_proto::{ChangedFile, FileKind}`.
+In `finish`: `let files = changed_files(&self.workspace(&job), job.started_at);` computed BEFORE `write_or_wipe_last_run` runs (that writes `LAST_RUN.md` into the same folder on Failed/Cancelled, and the engine's own note is not a file the job changed), then put on the Done/Failed/Stopped event (housekeeping jobs: `self.workspace(&job)` is the housekeeping folder already, since `Job.folder` holds it). Import `aios_proto::{ChangedFile, FileKind}`.
 
 - [ ] **Step 4: Run** — `cargo test -p aios-core` → all pass.
 
@@ -662,13 +696,17 @@ pub fn resume(&mut self) -> Result<Vec<Event>, EngineError> {
     Ok(out)
 }
 ```
-At the top of `run_turns`'s `loop`, before the MAX_STEPS check:
+One helper, called at the top of `run_turns`'s `loop` (before the MAX_STEPS check) and at the top of `perform` (so an action the user approved a moment before stopping does not run either — design §2.1):
 ```rust
-            if self.stop.swap(false, Ordering::SeqCst) {
-                let message = format!("Stopped the job in {}.", display_name(&job));
-                return self.finish(job, State::Cancelled, message);
-            }
+    /// True when the user's stop has landed: the job is finished as Cancelled and reported.
+    fn stopped(&mut self, job: &Job) -> Result<bool, EngineError> {
+        if !self.stop.swap(false, Ordering::SeqCst) { return Ok(false); }
+        let message = format!("Stopped the job in {}.", display_name(job));
+        self.finish(job.clone(), State::Cancelled, message)?;
+        Ok(true)
+    }
 ```
+In `run_turns`: `if self.stopped(&job)? { return Ok(()); }`. In `perform`: `if self.stopped(job)? { return Ok(true); }` as the first line.
 
 - [ ] **Step 4: Run** — `cargo test -p aios-core` → all pass.
 
@@ -694,8 +732,9 @@ At the top of `run_turns`'s `loop`, before the MAX_STEPS check:
         for t in ["what does it send?", "yes", "why", "hmm"] { assert!(!is_refusal(t), "{t}"); }
     }
 
-    fn waiting_ok() -> (crate::engine::Engine<crate::model::FakeModel>, Recorder) {
-        let (mut e, rec, _) = engine_with(vec![start("p", true), plan(), act(1, Action::HttpPost { url: "https://x".into(), body: "b".into() })], "okq");
+    /// `tag` must differ per test: `temp_root` wipes the tag's folder, and tests run in parallel.
+    fn waiting_ok(tag: &str) -> (crate::engine::Engine<crate::model::FakeModel>, Recorder) {
+        let (mut e, rec, _) = engine_with(vec![start("p", true), plan(), act(1, Action::HttpPost { url: "https://x".into(), body: "b".into() })], tag);
         e.handle("post it").unwrap();
         assert_eq!(e.open_job().unwrap().unwrap().state, State::WaitingApproval);
         (e, rec)
@@ -703,7 +742,7 @@ At the top of `run_turns`'s `loop`, before the MAX_STEPS check:
 
     #[test]
     fn a_question_at_needs_ok_is_answered_and_the_ok_asked_again() {
-        let (mut e, rec) = waiting_ok();
+        let (mut e, rec) = waiting_ok("okq-question");
         e.model = crate::model::FakeModel::new(vec![Move::Reply { text: "It sends the body b to x.".into(), remember: None }]);
         let ev = events_of(&mut e, "what does it send?");
         assert!(matches!(&ev[0], Event::Said { text } if text == "It sends the body b to x."), "{ev:?}");
@@ -721,12 +760,12 @@ At the top of `run_turns`'s `loop`, before the MAX_STEPS check:
 
     #[test]
     fn no_still_declines_and_yes_still_approves() {
-        let (mut e, rec) = waiting_ok();
+        let (mut e, rec) = waiting_ok("okq-no");
         e.model = crate::model::FakeModel::new(vec![Move::GiveUp { reason: "declined".into(), missing: "your ok".into() }]);
         let ev = events_of(&mut e, "no thanks");
         assert!(matches!(ev.last().unwrap(), Event::Failed { .. }), "{ev:?}");
         assert!(rec.calls.borrow().is_empty());
-        let (mut e, rec) = waiting_ok();
+        let (mut e, rec) = waiting_ok("okq-yes");
         e.model = crate::model::FakeModel::new(vec![done(run("true"))]);
         e.handle("yes").unwrap();
         assert_eq!(rec.calls.borrow().len(), 2, "the post ran, then the check");
@@ -734,7 +773,7 @@ At the top of `run_turns`'s `loop`, before the MAX_STEPS check:
 
     #[test]
     fn three_questions_without_an_answer_decline_the_action() {
-        let (mut e, _) = waiting_ok();
+        let (mut e, _) = waiting_ok("okq-three");
         e.model = crate::model::FakeModel::new(vec![
             Move::Reply { text: "a".into(), remember: None }, Move::Reply { text: "b".into(), remember: None }, Move::Reply { text: "c".into(), remember: None },
             Move::GiveUp { reason: "declined".into(), missing: "your ok".into() },
@@ -757,6 +796,7 @@ At the top of `run_turns`'s `loop`, before the MAX_STEPS check:
         assert!(p.user.contains("Do not") , "tells the model not to act");
     }
 ```
+Also add `approval_question(&[], &job, "w", "y", "q")` to the existing `every_allowed_list_matches_a_real_move` test's `check(...)` calls in `prompt.rs`, so a typo in the new `allowed` list fails a test rather than only a `debug_assert` at runtime.
 
 - [ ] **Step 2: Run to verify they fail** — compile errors.
 
@@ -837,21 +877,24 @@ In `resume_after_approval`, set `job.ok_questions = 0;` right after `job.state =
         assert_eq!((st.name.as_str(), st.housekeeping, st.understood.as_str()), ("p", false, "Starting a new project p"));
         assert_eq!(st.waiting, Waiting::Answer { questions: vec!["Which language?".into()] });
 
-        let (mut e, _) = waiting_ok();
+        let (mut e, _) = waiting_ok("state-ok");
         let st = e.state().unwrap().unwrap();
         assert_eq!(st.plan, vec!["write it".to_string(), "run it".to_string()]);
         assert_eq!(st.waiting, Waiting::Ok { what: "http post to https://x".into(), why: e.open_job().unwrap().unwrap().pending_reason });
 
-        let (mut e, _, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), Move::Ask { questions: vec![]}], "state-steps");
-        e.handle("make p").unwrap(); // the empty Ask is rejected; the job is left Working with one step
+        // A job left mid-work: run one to completion, then rewind the saved record to Working
+        // with its steps (the same rewind Task 4's resume test uses).
+        let (mut e, _, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "state-steps");
+        e.handle("make p").unwrap();
+        let mut job = e.store.last_undoable_job().unwrap().unwrap();
+        job.state = State::Working; job.steps.truncate(1); job.outcome_text.clear();
+        e.store.save_job(&job).unwrap();
         let st = e.state().unwrap().unwrap();
         assert_eq!(st.steps.len(), 1);
         assert_eq!((st.steps[0].plan_step, st.steps[0].text.as_str(), st.steps[0].ok), (1, "wrote BLUEPRINT.md", true));
         assert_eq!(st.waiting, Waiting::None);
     }
 ```
-If the "empty Ask" path in the third case ends the job instead of leaving it open (check `MAX_REJECTIONS`), rewind a saved job to `Working` the way Task 4's `resume` test does.
-
 - [ ] **Step 2: Run to fail** — compile error.
 
 - [ ] **Step 3: Implement**
@@ -887,7 +930,7 @@ If the "empty Ask" path in the third case ends the job instead of leaving it ope
 
 **Interfaces:**
 - Consumes: `Engine::{with_sink, handle_events, resume, state, stop_flag}`, `engine::is_stop`, `aios_proto::{Event, Request, JobState, Waiting, StepView}`.
-- Produces: `service::run<M: Model>(listener: UnixListener, make: Box<dyn FnOnce(Box<dyn FnMut(&Event)>) -> Engine<M> + Send>) -> !` — hmm, `M` must be `'static`; the engine is built on the engine thread by `make`, which receives the broadcast sink. `service::bind(path: &Path) -> io::Result<UnixListener>` removes a stale file and sets mode 0600.
+- Produces: `service::run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<dyn FnMut(&Event)>) -> Engine<M> + Send>) -> !` (the engine is built on the engine thread by `make`, which receives the broadcast sink; no `Send` on `M` or the engine is needed, the path check confirmed the bounds); `service::bind(path: &Path) -> io::Result<UnixListener>` refuses a live socket, removes a stale file, sets mode 0600; `service::socket_path() -> PathBuf`.
 
 - [ ] **Step 1: The failing service test** — `runtime/core/tests/service.rs`
 
@@ -956,6 +999,10 @@ fn both_clients_see_every_event_in_order_with_contiguous_seq() {
     let sock = start(&dir, job(), Arc::new(Mutex::new(None)));
     let mut a = Client::connect(&sock).unwrap();
     let mut b = Client::connect(&sock).unwrap();
+    // `connect` returns before the service has registered the client: a hello/state round trip
+    // on each proves both are registered before anything is broadcast.
+    a.hello().unwrap(); assert!(matches!(a.next_event(), Some(Event::State { .. })));
+    b.hello().unwrap(); assert!(matches!(b.next_event(), Some(Event::State { .. })));
     a.say("make p").unwrap();
     let ea = until(&mut a, |e| matches!(e, Event::Done { .. }));
     let eb = until(&mut b, |e| matches!(e, Event::Done { .. }));
@@ -1042,10 +1089,40 @@ fn a_bad_line_gets_error_and_nothing_else() {
     BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(v["kind"], "error");
-    assert!(v["seq"].is_number());
+    assert!(v.get("seq").is_none(), "seq is on broadcasts only, so every client's run of seq is contiguous");
+}
+
+#[test]
+fn stop_typed_right_after_a_request_still_stops_it() {
+    // The stop arrives before the engine has even picked the request up: it must be queued AND
+    // arm the flag, or it would sit behind the whole job.
+    let dir = temp("early-stop");
+    let (gtx, grx) = std::sync::mpsc::channel::<()>();
+    let sock = start(&dir, job(), Arc::new(Mutex::new(Some(grx))));
+    let mut a = Client::connect(&sock).unwrap();
+    a.hello().unwrap(); a.next_event();
+    a.say("make p").unwrap();
+    a.say("stop").unwrap();
+    gtx.send(()).unwrap(); gtx.send(()).unwrap(); gtx.send(()).unwrap(); gtx.send(()).unwrap();
+    let got = until(&mut a, |e| matches!(e, Event::Stopped { .. } | Event::Done { .. } | Event::Said { .. }));
+    assert!(matches!(got.last().unwrap(), Event::Stopped { .. }), "{got:?}");
+}
+
+#[test]
+fn a_message_while_only_a_chat_reply_is_in_progress_is_queued_not_busy() {
+    let dir = temp("chat-queue");
+    let (gtx, grx) = std::sync::mpsc::channel::<()>();
+    let sock = start(&dir, vec![Move::Reply { text: "one".into(), remember: None }, Move::Reply { text: "two".into(), remember: None }], Arc::new(Mutex::new(Some(grx))));
+    let mut a = Client::connect(&sock).unwrap();
+    a.hello().unwrap(); a.next_event();
+    a.say("hi").unwrap();
+    a.say("hi again").unwrap(); // the engine is inside the first reply (gated) — no job, so no busy
+    gtx.send(()).unwrap(); gtx.send(()).unwrap();
+    let got = until(&mut a, |e| matches!(e, Event::Said { text } if text == "two"));
+    assert!(!got.iter().any(|e| matches!(e, Event::Busy { .. })), "{got:?}");
 }
 ```
-`testing.rs` is `#[cfg(test)]` and invisible to integration tests: add to `lib.rs` a `pub mod testing_pub;` — no: simpler, change `lib.rs` to `pub mod testing;` unconditionally (it only depends on `executor` types, and the fake worker is useful to `live_1d` too). Then the test imports `aios_core::testing::{scripted_workers, Recorder}`. Do that and fix the `use` line in the test accordingly.
+`testing.rs` is `#[cfg(test)]` and invisible to integration tests: change `lib.rs` to `pub mod testing;` unconditionally (`FakeModel` and everything it uses are already public and ungated; the fakes ship inside the binaries, unused, which is harmless). The test's `use` line is then `use aios_core::testing::{scripted_workers, Recorder};` — replace the `testing_pub` line above with that.
 
 - [ ] **Step 2: Run to fail** — `cargo test -p aios-core --test service` → compile error.
 
@@ -1079,6 +1156,8 @@ struct Shared {
 }
 
 impl Shared {
+    /// To every client, numbered: `seq` counts broadcasts only, so each client's run is
+    /// contiguous and a gap means a dropped line. Answers to one client (`send_to`) carry no seq.
     fn broadcast(&self, ev: &Event) {
         let mut v = serde_json::to_value(ev).expect("event serialises");
         v["seq"] = serde_json::Value::from(self.seq.fetch_add(1, Ordering::SeqCst));
@@ -1086,9 +1165,7 @@ impl Shared {
         self.clients.lock().unwrap().retain(|(_, tx)| tx.send(line.clone()).is_ok());
     }
     fn send_to(&self, id: u64, ev: &Event) {
-        let mut v = serde_json::to_value(ev).expect("event serialises");
-        v["seq"] = serde_json::Value::from(self.seq.fetch_add(1, Ordering::SeqCst));
-        let line = v.to_string();
+        let line = serde_json::to_string(ev).expect("event serialises");
         let mut clients = self.clients.lock().unwrap();
         if let Some(pos) = clients.iter().position(|(cid, _)| *cid == id) {
             if clients[pos].1.send(line).is_err() { clients.remove(pos); }
@@ -1108,8 +1185,13 @@ impl Shared {
     }
 }
 
-/// Remove a stale socket file, listen, and keep the file private to this user.
+/// Listen on the socket, private to this user. A socket something still answers on is a live
+/// service: refuse rather than unlink it and run two engines on one database. A stale file
+/// (nothing answers) is removed.
 pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
+    if UnixStream::connect(path).is_ok() {
+        return Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, format!("an engine is already listening on {}", path.display())));
+    }
     let _ = std::fs::remove_file(path);
     let l = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
@@ -1162,15 +1244,24 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                     Ok(Request::Hello(_)) => { let st = sh.mirror.lock().unwrap().clone(); sh.send_to(id, &Event::State { job: st }); }
                     Ok(Request::Say(text)) => {
                         sh.broadcast(&Event::You { text: text.clone() });
-                        if sh.running.load(Ordering::SeqCst) {
-                            if is_stop(&text) {
-                                if let Some(f) = sh.stop.lock().unwrap().as_ref() { f.store(true, Ordering::SeqCst); }
-                            } else {
-                                let (job_id, name) = sh.mirror.lock().unwrap().as_ref().map(|j| (j.id.clone(), j.name.clone())).unwrap_or_default();
-                                let what = if name.is_empty() { "I'm still answering.".to_string() } else { format!("I'm working on {name}. Say stop if you want me to change course.") };
-                                sh.send_to(id, &Event::Busy { job_id, text: what });
+                        // Stop: arm the flag (lands between steps if a job is running) AND queue
+                        // it (a stop typed before the engine picked the request up must not sit
+                        // behind the whole job; an idle engine answers it as today). The
+                        // engine thread clears a flag nothing consumed.
+                        if is_stop(&text) {
+                            if let Some(f) = sh.stop.lock().unwrap().as_ref() { f.store(true, Ordering::SeqCst); }
+                            if tx.send(Command::Say(text)).is_err() { break; }
+                            continue;
+                        }
+                        // Busy only while a JOB is being worked (§3.3): a chat reply in progress
+                        // just queues the next message behind it.
+                        let job = sh.mirror.lock().unwrap().as_ref().map(|j| (j.id.clone(), j.name.clone()));
+                        match job {
+                            Some((job_id, name)) if sh.running.load(Ordering::SeqCst) => {
+                                sh.send_to(id, &Event::Busy { job_id, text: format!("I'm working on {name}. Say stop if you want me to change course.") });
                             }
-                        } else if tx.send(Command::Say(text)).is_err() { break; }
+                            _ => if tx.send(Command::Say(text)).is_err() { break; },
+                        }
                     }
                     Err(_) => sh.send_to(id, &Event::Error { text: "could not read that message".into() }),
                 }
@@ -1181,7 +1272,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
     unreachable!("listener.incoming() never ends")
 }
 ```
-`Event::You` must be broadcast before the busy check so the order is You then Busy (the test asserts it). `Request` derives `Deserialize` with `#[serde(rename = "say")]` on a tuple variant: `{"say":"…"}` is the externally-tagged form serde produces for enums, which is exactly the wire format. Verify with a unit test in `proto` if unsure: `serde_json::from_str::<Request>(r#"{"say":"hi"}"#)`.
+`Event::You` is broadcast before the busy check so the order is You then Busy (the test asserts it). A queued `stop` that reaches an idle engine goes through `handle_events` → the front door → the model; that is today's behaviour for "stop" with no job and is acceptable (the flag was already cleared by the post-check). `Request` derives `Deserialize` with `#[serde(rename = "say")]` on a tuple variant: `{"say":"…"}` is the externally-tagged form serde produces for enums, which is exactly the wire format. Verify with a unit test in `proto` if unsure: `serde_json::from_str::<Request>(r#"{"say":"hi"}"#)`.
 
 `src/bin/ai-os-engine.rs`:
 ```rust
@@ -1214,16 +1305,22 @@ fn main() {
 ```
 Add to `service.rs`:
 ```rust
-/// `$XDG_RUNTIME_DIR/ai-os.sock`, or `/run/user/<uid>/ai-os.sock` when the variable is unset
-/// (a systemd user service always has it; a bare shell may not).
+/// `$AI_OS_SOCKET_DIR/ai-os.sock` when set (tests, a second engine on purpose), else
+/// `$XDG_RUNTIME_DIR/ai-os.sock` (a systemd user service and every shell in the distro have
+/// it), else `/run/user/<uid>/ai-os.sock`.
 pub fn socket_path() -> std::path::PathBuf {
-    let dir = std::env::var("XDG_RUNTIME_DIR").ok().or_else(|| std::env::var("AI_OS_SOCKET_DIR").ok()).unwrap_or_else(|| format!("/run/user/{}", unsafe { libc_uid() }));
+    let dir = std::env::var("AI_OS_SOCKET_DIR").ok()
+        .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok())
+        .unwrap_or_else(|| {
+            use std::os::unix::fs::MetadataExt;
+            let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(1000);
+            format!("/run/user/{uid}")
+        });
     Path::new(&dir).join("ai-os.sock")
 }
 ```
-No `libc` crate is in the workspace: read the uid from `/proc/self/status` (`Uid:` line) or from `std::os::unix::fs::MetadataExt::uid(&std::fs::metadata("/proc/self").unwrap())` — use the metadata form; no new dependency.
 
-- [ ] **Step 4: Run** — `cargo test -p aios-core --test service` → 4 pass; `cargo test -p aios-core` all pass; `cargo build --bin ai-os-engine` builds.
+- [ ] **Step 4: Run** — `cargo test -p aios-core --test service` → 7 pass; `cargo test -p aios-core` all pass; `cargo build --bin ai-os-engine` builds.
 
 - [ ] **Step 5: Commit** — `git add runtime/core && git commit -m "feat(core): the engine service on a private socket, JSON lines, busy and stop"`
 
@@ -1248,12 +1345,13 @@ use std::io::{BufRead, Write};
 
 fn main() {
     let sock = aios_core::service::socket_path();
-    let mut client = match Client::connect(&sock) {
+    let client = match Client::connect(&sock) {
         Ok(c) => c,
         Err(e) => { eprintln!("The AI OS service is not running ({}: {e}). Start it: systemctl --user start ai-os-engine", sock.display()); std::process::exit(1) }
     };
-    let mut reader = Client::connect(&sock).expect("second connection for reading");
-    // One connection prints, the other types: the reading loop must not block the prompt.
+    // One connection, two halves: the reader prints on its own thread so it never blocks the prompt.
+    let (mut reader, mut client) = client.split();
+    client.hello().ok();
     std::thread::spawn(move || {
         while let Some(ev) = reader.next_event() {
             for l in lines(&ev) { println!("ai> {l}"); }
@@ -1262,7 +1360,6 @@ fn main() {
         println!("(the service closed the connection)");
         std::process::exit(0);
     });
-    client.hello().ok();
     let stdin = std::io::stdin();
     print!("you> "); std::io::stdout().flush().ok();
     for line in stdin.lock().lines() {
@@ -1273,7 +1370,7 @@ fn main() {
     }
 }
 ```
-(Two connections: the second is the reader so `next_event` can block on its own thread while `Client` stays single-owner. `You` echoes are printed as nothing by `lines`, so the terminal is not doubled.)
+(`You` echoes render to nothing in `lines`, so the terminal is not doubled. The `hello` goes out on the same connection the reader half listens on, so the `state` answer is seen.)
 
 - [ ] **Step 2: The unit and the setup script**
 
@@ -1281,7 +1378,6 @@ fn main() {
 ```ini
 [Unit]
 Description=AI OS engine (workshop)
-After=default.target
 
 [Service]
 ExecStart=/usr/local/bin/ai-os-engine
@@ -1309,16 +1405,14 @@ done
 install -d -o ai -g ai -m 0755 /home/ai/.config/systemd/user
 install -m 0644 -o ai -g ai "$repo/trial/ai-os-engine.service" /home/ai/.config/systemd/user/ai-os-engine.service
 sed -i 's/\r$//' /home/ai/.config/systemd/user/ai-os-engine.service
-loginctl enable-linger ai
-runuser -u ai -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
-  systemctl --user daemon-reload
-runuser -u ai -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
-  systemctl --user enable --now ai-os-engine.service
-runuser -u ai -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
-  systemctl --user restart ai-os-engine.service
+loginctl enable-linger ai   # already yes on the workshop; idempotent, needed on a fresh install
+# ai's own service manager, addressed from root (systemd 259 supports -M user@).
+systemctl --user -M ai@ daemon-reload
+systemctl --user -M ai@ enable ai-os-engine.service
+systemctl --user -M ai@ restart ai-os-engine.service
 echo "rail ready"
 ```
-`ai-os-rail` does not exist until Task 10: make the `install` loop tolerate a missing binary in this task (`[ -f "$src" ] || { echo "skip $b"; continue; }`) and keep it that way — a skipped binary is printed, never silent.
+`ai-os-rail` does not exist until Task 10: the `install` loop must print and skip a missing binary (`src="$repo/runtime/target/release/$b"; [ -f "$src" ] || { echo "skip $b (not built)"; continue; }`), never fail silently and never fail the script.
 
 - [ ] **Step 3: Build and install in the distro, run the chat once**
 
@@ -1431,9 +1525,9 @@ path = "src/main.rs"
 [dependencies]
 aios-proto = { path = "../proto" }
 serde_json = { version = "1", features = ["preserve_order"] }
-gtk4 = { version = "0.9", package = "gtk4" }
+gtk4 = { version = "0.11", features = ["v4_18"] }
 ```
-(Pin the newest `gtk4` crate that builds against GTK 4.22 in the distro; if `0.9` does not resolve, use the newest published `0.x` and record the version in the commit message. `glib` comes re-exported as `gtk4::glib`.)
+(`gtk4` 0.11 is the series that targets the distro's GTK 4.22 and needs Rust ≥ 1.92; the distro has 1.98. `glib` is re-exported as `gtk4::glib`. If `v4_18` is not a feature name of the resolved version, use the highest `v4_*` feature it offers at or below 4.22.)
 
 `src/lib.rs`: `pub mod cards;`
 `src/main.rs` for now: `fn main() { println!("ai-os-rail: window comes in Task 10"); }` (so the bin exists; Task 10 replaces it).
@@ -1591,28 +1685,28 @@ fn socket_path() -> PathBuf {
 
 enum FromNet { Event(Event), Down, Up }
 
-/// The socket on its own thread: reconnects every 3 s; every event crosses to the GTK loop.
-fn net_thread(to_ui: glib::Sender<FromNet>) -> Sender<String> {
+/// The socket on its own thread: reconnects every 3 s; every event goes to a plain std channel
+/// that the GTK loop drains on a timer (gtk4-rs 0.11 has no glib channel; std::mpsc + a 50 ms
+/// `timeout_add_local` needs no extra crate).
+fn net_thread(to_ui: Sender<FromNet>) -> Sender<String> {
     let (say_tx, say_rx) = channel::<String>();
     std::thread::spawn(move || loop {
         match Client::connect(&socket_path()) {
-            Ok(mut reader) => {
-                let mut writer = match Client::connect(&socket_path()) { Ok(w) => w, Err(_) => { std::thread::sleep(Duration::from_secs(3)); continue } };
+            Ok(client) => {
+                let (mut reader, mut writer) = client.split();
                 let _ = to_ui.send(FromNet::Up);
-                let _ = reader.hello();
-                // Writer thread for this connection: dies with it.
-                let (wtx, wrx) = channel::<String>();
-                std::thread::spawn(move || for t in wrx { if writer.say(&t).is_err() { break } });
+                let _ = writer.hello();
                 let ui = to_ui.clone();
                 let pump = std::thread::spawn(move || { while let Some(e) = reader.next_event() { if ui.send(FromNet::Event(e)).is_err() { break } } });
                 while !pump.is_finished() {
                     match say_rx.recv_timeout(Duration::from_millis(200)) {
-                        Ok(t) => { let _ = wtx.send(t); }
+                        Ok(t) => { if writer.say(&t).is_err() { break } }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                         Err(_) => return,
                     }
                 }
                 let _ = to_ui.send(FromNet::Down);
+                std::thread::sleep(Duration::from_secs(3));
             }
             Err(_) => { let _ = to_ui.send(FromNet::Down); std::thread::sleep(Duration::from_secs(3)); }
         }
@@ -1708,7 +1802,7 @@ fn main() {
         root.append(&scroll); root.append(&status); root.append(&entry);
         win.set_child(Some(&root));
 
-        let (to_ui, from_net) = glib::MainContext::channel::<FromNet>(glib::Priority::DEFAULT);
+        let (to_ui, from_net) = channel::<FromNet>();
         let say = net_thread(to_ui);
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
@@ -1717,19 +1811,23 @@ fn main() {
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(t); e.set_text(""); } });
 
         let (cards2, widgets2, column2, status2, scroll2, say2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), scroll.clone(), say.clone());
-        from_net.attach(None, move |msg| {
-            match msg {
-                FromNet::Up => status2.set_text(""),
-                FromNet::Down => status2.set_text("The AI OS service is not running — retrying…"),
-                FromNet::Event(ev) => {
-                    for ch in cards2.borrow_mut().apply(&ev) {
-                        match ch {
-                            Change::Added(i) => { let w = render(&cards2.borrow().list[i], &say2); column2.append(&w); widgets2.borrow_mut().push(w); }
-                            Change::Updated(i) => { let old = widgets2.borrow()[i].clone(); let w = render(&cards2.borrow().list[i], &say2); column2.insert_child_after(&w, Some(&old)); column2.remove(&old); widgets2.borrow_mut()[i] = w; }
-                            Change::Line(t) => status2.set_text(&t),
+        glib::timeout_add_local(Duration::from_millis(50), move || {
+            while let Ok(msg) = from_net.try_recv() {
+                match msg {
+                    FromNet::Up => status2.set_text(""),
+                    FromNet::Down => status2.set_text("The AI OS service is not running — retrying…"),
+                    FromNet::Event(ev) => {
+                        // `apply` on its own line: the RefMut must end before `render` borrows.
+                        let changes = cards2.borrow_mut().apply(&ev);
+                        for ch in changes {
+                            match ch {
+                                Change::Added(i) => { let w = render(&cards2.borrow().list[i], &say2); column2.append(&w); widgets2.borrow_mut().push(w); }
+                                Change::Updated(i) => { let old = widgets2.borrow()[i].clone(); let w = render(&cards2.borrow().list[i], &say2); column2.insert_child_after(&w, Some(&old)); column2.remove(&old); widgets2.borrow_mut()[i] = w; }
+                                Change::Line(t) => status2.set_text(&t),
+                            }
                         }
+                        let adj = scroll2.vadjustment(); adj.set_value(adj.upper());
                     }
-                    let adj = scroll2.vadjustment(); adj.set_value(adj.upper());
                 }
             }
             glib::ControlFlow::Continue
@@ -1740,7 +1838,7 @@ fn main() {
     app.run();
 }
 ```
-Whatever the gtk4-rs version's names are for `MainContext::channel` (0.9 has it; 0.10 replaced it with `async_channel` + `glib::spawn_future_local`), use the version's own idiom and keep the shape: one net thread, events delivered on the main loop, one widget per card, re-rendered on `Updated`. Never block the main loop on the socket.
+Keep the shape: one net thread, events delivered on the main loop by the 50 ms drain, one widget per card, re-rendered on `Updated`. Never block the main loop on the socket. `use std::sync::mpsc::{channel, Sender};` covers both channels; drop unused imports if the compiler says so, never the borrow-scoping line.
 
 - [ ] **Step 2: Build in the distro and install**
 
@@ -1754,9 +1852,9 @@ The first GTK build compiles the `gtk4`/`gio`/`glib` bindings (several minutes).
 
 From the Windows side (PowerShell tool, background): `wsl -d ai-os ai-os-rail`. Then, from a second terminal, `wsl -d ai-os -u ai -- bash -lc "printf 'make a project called rail-demo with a python script that prints the first five primes, decide everything yourself\n' | timeout 300 ai-os-chat"` so the job runs while the rail shows it (the rail is a second client and sees the same events). Watch the Building card tick. Then press Open on `primes.py` (a GNOME text editor window appears through WSLg) and Undo.
 
-- [ ] **Step 4: The screenshot**
+- [ ] **Step 4: The screenshot (done by the lead in this session, not by the task's builder)**
 
-Use the Windows-side screenshot tool (`mcp__computer-use__screenshot` after `request_access` for the rail's window, or the built-in browser is NOT applicable) — capture the rail with a Building card mid-tick or a Done card with Open and Undo, and a Needs-your-OK if the job produced one (a second job "write /etc/motd-test with hello" produces one on the `/etc` write). Save as `docs/superpowers/findings/phase1d-rail.png`. If the screenshot cannot be taken from the agent's side, STOP and report: the rail is not verified until a rendered image exists (his rule).
+The rail window is on the Windows desktop; capturing it needs the Windows-side screenshot tool (`mcp__computer-use__screenshot`), which asks him to grant access to that window at the moment of capture — he must be present. The builder of this task finishes at Step 3 and reports "window up, job ran, Open opened <app>, Undo reported"; the lead then takes the screenshot with him, showing a Building card mid-tick or a Done card with Open and Undo, plus a Needs-your-OK if a second job "write the word hello into /etc/ai-os-rail-test" is given (the `/etc` write asks). Saved as `docs/superpowers/findings/phase1d-rail.png` (binary in `.gitattributes` already). Until that image exists the rail is not reported as verified (his rule).
 
 - [ ] **Step 5: Commit** — `git add runtime/rail docs/superpowers/findings/phase1d-rail.png && git commit -m "feat(rail): the GTK4 rail window on the WSLg display, with the first screenshot"`
 
@@ -1917,4 +2015,5 @@ Then STOP: report to him in plain words; merging to master waits for his word.
 - §5 workshop wiring: Task 8 (`setup-rail.sh`, unit, linger, packages), Task 10 (build/install).
 - §6 ripples: `testing.rs` goes `pub mod` (Task 7); `live_1c.rs` untouched and re-compiled (Task 8).
 - §7 proofs: 1 Tasks 2–6; 2 Task 7; 3 Task 9; 4–5 Tasks 11 and 10; 6 is his.
+- Path check (2026-09-16, read-only, against the live distro) folded in: gtk4 0.11 + std channel drain (no glib channel exists), the RefCell borrow scope in the rail, stop always armed AND queued, busy only for jobs, seq on broadcasts only, `bind` refuses a live socket, one split connection per client, `Service { name, action }`, changed-files test on a second job and before `LAST_RUN.md`, per-test temp tags, `systemctl --user -M ai@`, no `After=default.target`, `AI_OS_SOCKET_DIR` first.
 - Names used across tasks: `Event`, `ChangedFile`, `FileKind::of`, `JobState`, `StepView`, `Waiting`, `UndoLine`, `Request`, `Client::{connect,say,hello,next_event}`, `Engine::{with_sink,handle_events,stop_flag,resume,state}`, `event::{describe,lines}`, `service::{bind,run,socket_path}`, `cards::{Cards,Card,CardKind,Button,Change,StepLine}` — consistent throughout.
