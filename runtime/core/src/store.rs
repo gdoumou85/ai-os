@@ -134,6 +134,21 @@ mod tests {
         assert!(s.open_job().unwrap().is_none());
     }
 
+    /// I2: two jobs started for the same project inside one process must both survive —
+    /// before the fix, `Job::id` was `{project}-{unix_secs}` so two jobs in the same second
+    /// shared an id and `save_job`'s upsert silently merged the second one over the first.
+    #[test]
+    fn two_jobs_for_the_same_project_both_persist() {
+        let s = Store::open_in_memory().unwrap();
+        let a = Job::new("p", "first", true, "Starting p");
+        let b = Job::new("p", "second", true, "Starting p again");
+        assert_ne!(a.id, b.id);
+        s.save_job(&a).unwrap();
+        s.save_job(&b).unwrap();
+        assert_eq!(s.load_job(&a.id).unwrap().unwrap().goal, "first");
+        assert_eq!(s.load_job(&b.id).unwrap().unwrap().goal, "second");
+    }
+
     #[test]
     fn instructions_and_recent_messages() {
         let s = Store::open_in_memory().unwrap();

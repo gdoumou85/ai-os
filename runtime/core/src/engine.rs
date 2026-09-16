@@ -71,7 +71,10 @@ impl<M: Model> Engine<M> {
         Self { store, model, projects_root, log_path, workers }
     }
 
-    pub fn open_job(&self) -> Option<Job> { self.store.open_job().ok().flatten() }
+    /// I3: a store error here used to be swallowed (`.ok().flatten()`) — a job left unreadable
+    /// (a corrupt row, a locked file) looked exactly like "no job open", so the engine would
+    /// silently start a fresh one over it. Propagate instead.
+    pub fn open_job(&self) -> Result<Option<Job>, EngineError> { Ok(self.store.open_job()?) }
 
     fn workspace(&self, project: &str) -> PathBuf { self.projects_root.join(project) }
 
@@ -106,7 +109,7 @@ impl<M: Model> Engine<M> {
     }
 
     fn handle_inner(&mut self, text: &str) -> Result<Vec<String>, EngineError> {
-        if let Some(mut job) = self.open_job() {
+        if let Some(mut job) = self.open_job()? {
             if is_stop(text) {
                 let message = format!("Stopped the job in {}.", job.project);
                 return self.finish(job, State::Cancelled, message);
@@ -145,10 +148,15 @@ impl<M: Model> Engine<M> {
                 if existing.is_none() { self.create_project_folder(&name)?; }
                 let desc = existing.map(|p| p.description).unwrap_or(description);
                 self.store.upsert_project(&name, &self.workspace(&name).display().to_string(), &desc)?;
+                // I6: `remember` on a `start` move was saved silently — only the `Reply` arm told
+                // the user. Same "(Noted for the future: …)" line here, computed before the value
+                // moves into `add_instruction`.
+                let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
                 if let Some(r) = remember { self.store.add_instruction(&r)?; }
                 let job = Job::new(&name, &goal, creative, &understood);
                 self.store.save_job(&job)?;
                 let mut out = vec![understood];
+                if let Some(n) = note { out.push(n); }
                 out.extend(self.run_turns(job)?);
                 Ok(out)
             }
@@ -202,9 +210,15 @@ impl<M: Model> Engine<M> {
         Ok(None)
     }
 
+    /// I5: matching by file name alone let `docs/BLUEPRINT.md` satisfy the gate, even though
+    /// `read_blueprint` only ever reads the root file — so `done` could unblock on a blueprint
+    /// the model never actually consulted. Exact path match instead (after trimming one leading
+    /// `./`, the only harmless alias for the root).
     fn is_blueprint(action: &Action) -> Option<bool> {
         match action {
-            Action::WriteFile { path, .. } | Action::EditFile { path, .. } => Some(Path::new(path).file_name().map(|n| n == "BLUEPRINT.md").unwrap_or(false)),
+            Action::WriteFile { path, .. } | Action::EditFile { path, .. } => {
+                Some(path.strip_prefix("./").unwrap_or(path) == "BLUEPRINT.md")
+            }
             _ => None,
         }
     }
@@ -379,7 +393,7 @@ mod tests {
         let (mut e, rec, _) = engine_with(vec![Move::Reply { text: "A prime is…".into(), remember: None }], "chat");
         let out = e.handle("what's a prime?").unwrap();
         assert_eq!(out, vec!["A prime is…".to_string()]);
-        assert!(e.open_job().is_none());
+        assert!(e.open_job().unwrap().is_none());
         assert!(rec.calls.borrow().is_empty());
     }
 
@@ -402,7 +416,7 @@ mod tests {
         let (mut e, _, root) = engine_with(vec![start("Primes Printer", false), Move::Ask { questions: vec!["Which language?".into()] }], "start");
         let out = e.handle("make me a primes script").unwrap();
         assert_eq!(out[0], "Starting a new project Primes Printer");
-        let job = e.open_job().expect("a job is open");
+        let job = e.open_job().unwrap().expect("a job is open");
         assert_eq!(job.project, "primes-printer");
         assert!(job.is_open());
         assert!(root.join("primes-printer").is_dir());
@@ -425,7 +439,7 @@ mod tests {
         e.handle("make p").unwrap();
         let out = e.handle("Stop.").unwrap();
         assert!(out.iter().any(|l| l.contains("Stopped")), "{out:?}");
-        assert!(e.open_job().is_none());
+        assert!(e.open_job().unwrap().is_none());
         // The trailing Ask is now consumed by the real loop (job pauses waiting_answer),
         // so "Stop." cancels on a second handle() call — one model call per handle().
         assert_eq!(e.model.prompts.borrow().len(), 2);
@@ -450,7 +464,7 @@ mod tests {
         let (mut e, rec, _) = engine_with(happy_path(), "happy");
         let out = e.handle("make it, decide yourself").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
-        assert!(e.open_job().is_none());
+        assert!(e.open_job().unwrap().is_none());
         assert_eq!(rec.calls.borrow().len(), 4, "3 acts + the check all went through the executor");
     }
 
@@ -470,7 +484,7 @@ mod tests {
             again, plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
         ], "reuse");
         e.handle("make p").unwrap();
-        assert!(e.open_job().is_none());
+        assert!(e.open_job().unwrap().is_none());
         e.handle("add a menu to p").unwrap();
         assert_eq!(e.store.list_projects().unwrap().len(), 1, "same project row, not a second one");
         assert_eq!(e.store.list_projects().unwrap()[0].description, "prime printer", "the original description is kept");
@@ -480,10 +494,10 @@ mod tests {
     fn stop_cancels_the_open_job_without_asking_the_model() {
         let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()] }], "stop");
         e.handle("make p").unwrap();
-        assert_eq!(e.open_job().unwrap().state, State::WaitingAnswer);
+        assert_eq!(e.open_job().unwrap().unwrap().state, State::WaitingAnswer);
         let out = e.handle("stop").unwrap();
         assert!(out[0].contains("Stopped"));
-        assert!(e.open_job().is_none());
+        assert!(e.open_job().unwrap().is_none());
         assert_eq!(e.model.prompts.borrow().len(), 2, "cancel is deterministic, no model call");
     }
 
@@ -496,7 +510,7 @@ mod tests {
         ], "ask");
         let out = e.handle("make it").unwrap();
         assert!(out.iter().any(|l| l.contains("Which language?")), "{out:?}");
-        assert_eq!(e.open_job().unwrap().state, State::WaitingAnswer);
+        assert_eq!(e.open_job().unwrap().unwrap().state, State::WaitingAnswer);
         let out = e.handle("python").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         let prompts = e.model.prompts.borrow();
@@ -597,7 +611,7 @@ mod tests {
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
         assert_eq!(rec.calls.borrow().len(), 3);
-        assert!(e.open_job().is_none());
+        assert!(e.open_job().unwrap().is_none());
     }
 
     #[test]
@@ -645,7 +659,7 @@ mod tests {
         ], "approve");
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("Needs your OK"), "{out:?}");
-        assert_eq!(e.open_job().unwrap().state, State::WaitingApproval);
+        assert_eq!(e.open_job().unwrap().unwrap().state, State::WaitingApproval);
         assert_eq!(rec.calls.borrow().len(), 1, "the risky action did not run");
         let out = e.handle("yes, send it").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -699,7 +713,7 @@ mod tests {
             Box::new(move |_| Box::new(crate::testing::ScriptedWorker(r2.clone())) as Box<dyn Worker>));
         let out = e2.handle("python").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
-        assert!(e2.open_job().is_none());
+        assert!(e2.open_job().unwrap().is_none());
     }
 
     #[test]
@@ -709,7 +723,7 @@ mod tests {
         let (mut e, _, _) = engine_with(moves, "replan-cap");
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
-        assert!(e.open_job().is_none());
+        assert!(e.open_job().unwrap().is_none());
         // front door + plan + 6 replans
         assert!(e.model.prompts.borrow().len() <= 8, "{}", e.model.prompts.borrow().len());
     }
@@ -785,7 +799,7 @@ mod tests {
         ], "blocked-resets");
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("Needs your OK"), "{out:?}");
-        assert_eq!(e.open_job().unwrap().rejections, 0, "a legal act needing approval resets the rejection count");
+        assert_eq!(e.open_job().unwrap().unwrap().rejections, 0, "a legal act needing approval resets the rejection count");
     }
 
     #[test]
@@ -801,6 +815,92 @@ mod tests {
         let out = e.handle("yes").unwrap();
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
         assert!(rec.calls.borrow().is_empty(), "the capped job must not reach the executor");
-        assert!(e.open_job().is_none());
+        assert!(e.open_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn blueprint_gate_matches_only_the_exact_root_path() {
+        // I5: `docs/BLUEPRINT.md` must not satisfy the gate — `read_blueprint` only ever reads
+        // the root file, so unblocking `done` on a nested file means the model never actually
+        // consulted what it thinks it did.
+        let (mut e, _, _) = engine_with(vec![
+            start("p", true), plan(),
+            act(1, write("a.py")),                    // a code change
+            act(1, write("docs/BLUEPRINT.md")),        // looks like a blueprint update but isn't
+            done(run("true")),                          // rejected: gate still not satisfied
+            act(1, write("BLUEPRINT.md")),              // the real root file
+            done(run("true")),                          // now passes
+        ], "blueprint-depth");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts.iter().any(|p| p.user.contains("rejected: update BLUEPRINT.md")), "{prompts:?}");
+    }
+
+    #[test]
+    fn remember_on_start_is_noted_to_the_user_and_persisted() {
+        // I6: the `Reply` arm told the user "(Noted for the future: …)" on a remember; the
+        // `Start` arm saved it silently. Same line must appear here too.
+        let mv = Move::Start {
+            project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(),
+            creative: true, understood: "Starting p".into(), remember: Some("always use python3".into()),
+        };
+        let (mut e, _, _) = engine_with(vec![mv, plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "start-remember");
+        let out = e.handle("go").unwrap();
+        assert!(out.iter().any(|l| l.contains("Noted for the future: always use python3")), "{out:?}");
+        assert!(e.store.instructions().unwrap().contains(&"always use python3".to_string()));
+    }
+
+    /// I7: builds an `Engine` with a real (file-backed) action log so it survives across the
+    /// several `executor_for` calls one job makes, and hands the test the path to read directly.
+    fn engine_with_log(moves: Vec<Move>, tag: &str) -> (Engine<crate::model::FakeModel>, PathBuf) {
+        let rec = crate::testing::Recorder::default();
+        let r2 = rec.clone();
+        let root = crate::testing::temp_root(tag);
+        let log_path = std::env::temp_dir().join(format!("ai-os-core-{tag}-log-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&log_path);
+        let log_path_str = log_path.to_string_lossy().to_string();
+        let e = Engine::new(
+            crate::store::Store::open_in_memory().unwrap(),
+            crate::model::FakeModel::new(moves),
+            root,
+            Some(log_path_str),
+            Box::new(move |_ws| Box::new(crate::testing::ScriptedWorker(r2.clone())) as Box<dyn Worker>),
+        );
+        (e, log_path)
+    }
+
+    #[test]
+    fn approved_flag_is_pinned_by_the_action_log_not_just_the_reply() {
+        // I7: nothing else in the test harness can see the `approved` bool `perform` passes to
+        // `Executor::execute` — the action log can. This pins that the risky action ran exactly
+        // once, and only after a "blocked" row: if `approved` were ever passed `true`
+        // unconditionally, there would be no "blocked" row at all.
+        let post = Action::HttpPost { url: "https://x".into(), body: "b".into() };
+        let (mut e, log_path) = engine_with_log(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(2, post.clone()), done(run("true")),
+        ], "approval-log");
+        e.handle("go").unwrap();
+        let out = e.handle("yes, send it").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+
+        let conn = rusqlite::Connection::open(&log_path).unwrap();
+        let post_json = serde_json::to_string(&post).unwrap();
+        let mut stmt = conn.prepare("SELECT outcome FROM actions WHERE action_json = ?1 ORDER BY id").unwrap();
+        let outcomes: Vec<String> = stmt.query_map([&post_json], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+        assert!(outcomes[0].starts_with("blocked:"), "{outcomes:?}");
+        assert!(outcomes[1].starts_with("ok:"), "{outcomes:?}");
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    #[test]
+    fn happy_path_with_no_risky_action_leaves_zero_blocked_rows_in_the_log() {
+        let (mut e, log_path) = engine_with_log(happy_path(), "approval-log-happy");
+        e.handle("make it, decide yourself").unwrap();
+        let conn = rusqlite::Connection::open(&log_path).unwrap();
+        let blocked: i64 = conn.query_row("SELECT COUNT(*) FROM actions WHERE outcome LIKE 'blocked:%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(blocked, 0);
+        let _ = std::fs::remove_file(&log_path);
     }
 }

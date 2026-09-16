@@ -121,6 +121,12 @@ impl Worker for SandboxWorker {
                     .args(["--property=PrivateNetwork=yes", "--property=ProtectHome=yes", "--property=PrivateTmp=yes"])
                     .args(["--property=ProtectSystem=strict", "--property=UMask=0002"])
                     .arg("--property=TemporaryFileSystem=/data:ro")
+                    // ProtectSystem=strict/ProtectHome/TemporaryFileSystem still leave the host's
+                    // other mounts readable (on the dev workshop, /mnt is the whole Windows
+                    // profile) — spec §7 says "nothing else" is visible. Hide them outright; the
+                    // leading `-` means "ignore if this path doesn't exist" (e.g. no /media on
+                    // some hosts) rather than failing the whole unit.
+                    .arg("--property=InaccessiblePaths=-/mnt -/media -/srv")
                     .arg(format!("--property=BindPaths={ws}"))
                     .arg(format!("--property=ReadWritePaths={ws}"))
                     .arg("--")

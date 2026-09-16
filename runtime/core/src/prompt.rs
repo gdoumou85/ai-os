@@ -1,6 +1,7 @@
 use crate::job::{Job, State};
 use crate::model::Prompt;
 use crate::store::ProjectRow;
+use executor::action::Action;
 
 /// The model's standing rules. Plain, short: a 9B model on 8k has no room for an essay.
 pub const SYSTEM: &str = "You are the AI that runs this computer for its user. You answer with exactly one JSON move.
@@ -53,7 +54,31 @@ fn allowed_moves(job: &Job) -> Vec<&'static str> {
     }
 }
 
-/// Last 6 steps in full; older ones one line each (budget, parent §4.3).
+/// I4: the full action JSON for the last 6 steps used to go straight into the prompt — one
+/// 300-line `write_file` blew the 8k budget and Ollama silently truncates from the head (the
+/// system rules live there). Render the two content-carrying actions compactly instead of
+/// dumping their payload; everything else keeps its JSON but capped, so an unexpectedly large
+/// argv or url still can't blow the budget either.
+fn compact_action(action: &Action) -> String {
+    match action {
+        Action::WriteFile { path, contents } => format!("write_file {path} ({} bytes)", contents.len()),
+        Action::EditFile { path, find, .. } => {
+            let f: String = find.chars().take(60).collect();
+            format!("edit_file {path} (find: {f})")
+        }
+        other => {
+            let full = serde_json::to_string(other).unwrap_or_default();
+            if full.chars().count() > 400 {
+                format!("{}…", full.chars().take(400).collect::<String>())
+            } else {
+                full
+            }
+        }
+    }
+}
+
+/// Last 6 steps in full (but compact — see `compact_action`); older ones one line each
+/// (budget, parent §4.3).
 pub fn summarise_steps(job: &Job) -> String {
     let n = job.steps.len();
     let mut out = String::new();
@@ -63,8 +88,7 @@ pub fn summarise_steps(job: &Job) -> String {
         if i + 6 < n {
             out.push_str(&format!("step {}: {kind} {status}\n", i + 1));
         } else {
-            let action = serde_json::to_string(&s.action).unwrap_or_default();
-            out.push_str(&format!("step {} (plan step {}): {action} -> {status}: {}\n", i + 1, s.plan_step, s.detail));
+            out.push_str(&format!("step {} (plan step {}): {} -> {status}: {}\n", i + 1, s.plan_step, compact_action(&s.action), s.detail));
         }
     }
     if out.is_empty() { "(nothing done yet)".into() } else { out }
@@ -161,6 +185,18 @@ mod tests {
         let big = "x".repeat(10_000);
         let p = job_turn(&[], &j, Some(&big), None);
         assert!(p.user.len() < 6_000, "blueprint must be capped at 3000 chars: {}", p.user.len());
+    }
+
+    /// I4: a big `write_file` step must not blow the prompt budget — the content is summarised
+    /// as a byte count, not re-serialised whole.
+    #[test]
+    fn a_large_write_file_step_does_not_blow_the_prompt_budget() {
+        let mut j = Job::new("p", "g", true, "u");
+        let big = "x".repeat(20_000);
+        j.steps.push(StepRecord { plan_step: 1, action: Action::WriteFile { path: "big.py".into(), contents: big }, ok: true, detail: "written".into() });
+        let p = job_turn(&[], &j, None, None);
+        assert!(p.user.len() < 6_000, "{}", p.user.len());
+        assert!(p.user.contains("write_file big.py (20000 bytes)"), "{}", p.user);
     }
 
     #[test]

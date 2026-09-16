@@ -107,6 +107,16 @@ fn other_projects_and_the_database_are_invisible() {
     assert!(!db.ok, "the executor's database must be invisible: {}", db.detail);
     let home = w.run(&Action::RunCommand { argv: vec!["ls".into(), "/home/ai".into()] });
     assert!(!home.ok, "the user's home must be hidden: {}", home.detail);
+    // C1: /mnt must be hidden too, not just ProtectHome/ProtectSystem's own targets — on this
+    // WSL2 dev workshop it's where the whole Windows profile lives. Checked one level down
+    // (`/mnt/c/Users`, not bare `/mnt`): WSL mounts the drive at `/mnt/c`, so a bare `ls /mnt`
+    // only ever lists mount names ("c", "wsl", …) and would pass either way — it never actually
+    // exercises the leak. "!out.detail.contains(\"c\")" would also be too weak (matches almost
+    // anything); assert on the real Windows-profile marker instead. Either assertion path covers
+    // it: the path is refused outright, or it "succeeds" but the failure text (which echoes the
+    // refused path back) is all there is — no directory contents ever come through.
+    let mnt = w.run(&Action::RunCommand { argv: vec!["ls".into(), "/mnt/c/Users".into()] });
+    assert!(!mnt.ok || !mnt.detail.contains("gdoum"), "/mnt must be hidden from the sandbox: {}", mnt.detail);
     let _ = std::fs::remove_file("/data/it-jail-db.sqlite");
     let _ = std::fs::remove_dir_all("/data/projects/it-jail-a");
     let _ = std::fs::remove_dir_all("/data/projects/it-jail-b");
