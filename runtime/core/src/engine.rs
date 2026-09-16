@@ -5,7 +5,7 @@ use crate::moves::Move;
 use crate::prompt;
 use crate::snapshot::{self, RealSnapshotter, Snapshotter};
 use crate::store::{Store, StoreError};
-use aios_proto::{Event, UndoLine};
+use aios_proto::{ChangedFile, Event, FileKind, UndoLine};
 use executor::action::Action;
 use executor::executor::{ExecOutcome, Executor};
 use executor::log::{ActionLog, LogError};
@@ -45,6 +45,35 @@ pub struct Engine<M: Model> {
     sink: Box<dyn FnMut(&Event)>,
     /// The events of the `handle_events` call in progress, returned at its end.
     out: Vec<Event>,
+}
+
+/// What the job left behind: entries under `folder` modified at or after `since` (unix
+/// seconds), hidden entries and dependency folders skipped, sorted by path, at most 20.
+/// ponytail: mtime in whole seconds, not content — a file touched but unchanged is listed, and
+/// so is one the user touched in the same second the job began; content diffing against the
+/// snapshot is the upgrade if that ever misleads.
+pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
+    const SKIP: [&str; 2] = ["node_modules", "target"]; // hidden names (.git, .venv) are skipped below
+    fn walk(dir: &Path, since: u64, out: &mut Vec<ChangedFile>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || SKIP.contains(&name.as_str()) { continue; }
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() { walk(&path, since, out); continue; }
+            let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            if mtime >= since {
+                let p = path.display().to_string();
+                out.push(ChangedFile { kind: FileKind::of(&p), path: p, size: meta.len() });
+            }
+        }
+    }
+    let mut out = vec![];
+    walk(folder, since, &mut out);
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out.truncate(20);
+    out
 }
 
 pub fn sanitize_project_name(raw: &str) -> String {
@@ -327,17 +356,19 @@ impl<M: Model> Engine<M> {
         job.state = state;
         job.outcome_text = text.clone();
         self.store.save_job(&job)?;
+        // Before `write_or_wipe_last_run`: that writes LAST_RUN.md into this same folder on
+        // Failed/Cancelled, and the engine's own note is not a file the job changed.
+        let files = changed_files(&self.workspace(&job), job.started_at);
         self.write_or_wipe_last_run(&job);
         let job_id = job.id.clone();
-        // `files` is the rail's "what changed" list — Task 3 fills it.
         let ev = match state {
             State::Done => {
                 let check = job.steps.last().map(|s| format!("{}: {}", describe(&s.action), if s.ok { "ok" } else { "failed" }));
-                Event::Done { job_id, text, check, files: vec![] }
+                Event::Done { job_id, text, check, files }
             }
-            State::Cancelled => Event::Stopped { job_id, text, files: vec![] },
+            State::Cancelled => Event::Stopped { job_id, text, files },
             // `finish` is only ever called with done/cancelled/failed; anything else ended badly.
-            _ => Event::Failed { job_id, text, files: vec![] },
+            _ => Event::Failed { job_id, text, files },
         };
         self.emit(ev);
         Ok(())
@@ -1672,5 +1703,49 @@ mod tests {
         assert_eq!(describe(&Action::MakeDir { path: "/data/work".into() }), "made folder /data/work");
         assert_eq!(describe(&Action::FetchPackages { manager: Manager::Pip, packages: vec!["tabulate".into()] }), "fetched tabulate with pip");
         assert_eq!(describe(&Action::SetSetting { key: "projects_root".into(), value: "/data/work".into() }), "set projects_root = /data/work");
+    }
+
+    #[test]
+    fn done_lists_the_files_the_job_changed() {
+        // A new project refuses a folder that already exists, so the old files are planted
+        // AFTER a first job created the folder, and the second job is the one measured.
+        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add more".into(), creative: true, understood: "Continuing p".into(), remember: None };
+        let (mut e, _, root) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+            again, plan(), act(1, write("BLUEPRINT.md")), act(1, write("primes.py")), act(1, write("BLUEPRINT.md")), done(run("python3")),
+        ], "files");
+        e.handle("make p").unwrap();
+        let old = root.join("p"); std::fs::create_dir_all(old.join("node_modules")).unwrap();
+        std::fs::write(old.join("old.txt"), "x").unwrap();
+        std::fs::write(old.join("node_modules").join("lib.js"), "x").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        for p in [old.join("old.txt"), old.join("node_modules").join("lib.js"), old.join("BLUEPRINT.md")] {
+            std::fs::File::open(&p).unwrap().set_modified(past).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // started_at is whole seconds
+        let ev = events_of(&mut e, "add primes to p");
+        let Event::Done { files, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
+        let names: Vec<&str> = files.iter().map(|f| f.path.rsplit('/').next().unwrap()).collect();
+        assert_eq!(names, vec!["BLUEPRINT.md", "primes.py"], "{files:?}");
+        assert!(files.iter().all(|f| f.path.starts_with(old.to_str().unwrap())), "absolute paths");
+        assert!(matches!(files[1].kind, aios_proto::FileKind::Text));
+    }
+
+    #[test]
+    fn a_failed_job_does_not_list_the_engines_own_last_run_note() {
+        let (mut e, _, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), Move::GiveUp { reason: "r".into(), missing: "m".into() }], "files-lastrun");
+        let ev = events_of(&mut e, "make p");
+        let Event::Failed { files, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
+        assert!(files.iter().all(|f| !f.path.ends_with("LAST_RUN.md")), "{files:?}");
+    }
+
+    #[test]
+    fn changed_files_is_capped_and_sorted() {
+        let root = crate::testing::temp_root("files-cap");
+        for i in 0..25 { std::fs::write(root.join(format!("f{i:02}.txt")), "x").unwrap(); }
+        let files = changed_files(&root, 0);
+        assert_eq!(files.len(), 20);
+        assert!(files[0].path.ends_with("f00.txt"));
+        assert!(files[19].path.ends_with("f19.txt"));
     }
 }

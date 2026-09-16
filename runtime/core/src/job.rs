@@ -77,6 +77,10 @@ pub struct Job {
     /// what it never saw. `#[serde(default)]`: see `declined_actions` (I3).
     #[serde(default)]
     pub request: String,
+    /// When the job began (unix seconds): the Done card lists what changed since then.
+    /// `#[serde(default)]`: a job saved before 1d has no such key.
+    #[serde(default)]
+    pub started_at: u64,
 }
 
 impl Job {
@@ -93,6 +97,7 @@ impl Job {
             note_to_model: None, last_code_change: 0, last_blueprint_update: 0,
             outcome_text: String::new(), housekeeping: false,
             folder: folder.into(), new_project: false, request: String::new(),
+            started_at: (millis / 1000) as u64,
         }
     }
 
@@ -147,5 +152,15 @@ mod tests {
         assert!(back.folder.is_empty());
         assert!(!back.housekeeping);
         assert!(!back.new_project);
+    }
+
+    #[test]
+    fn started_at_is_set_and_optional_on_the_wire() {
+        let job = Job::new("p", "/data/projects/p", "g", true, "u");
+        assert!(job.started_at > 1_700_000_000);
+        let mut value = serde_json::to_value(&job).unwrap();
+        value.as_object_mut().unwrap().remove("started_at");
+        let back: Job = serde_json::from_value(value).unwrap();
+        assert_eq!(back.started_at, 0);
     }
 }
