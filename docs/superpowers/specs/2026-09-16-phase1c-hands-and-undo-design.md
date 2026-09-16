@@ -298,6 +298,7 @@ Still true of the 9B and recorded rather than papered over: it asks a question o
 - Restarting the service that owns a config file after an approved edit (the model may follow with `service … restart`).
 - The privileged daemon (packaging phase) replaces the wrapper; the verb list is its interface.
 - Other Windows drive letters under `/mnt` (only `/mnt/c` is hidden; the workshop has one drive).
+- `sudo -u <user> apt …` still launders past `wrong_hand`: it is a word list over the argv, and `-u` takes a value that is not an option, so the program it finds is the user name. The refusal is a teaching aid, not a security boundary — the wrapper is what actually decides what may run as root.
 - Small 1b carry-forwards still open: `allowed_moves` ↔ `run_turns` as one table; HTTP error flattening; unbounded standing instructions.
 
 ## 13. Path check (2026-09-16, read-only agent against the live distro) — what changed
