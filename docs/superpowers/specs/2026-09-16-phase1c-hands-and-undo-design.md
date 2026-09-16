@@ -74,7 +74,7 @@ install -- <pkg>…            DEBIAN_FRONTEND=noninteractive apt-get install -y
 remove -- <pkg>…             apt-get remove -y (never purge; refusals in §3)
 pkg-list                     dpkg-query -W -f '${Package}\n' (installed only) — the before/after set
 service <name> enable|disable|restart|state
-read-file <path>             approved reads anywhere except the refused files
+read-file <path>             roots /etc, /data, /home/ai; refused files; no symlinks
 write-file <path>            contents on stdin; roots /etc, /data, /home/ai; parent dirs created; refused files
 remove-file <path>           undo of a write that created the file
 make-dir <path>              roots /data, /home/ai; under /data chown ai:ai-sandbox 2770, under /home/ai chown ai
@@ -98,6 +98,8 @@ The sudoers file becomes exactly one line: `ai ALL=(root) NOPASSWD: /usr/local/l
 
 A worker's `Outcome` now carries an optional undo entry; the engine saves it on the job's undo rows. Tests use two fake workers and assert which one each action reached.
 
+Before any of that, `execute()` refuses a `run_command` that is really another hand's job — a package manager asked to install, remove, upgrade or update (`rules::wrong_hand`) — with the hand that does it named in the reason, and it never reaches a worker. Prose in the prompt was not enough: §11's Results has the run where nine steps of `apt-get` convinced the model the machine has no root. Read-only uses of the same programs stay free.
+
 ## 7. Housekeeping
 
 A third front-door move: `housekeep { goal, understood, remember? }`. It creates a job with **no project**: `Job.project` is empty and `Job.housekeeping` is true. Its folder is `/data/housekeeping` (a plain folder the setup script creates, `ai:ai-sandbox` 2770), so `run_command`, `read_file` and `write_file` still work for scratch and inspection; the sandbox jail already shows `/etc` read-only and `systemctl is-enabled`, `apt list --installed` and `cat /etc/fstab` work inside it (proven). Four places branch on `housekeeping`:
@@ -119,6 +121,8 @@ Carry-forward from the 1b review. Today a job can end `done` with no blueprint i
 
 `SYSTEM` gains: software is installed with `install`, never with `run_command apt`; services with `service`; language packages come through `fetch_packages` because the sandbox has no network; a file outside the project needs the user's yes, so say why; the machine's own layout and settings are housekeeping. The schema (`schema.rs`) gains the six action shapes and the `housekeep` move, discriminator first (key order is load-bearing, 1b finding). `Machine:` line in `job_turn` gains "apt via install; pip/npm/cargo via fetch_packages".
 
+The live acceptance added four more, each after watching the 9B walk past the rule it needed (§11 Results): a folder outside the working directory is made with `make_dir`, never `run_command mkdir`; the project's own files are named relative to the working directory, never by an absolute path; a step that already succeeded is not repeated; and the housekeeping header forbids a `BLUEPRINT.md` by name, says the job is not done until the setting is set, and gives the order — make the folder, set the setting, then `done` with `make_dir` as the check, because the sandbox cannot see out of its scratch folder to check anything else.
+
 ## 10. Changes to the parent spec (applied at close-out)
 
 - §4.8 Undo: "one snapshot disk" becomes "per-hand undo: btrfs snapshot per project subvolume for files; recorded reverse for every admin operation; unit of undo is one job; reversed on the word *undo*". The disk sentence stays as where projects live.
@@ -136,6 +140,70 @@ Live acceptance, no human, qwen3.5:9b, in this order:
 2. "Install cowsay and prove it works" → `install cowsay`, done with a `run_command cowsay` check.
 3. "undo" → cowsay is gone; "undo" again → `/data/work` is removed if empty and `projects_root` is back to the default.
 4. A pip fetch inside a project ("make a script that prints a table with the `tabulate` package") → `fetch_packages pip tabulate` succeeds with the allowlist; the same step through `--net=none` fails, proving the gate.
+
+### Results (2026-09-16)
+
+All of it inside the `ai-os` distro as user `ai`, `runtime/` as the working directory, Ollama up with `qwen3.5:9b`.
+
+`cargo test` (everything; the two live tests skip without `AI_OS_LIVE`):
+
+```
+     Running unittests src/lib.rs (aios_core)
+test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+     Running tests/live_1c.rs
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/live_primes.rs
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/snapshot_it.rs
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/lib.rs (executor)
+test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+     Running tests/admin_integration.rs
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/sandbox_integration.rs
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+`AI_OS_SANDBOX_IT=1 cargo test -p executor` (the machine tests really run):
+
+```
+test result: ok. 63 passed; 0 failed; ... finished in 8.17s        (lib)
+test result: ok. 7 passed; 0 failed; ... finished in 4.17s         (admin_integration)
+test result: ok. 9 passed; 0 failed; ... finished in 0.37s         (sandbox_integration)
+```
+
+`AI_OS_SANDBOX_IT=1 cargo test -p aios-core --test snapshot_it`:
+
+```
+test a_project_subvolume_snapshots_and_restores_as_the_ai_user ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+```
+
+`bash runtime/admin/test-admin.sh` — 31 checks, all PASS: bad package name, apt suffix as package, trailing dash, unit path as service, protected service, protected unit suffix, path outside roots, sudoers write, shadow read, read outside roots, empty path, relative path, make-dir outside roots, sandbox cwd outside, symlink write, symlink read, symlink target untouched, pkg-list has bash, service state, write/read file, remove-file, existing mode kept, new parent dir owner, make-dir owner, remove-dir, sandbox-run uid, net=none blocked, dollar survives, games on PATH, allowlist reaches pypi, allowlist blocks example.com, venv works in jail.
+
+**Live acceptance** — `AI_OS_LIVE=1 cargo test -p aios-core --test live_1c -- --nocapture`, fresh `/data/ai-os-live-1c.db`, no human (the test answers "You decide." to a question and "yes" to an approval, at most four times per line, and every one of those is printed in the transcript). **All four scripts pass, 140.47s in total:**
+
+| script | steps | seconds | what was asserted on the machine |
+|---|---|---|---|
+| 1a the projects folder | 3 | 20.1 | `/data/work` exists and `projects_root` = `/data/work` |
+| 1b a project under it | 5 | 22.5 | `/data/work/prime-script/BLUEPRINT.md` exists |
+| 2 install cowsay | 5 | 18.6 | `pkg-list` through the wrapper contains `cowsay` |
+| 3 undo ×3 | — | 2.2 / 0.1 / 0.1 | cowsay gone, project files restored, `projects_root` back to unset |
+| 4 fetch a pip package | 10 | 76.6 | a `fetch_packages` row in the action log whose outcome starts `ok:` |
+
+The reversal report, verbatim from the run: "Removed the 1 packages installed (cowsay)" / "Restored the files of /data/work/prime-script from before the job" / "Setting projects_root back to /data/work", "Cleared setting projects_root", "Could not undo: Removed the folder /data/work — left as is (rmdir: failed to remove '/data/work': Directory not empty)". That last line is §11's "removed **if empty**" being honest: undo restores a project's files but never removes the project folder, so the folder the primes job left inside `/data/work` keeps it alive. Afterwards `/data` carries no `/data/work` content but the two project folders (`/data/work/prime-script`, `/data/projects/primes`), and cowsay is not installed.
+
+**What the live runs changed** (seven runs; each finding is a product gap the 9B walked into, not a test that was loosened):
+
+1. **`mkdir` instead of `make_dir`.** Run 1: the model ran `run_command mkdir -p /data/work`, read the jail's "Read-only file system" as the machine's truth, and gave up on a machine "without root". `SYSTEM` now names `make_dir` for a folder outside the working directory.
+2. **A blueprint in a housekeeping job.** Runs 2–3: told only "no project, no blueprint", it wrote and then re-read a `BLUEPRINT.md` in the folder it had just made, burning the whole job on approvals. The housekeeping header now forbids it by name, says the job is not done until the setting is set, and gives the order (folder, setting, done with `make_dir` as the check).
+3. **Absolute paths for the project's own files.** Run 3: inside its project it wrote `/data/work/BLUEPRINT.md` — one level above its workspace — so every write needed an approval and nothing landed in the project. `SYSTEM` now says the project's own files are named relative to the working directory.
+4. **`apt` as a free command.** Run 4: nine steps of `apt-get`, `pip3`, `ensurepip`, all failing with permission errors that convinced it the machine has no root. The executor now refuses a package manager's *changing* verbs (`rules::wrong_hand`) before they reach the sandbox and names the hand that does the job; read-only uses (`apt list --installed`, `cargo build`) stay free. The very next run installed cowsay through the `install` hand on the second step.
+5. **`/usr/games` was not on the sandbox's PATH**, so the cowsay it had just installed could not be run to prove it (`Failed to find executable cowsay`). The wrapper sets PATH for `sandbox-run` now, with a check in `test-admin.sh`.
+6. **A successful `make_dir` said nothing.** The wrapper prints nothing, so the step's detail was empty; the model went looking for other proof. The outcome now reads `/data/work exists`.
+7. **The jail's blindness read as the machine's truth.** `ls -ld /data/work` answers "No such file or directory" because `/data` is an empty tmpfs inside the jail. A failed `run_command` whose arguments name a path that really exists outside the workspace now carries that fact in its detail; and a workspace-relative program (`.venv/bin/python3`) is made absolute before it goes out, which is what let script 4 finish.
+
+Still true of the 9B and recorded rather than papered over: it asks a question or two even in creative mode (the test answers "You decide." once), and it will repeat an identical failing check up to the three-strike cap before it replans.
 
 ## 12. Out of scope, carried forward
 
@@ -158,3 +226,14 @@ Live acceptance, no human, qwen3.5:9b, in this order:
 6. Root `make-dir` produced `root:root` folders that block project creation → chown in the wrapper; `projects_root` unvalidated → same roots as the wrapper.
 7. Free `/etc` writes = root code execution through unit files, cron, apt sources, PAM → NeedsConfirm, as in 1b.
 8. Housekeeping would have been unreachable through the existing `done` gate and prompt text; `LAST_RUN.md` would land in the projects root; re-starting a project overwrote its folder; cancelled jobs were not undoable; the absolute gate needed the test worker to write real files. All folded into §7, §8.
+
+**Build-time findings (2026-09-16), from writing the wrapper and the workers:**
+
+9. `install -d` on an existing folder **resets its mode and owner**, so `make-dir` creates only what is missing and never re-stats a folder that is already there.
+10. `write-file` wrote through a temporary file next to the target; a symlink planted at that temporary name between the create and the rename would have written wherever it pointed. Closed with an exclusive create (`set -C` / `O_EXCL`) on the temporary name.
+11. apt accepts a **`pkg-` suffix** as "remove this package" inside an `install` line, so the name regex refuses a trailing dash as well as a leading one.
+12. `systemctl` maps a bare name to `<name>.service`, so a protected-service list matched on the bare name was bypassed by writing `ssh.service`. Only the `.service` suffix is normalised before the check; any other unit suffix is refused outright.
+13. A **relative path** is refused at both choke points — in Rust before the call and in the wrapper — because `realpath -m` resolves it against the *caller's* cwd, which is not what anyone approved.
+14. systemd resolves a unit's program against `/`, not against `--working-directory`, so `sandbox-run` passes an absolute program path (and the fetch commands are built accordingly).
+15. A plain folder on **tmpfs can carry inode 256**, which made the subvolume check try to snapshot `/tmp`. The check needs the device half too: inode 256 *and* a different device number from its parent.
+16. Hiding `/mnt/c` alone is not enough on this workshop — every Windows drive and the WSL plumbing live under `/mnt`. The jail mounts an empty read-only tmpfs over all of `/mnt` and binds back the single file `/etc/resolv.conf` points at, or an allowlisted fetch could never resolve a registry name.

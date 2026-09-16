@@ -135,14 +135,14 @@ Other abilities: web browsing, installing and removing software, desktop notific
 - Runs actions through three workers, each as separate as Linux allows:
   - **Sandbox worker:** free commands, program command lines, builds, tests. Runs as its own Linux user inside the job's workspace. Cannot see personal files, cannot touch the system.
   - **Desktop worker:** runs inside the user's own desktop session, because program controls (accessibility) only exist there. It accepts program-control actions only (click this, type here, read that) and nothing else.
-  - **Admin worker:** a fixed menu of operations: install or remove a package, change a config file, enable or disable a service, write a file outside the workspace. Each has its own rule, its own check and its own snapshot. No general command exists here.
+  - **Admin worker:** a fixed menu of verbs and nothing else — in 1c the root wrapper's list: `install`, `remove`, `pkg-list`, `service <name> enable|disable|restart|state`, `read-file`, `write-file`, `remove-file`, `make-dir`, `remove-dir`, `sandbox-run`. Every verb validates its own arguments (package and service names against a regex, paths against its allowed roots) and reports what it changed, so the reverse is known and recorded. **Approved file operations outside the workspace run here**, and **writes under `/etc` are never free**: they always need the user's yes, because a unit file, a cron entry, an apt source or a PAM line is root code execution. No general command exists here.
 - Personal files are reached only through the executor's file operations, which apply decision 9.
 
 ### 4.8 Undo
-- Everything the AI is allowed to change (installed software, configuration, workspaces, the user's data) lives on one **snapshot disk**. The base system underneath is read-mostly. On WSL that disk is a mounted virtual disk, because WSL cannot boot from a snapshot filesystem; on bare metal it is a partition. The undo code is the same both ways.
-- A snapshot is taken before every system change and before file operations outside the job's workspace.
+- **Per-hand undo (1c).** Files: every project folder is a btrfs subvolume, and a read-only snapshot of it is taken as a job starts — undo puts that snapshot back. Everything else carries a **recorded reverse** written when the change is made: the packages an install really added, a service's previous state, a file's previous contents (or the fact that there was no file), a directory created, a setting's previous value. **The unit of undo is one job**, and the user triggers it by saying **undo**: the most recent finished, failed or cancelled job with anything left to put back goes first, its rows in reverse order, one line of plain words per reversal. A reversal that fails is reported and the rest still run.
+- Everything the AI is allowed to change (installed software, configuration, workspaces, the user's data) lives on one disk that can hold snapshots. The base system underneath is read-mostly. On WSL that disk is a mounted virtual disk, because WSL cannot boot from a snapshot filesystem; on bare metal it is a partition. The undo code is the same both ways.
 - **Files roll back instantly. System changes roll back plus a restart of what changed**, because running programs keep the old version until they restart.
-- **Limit:** unsaved work inside an open program cannot be snapshotted. Decision 9 covers this: the AI asks before closing or discarding a window with unsaved work.
+- **Limit:** unsaved work inside an open program cannot be snapshotted. Decision 9 covers this: the AI asks before closing or discarding a window with unsaved work. Two more the reversal report says out loud: files a program wrote outside the project during the job, and a package version the archive no longer carries (a reinstall takes the current one).
 
 ### 4.9 User interface — the front door (designed 2026-09-15, brainstormed with mockups)
 
@@ -281,3 +281,23 @@ None of the engineering above is the hard part. The hard part is whether an 8B l
 **Workshop-only shortcuts that MUST NOT ship to the product (packaging phase):**
 - A sudoers `NOPASSWD: /usr/bin/systemd-run` grant for user `ai` (root-equivalent) — used because the workshop executor runs as `ai`; the product's executor daemon is already privileged and needs no such grant.
 - `/data` was made world-writable (777) so the trial db could be created; the product sets `/data` ownership/permissions properly.
+
+## Phase 1c status (2026-09-16)
+
+**Phase 1c (the hands and undo) is BUILT** on branch `phase1c-hands-and-undo`, design `2026-09-16-phase1c-hands-and-undo-design.md`. The model now has an admin hand as well as the sandbox: `install`, `remove`, `service`, `make_dir`, `write_file`/`read_file` outside the workspace when the user approves, all through a root-owned shell wrapper (`/usr/local/libexec/ai-os-admin`) with a fixed verb menu that validates every name and path itself; `fetch_packages` opens the network for exactly one step to the package registry's addresses (pip, npm, cargo) and nothing else; `housekeep` is a third front-door move for the machine's own layout, with `set_setting projects_root` as the one setting v1 knows; every project folder is a btrfs subvolume snapshotted at job start, every admin action records its own reverse, and the word **undo** puts the last job back, one line of plain words per reversal. The sandbox itself now runs through the same wrapper.
+
+**The live acceptance passes** (1c design §11 Results): qwen3.5:9b, both hands, no human, four scripts in 140s — it prepared `/data/work` and moved new projects there, wrote and ran a primes script inside it, installed cowsay through the wrapper and proved it, gave all of it back on the word *undo* one job at a time, and pulled `tabulate` from PyPI through the registry allowlist to print a table. Seven runs were needed: the six gaps each failure exposed (the model reaching for `mkdir`, `apt` and absolute paths instead of the hands; `/usr/games` off the sandbox PATH; a successful `make_dir` whose detail was empty; the jail's hidden `/data` read as the machine's truth) are all fixed in code, not in the test, and are written up in that Results block.
+
+**The sudoers narrowing is done:** `/etc/sudoers.d/ai-os-admin` is the single line `ai ALL=(root) NOPASSWD: /usr/local/libexec/ai-os-admin`. The `NOPASSWD:ALL` and bare `systemd-run` grants are gone and `ai` has been removed from the `sudo` group (`id ai` → `ai`, `ai-sandbox`). The first carry-forward of §11 above is closed; the wrapper is workshop transport and is itself replaced by the privileged daemon at packaging, where the verb list becomes its interface.
+
+**Carry-forwards (accepted ceilings, not bugs):**
+- A fetch step's resolver IP is reachable on every port for the length of that step (the systemd address filter is per-address, not per-port).
+- A cargo config written under the workspace is model-writable, so a model that wanted to could re-point cargo's registry within its own project.
+- DNS remains a channel out during a fetch step.
+- Only the newest snapshot per project is kept: undo reaches one job back per project's files.
+- A restore that fails after `ro=false` leaves the snapshot writable.
+- A snapshot that cannot be taken fails the job start rather than running uncovered.
+- `write-file` creates one missing parent level, no more.
+- Only a `.service` suffix is normalised on a service name; other unit suffixes are refused rather than mapped.
+- Projects that predate 1c are plain folders: their files are not covered by undo, and the reversal report says so for that job.
+- 1d items are unchanged (the rail, undo as a button, the reversal report as a card), as are §12's out-of-scope items in the 1c design.
