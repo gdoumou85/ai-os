@@ -42,13 +42,22 @@ impl OllamaModel {
 /// Narrow `format.oneOf` to the moves legal for this call (decision 13): the model physically
 /// cannot answer out of turn. `$defs` (the action schema, shared by `act`/`done`) is untouched.
 /// Empty `allowed` keeps every move — used for calls with no state to narrow against.
-fn narrow_schema(mut schema: serde_json::Value, allowed: &[&'static str]) -> serde_json::Value {
+///
+/// `pub(crate)` so `prompt.rs`'s tests can prove `allowed_moves`' hand-typed move names actually
+/// exist in `MOVE_SCHEMA` (a typo or a renamed move must never silently narrow to fewer moves, or
+/// to none) — see `prompt::tests::every_allowed_list_matches_a_real_move`.
+pub(crate) fn narrow_schema(mut schema: serde_json::Value, allowed: &[&'static str]) -> serde_json::Value {
     if allowed.is_empty() { return schema; }
     if let Some(one_of) = schema["oneOf"].as_array() {
         let kept: Vec<serde_json::Value> = one_of.iter()
             .filter(|entry| entry["properties"]["move"]["enum"][0].as_str().map(|m| allowed.contains(&m)).unwrap_or(false))
             .cloned()
             .collect();
+        // A hand-typed `allowed` name that doesn't match any MOVE_SCHEMA entry would otherwise
+        // silently shrink `oneOf` — even to empty, locking the model out of every move. Debug-only:
+        // this is a static-data invariant (the two lists are hand-typed, not runtime input), so it
+        // costs nothing in release and is exercised by every debug/test build.
+        debug_assert_eq!(kept.len(), allowed.len(), "allowed move names must all exist in MOVE_SCHEMA: {allowed:?}");
         schema["oneOf"] = serde_json::Value::Array(kept);
     }
     schema

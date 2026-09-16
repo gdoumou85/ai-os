@@ -188,4 +188,41 @@ mod tests {
         let p = front_door(&[], &[], &[], "hi");
         assert_eq!(p.allowed, vec!["reply", "start"]);
     }
+
+    /// `allowed_moves` and `front_door`'s `allowed` are hand-typed move-name lists, separate from
+    /// `MOVE_SCHEMA` (schema.rs). A typo or a renamed move would silently narrow `oneOf` to fewer
+    /// entries than intended — even to zero, locking the model out of every move — without this
+    /// ever failing a type check. Prove every list this module produces actually exists in the
+    /// real schema, for every state/mode combination `allowed_moves` handles.
+    #[test]
+    fn every_allowed_list_matches_a_real_move() {
+        let check = |p: &crate::model::Prompt| {
+            let narrowed = crate::model::narrow_schema(crate::schema::value(), &p.allowed);
+            let n = narrowed["oneOf"].as_array().unwrap().len();
+            assert_eq!(n, p.allowed.len(), "allowed list has a name not in MOVE_SCHEMA: {:?}", p.allowed);
+            assert!(n > 0, "allowed list must never narrow to zero moves: {:?}", p.allowed);
+        };
+
+        check(&front_door(&[], &[], &[], "hi"));
+
+        let mut asking = Job::new("p", "g", false, "u");
+        asking.state = State::Asking;
+        check(&job_turn(&[], &asking, None, None));
+
+        let mut planning_creative = Job::new("p", "g", true, "u");
+        planning_creative.state = State::Planning;
+        check(&job_turn(&[], &planning_creative, None, None));
+
+        let mut planning_not_creative = Job::new("p", "g", false, "u");
+        planning_not_creative.state = State::Planning;
+        check(&job_turn(&[], &planning_not_creative, None, None));
+
+        let mut working_creative = Job::new("p", "g", true, "u");
+        working_creative.state = State::Working;
+        check(&job_turn(&[], &working_creative, None, None));
+
+        let mut working_not_creative = Job::new("p", "g", false, "u");
+        working_not_creative.state = State::Working;
+        check(&job_turn(&[], &working_not_creative, None, None));
+    }
 }

@@ -2,9 +2,10 @@
 // no human. Run inside the distro with Ollama up:
 //   AI_OS_LIVE=1 cargo test -p aios-core --test live_primes -- --nocapture
 use aios_core::engine::Engine;
-use aios_core::job::State;
+use aios_core::job::{Job, State};
 use aios_core::model::OllamaModel;
 use aios_core::store::Store;
+use executor::action::Action;
 use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 
@@ -38,4 +39,21 @@ fn the_model_writes_and_proves_a_primes_script() {
     // The proof: the check's real output holds the tenth prime.
     let last_line = out.last().unwrap().clone();
     eprintln!("RESULT: {last_line}");
+
+    // Structural checks above (BLUEPRINT.md + a .py file exist) would pass a lazy check like
+    // `run_command ["true"]`. Open the live DB directly and inspect the last step's actual action
+    // and outcome: it must be a python run whose real stdout proves the tenth prime, not a stub.
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let json: String = conn.query_row("SELECT json FROM core_jobs ORDER BY updated_at DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    let job: Job = serde_json::from_str(&json).unwrap();
+    assert_eq!(job.state, State::Done, "{job:?}");
+    let last_step = job.steps.last().expect("a finished job must have at least one step");
+    match &last_step.action {
+        Action::RunCommand { argv } => {
+            assert!(argv.iter().any(|a| a.ends_with(".py")), "the proof must run the .py file: {argv:?}");
+        }
+        other => panic!("the last step must be the check running the script, not {other:?}"),
+    }
+    assert!(last_step.ok, "the check must have actually passed: {last_step:?}");
+    assert!(last_step.detail.contains("29"), "the check's real output must hold the tenth prime: {last_step:?}");
 }
