@@ -46,7 +46,7 @@ fn symlink_escaping_workspace_is_refused_on_read() {
         argv: vec!["ln".into(), "-sf".into(), "/etc/hostname".into(), "leak".into()],
     });
     assert!(plant.ok, "failed to plant the symlink: {}", plant.detail);
-    let out = w.run(&Action::ReadFile { path: "leak".into() });
+    let out = w.run(&Action::ReadFile { path: "leak".into(), from_line: None, lines: None });
     assert!(!out.ok, "a symlink out of the workspace must be refused, not followed: {}", out.detail);
 }
 

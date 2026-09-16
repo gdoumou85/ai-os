@@ -35,7 +35,7 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
         // project folder — system programs read-only, nothing else visible. See worker.rs.
         Action::RunCommand { .. } => Risk::Auto,
         // Reading inside the workspace is harmless; outside is a privacy/secrets leak.
-        Action::ReadFile { path } => {
+        Action::ReadFile { path, .. } => {
             if resolves_inside(path, workspace) {
                 Risk::Auto
             } else {
@@ -48,6 +48,14 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
                 Risk::Auto
             } else {
                 Risk::NeedsConfirm(format!("writes outside the workspace: {path}"))
+            }
+        }
+        // Same as WriteFile: inside the workspace is reversible, outside is "destroys work".
+        Action::EditFile { path, .. } => {
+            if resolves_inside(path, workspace) {
+                Risk::Auto
+            } else {
+                Risk::NeedsConfirm(format!("edits outside the workspace: {path}"))
             }
         }
         // Leaves the machine → always ask (a snapshot cannot bring it back).
@@ -74,14 +82,22 @@ mod tests {
 
     #[test]
     fn read_inside_workspace_is_auto() {
-        let a = Action::ReadFile { path: "out.txt".into() };
+        let a = Action::ReadFile { path: "out.txt".into(), from_line: None, lines: None };
         assert_eq!(classify(&a, &ws()), Risk::Auto);
     }
 
     #[test]
     fn read_outside_workspace_needs_confirm() {
-        let a = Action::ReadFile { path: "/etc/passwd".into() };
+        let a = Action::ReadFile { path: "/etc/passwd".into(), from_line: None, lines: None };
         assert!(matches!(classify(&a, &ws()), Risk::NeedsConfirm(_)));
+    }
+
+    #[test]
+    fn edit_inside_workspace_is_auto_outside_needs_confirm() {
+        let inside = Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() };
+        assert_eq!(classify(&inside, &ws()), Risk::Auto);
+        let outside = Action::EditFile { path: "/etc/hosts".into(), find: "a".into(), replace: "b".into() };
+        assert!(matches!(classify(&outside, &ws()), Risk::NeedsConfirm(_)));
     }
 
     #[test]

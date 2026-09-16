@@ -37,6 +37,11 @@ impl Worker for FakeWorker {
     }
 }
 
+/// Lets the engine hold a `Executor<Box<dyn Worker>>` without knowing the concrete impl.
+impl Worker for Box<dyn Worker> {
+    fn run(&self, action: &Action) -> Outcome { (**self).run(action) }
+}
+
 /// Runs commands as an unprivileged user, scoped to one workspace, no network.
 /// ponytail: shells out to `systemd-run`; a native cgroup/namespace impl only if this proves too slow.
 ///
@@ -67,6 +72,22 @@ impl SandboxWorker {
     fn canonical_workspace(&self) -> Result<PathBuf, Outcome> {
         fs::canonicalize(&self.workspace)
             .map_err(|e| Outcome { ok: false, detail: format!("cannot resolve workspace: {e}") })
+    }
+
+    /// Resolve an existing in-workspace file to its canonical path, refusing anything that
+    /// escapes (lexically or through a symlink). Same guard as ReadFile had in 1a; shared by
+    /// ReadFile and EditFile since both only ever operate on a file that must already exist.
+    fn existing_inside(&self, path: &str) -> Result<PathBuf, Outcome> {
+        if !resolves_inside(path, &self.workspace) {
+            return Err(Outcome { ok: false, detail: "path escapes workspace".into() });
+        }
+        let ws_canon = self.canonical_workspace()?;
+        let target = fs::canonicalize(self.workspace.join(path))
+            .map_err(|_| Outcome { ok: false, detail: "cannot resolve path".into() })?;
+        if !target.starts_with(&ws_canon) {
+            return Err(Outcome { ok: false, detail: "path escapes workspace".into() });
+        }
+        Ok(target)
     }
 }
 
@@ -121,30 +142,28 @@ impl Worker for SandboxWorker {
                     Err(e) => Outcome { ok: false, detail: format!("spawn failed: {e}") },
                 }
             }
-            Action::ReadFile { path } => {
-                if !resolves_inside(path, &self.workspace) {
-                    return Outcome { ok: false, detail: "path escapes workspace".into() };
-                }
-                let ws_canon = match self.canonical_workspace() {
-                    Ok(p) => p,
-                    Err(out) => return out,
+            // ponytail: TOCTOU window between `existing_inside`'s canonicalize and the read below
+            // — a swap of the (now-plain) target back into a symlink in between would slip
+            // through. Acceptable for now since the interface runs one action at a time; revisit
+            // if concurrent access to the same workspace is ever added.
+            Action::ReadFile { path, from_line, lines } => {
+                let target = match self.existing_inside(path) { Ok(p) => p, Err(out) => return out };
+                let text = match fs::read_to_string(&target) {
+                    Ok(s) => s,
+                    Err(e) => return Outcome { ok: false, detail: e.to_string() },
                 };
-                // The target must exist to be read, so canonicalize it directly — this resolves
-                // any symlink in the path (including the final component) before we check it.
-                // ponytail: TOCTOU window between this check and the read below — a swap of the
-                // (now-plain) target back into a symlink in between would slip through. Acceptable
-                // for now since the interface runs one action at a time; revisit if concurrent
-                // access to the same workspace is ever added.
-                let target_canon = match fs::canonicalize(self.workspace.join(path)) {
-                    Ok(p) => p,
-                    Err(_) => return Outcome { ok: false, detail: "cannot resolve path".into() },
-                };
-                if !target_canon.starts_with(&ws_canon) {
-                    return Outcome { ok: false, detail: "path escapes workspace".into() };
-                }
-                match fs::read_to_string(target_canon) {
-                    Ok(s) => Outcome { ok: true, detail: s.chars().take(500).collect() },
-                    Err(e) => Outcome { ok: false, detail: e.to_string() },
+                match (from_line, lines) {
+                    (None, None) => Outcome { ok: true, detail: head(&text, 2000) },
+                    _ => {
+                        // Numbered lines so the model can quote exact passages back in edit_file.
+                        let start = from_line.unwrap_or(1).max(1);
+                        let n = lines.unwrap_or(200).min(200);
+                        let detail: String = text.lines().enumerate()
+                            .skip(start - 1).take(n)
+                            .map(|(i, l)| format!("{}: {l}\n", i + 1))
+                            .collect();
+                        Outcome { ok: true, detail }
+                    }
                 }
             }
             Action::WriteFile { path, contents } => {
@@ -194,6 +213,25 @@ impl Worker for SandboxWorker {
                 }
                 match fs::write(&leaf, contents) {
                     Ok(_) => Outcome { ok: true, detail: "written".into() },
+                    Err(e) => Outcome { ok: false, detail: e.to_string() },
+                }
+            }
+            // Rule 9: edit in place — the model never reads a whole file, holds it, and writes
+            // it all back. It quotes an exact passage from a prior read_file and we swap it in.
+            Action::EditFile { path, find, replace } => {
+                let target = match self.existing_inside(path) { Ok(p) => p, Err(out) => return out };
+                let text = match fs::read_to_string(&target) {
+                    Ok(s) => s,
+                    Err(e) => return Outcome { ok: false, detail: e.to_string() },
+                };
+                match text.matches(find.as_str()).count() {
+                    0 => return Outcome { ok: false, detail: "find text not found — re-read the file and quote it exactly".into() },
+                    1 => {}
+                    n => return Outcome { ok: false, detail: format!("find text occurs in {n} places — include more surrounding lines so it is unique") },
+                }
+                // `target` is canonical (no symlink left in it), so this cannot write outside the workspace.
+                match fs::write(&target, text.replacen(find.as_str(), replace, 1)) {
+                    Ok(_) => Outcome { ok: true, detail: "edited".into() },
                     Err(e) => Outcome { ok: false, detail: e.to_string() },
                 }
             }
@@ -252,7 +290,7 @@ mod tests {
     #[test]
     fn fake_records_calls() {
         let w = FakeWorker::new(true);
-        let a = Action::ReadFile { path: "x".into() };
+        let a = Action::ReadFile { path: "x".into(), from_line: None, lines: None };
         let out = w.run(&a);
         assert!(out.ok);
         assert_eq!(w.calls.borrow().len(), 1);
@@ -264,7 +302,7 @@ mod tests {
 
     #[test]
     fn read_file_escaping_workspace_is_refused() {
-        let out = sandbox().run(&Action::ReadFile { path: "../../etc/passwd".into() });
+        let out = sandbox().run(&Action::ReadFile { path: "../../etc/passwd".into(), from_line: None, lines: None });
         assert!(!out.ok);
         assert_eq!(out.detail, "path escapes workspace");
     }
@@ -274,5 +312,52 @@ mod tests {
         let out = sandbox().run(&Action::WriteFile { path: "/etc/passwd".into(), contents: "x".into() });
         assert!(!out.ok);
         assert_eq!(out.detail, "path escapes workspace");
+    }
+
+    fn temp_ws(tag: &str) -> PathBuf {
+        let ws = std::env::temp_dir().join(format!("ai-os-exec-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        ws
+    }
+
+    #[test]
+    fn edit_file_replaces_exactly_one_match() {
+        let ws = temp_ws("edit1");
+        std::fs::write(ws.join("a.py"), "x = 1\ny = 2\n").unwrap();
+        let w = SandboxWorker { user: "nobody".into(), workspace: ws.clone() };
+        let out = w.run(&Action::EditFile { path: "a.py".into(), find: "x = 1".into(), replace: "x = 10".into() });
+        assert!(out.ok, "{}", out.detail);
+        assert_eq!(std::fs::read_to_string(ws.join("a.py")).unwrap(), "x = 10\ny = 2\n");
+    }
+
+    #[test]
+    fn edit_file_refuses_zero_and_many_matches() {
+        let ws = temp_ws("edit2");
+        std::fs::write(ws.join("a.py"), "x = 1\nx = 1\n").unwrap();
+        let w = SandboxWorker { user: "nobody".into(), workspace: ws.clone() };
+        let none = w.run(&Action::EditFile { path: "a.py".into(), find: "z".into(), replace: "q".into() });
+        assert!(!none.ok);
+        assert!(none.detail.contains("not found"), "{}", none.detail);
+        let many = w.run(&Action::EditFile { path: "a.py".into(), find: "x = 1".into(), replace: "q".into() });
+        assert!(!many.ok);
+        assert!(many.detail.contains("2 places"), "{}", many.detail);
+        assert_eq!(std::fs::read_to_string(ws.join("a.py")).unwrap(), "x = 1\nx = 1\n", "file untouched");
+    }
+
+    #[test]
+    fn read_file_window_returns_only_those_lines() {
+        let ws = temp_ws("read1");
+        std::fs::write(ws.join("a.txt"), "l1\nl2\nl3\nl4\n").unwrap();
+        let w = SandboxWorker { user: "nobody".into(), workspace: ws };
+        let out = w.run(&Action::ReadFile { path: "a.txt".into(), from_line: Some(2), lines: Some(2) });
+        assert!(out.ok);
+        assert_eq!(out.detail, "2: l2\n3: l3\n");
+    }
+
+    #[test]
+    fn boxed_worker_delegates() {
+        let b: Box<dyn Worker> = Box::new(FakeWorker::new(true));
+        assert!(b.run(&Action::ReadFile { path: "x".into(), from_line: None, lines: None }).ok);
     }
 }
