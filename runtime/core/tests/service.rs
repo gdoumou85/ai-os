@@ -172,6 +172,23 @@ fn stop_typed_right_after_a_request_still_stops_it() {
 }
 
 #[test]
+fn bind_refuses_a_live_socket_and_removes_a_stale_file() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    // Something answers on it: a second engine on one database is never what the user meant.
+    let live = start(&temp("bind-live"), vec![], Arc::new(Mutex::new(None)));
+    let err = service::bind(&live).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}");
+    // Nothing answers: whatever is in the way goes, and the new socket is this user's alone.
+    let stale = temp("bind-stale").join("ai-os.sock");
+    std::fs::write(&stale, "left behind by a killed engine").unwrap();
+    let listener = service::bind(&stale).unwrap();
+    let md = std::fs::metadata(&stale).unwrap();
+    assert!(md.file_type().is_socket(), "the stale file was not replaced by a socket");
+    assert_eq!(md.permissions().mode() & 0o777, 0o600);
+    drop(listener);
+}
+
+#[test]
 fn a_message_while_only_a_chat_reply_is_in_progress_is_queued_not_busy() {
     let dir = temp("chat-queue");
     let (gtx, grx) = std::sync::mpsc::channel::<()>();

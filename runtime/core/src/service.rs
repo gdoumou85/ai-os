@@ -27,10 +27,15 @@ impl Shared {
     /// To every client, numbered: `seq` counts broadcasts only, so each client's run is
     /// contiguous and a gap means a dropped line. Answers to one client (`send_to`) carry no seq.
     fn broadcast(&self, ev: &Event) {
+        // The number and the send under one lock: two broadcasters that numbered their lines
+        // first (a reader thread's `You`, the engine thread's `Step`) could take 11 and 12 and
+        // then push in the other order, and every client would read 10, 12, 11. Nothing but
+        // mpsc sends happen while it is held — no I/O.
+        let mut clients = self.clients.lock().unwrap();
         let mut v = serde_json::to_value(ev).expect("event serialises");
         v["seq"] = serde_json::Value::from(self.seq.fetch_add(1, Ordering::SeqCst));
         let line = v.to_string();
-        self.clients.lock().unwrap().retain(|(_, tx)| tx.send(line.clone()).is_ok());
+        clients.retain(|(_, tx)| tx.send(line.clone()).is_ok());
     }
     fn send_to(&self, id: u64, ev: &Event) {
         let line = serde_json::to_string(ev).expect("event serialises");
@@ -92,7 +97,12 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
     std::thread::spawn(move || {
         let sink_sh = sh.clone();
         let mut engine = make(Box::new(move |ev| { sink_sh.update_mirror(ev); sink_sh.broadcast(ev); }));
-        if let Ok(Some(st)) = engine.state() { *sh.mirror.lock().unwrap() = Some(st); }
+        // A store read that fails here would leave `hello` answering "nothing open" while a real
+        // job resumes in front of the user: say so rather than swallow it.
+        match engine.state() {
+            Ok(st) => *sh.mirror.lock().unwrap() = st,
+            Err(e) => eprintln!("engine: reading the open job failed: {e}"),
+        }
         sh.running.store(true, Ordering::SeqCst);
         // Everything a client thread reads is now set: clients may arrive, and they watch the
         // resumed job go by like any other.
