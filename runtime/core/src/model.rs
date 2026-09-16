@@ -3,7 +3,7 @@ use crate::schema;
 use std::cell::RefCell;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Prompt { pub system: String, pub user: String }
+pub struct Prompt { pub system: String, pub user: String, pub allowed: Vec<&'static str> }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -39,12 +39,27 @@ impl OllamaModel {
     pub fn local(model: &str) -> Self { Self { url: "http://127.0.0.1:11434".into(), model: model.into() } }
 }
 
+/// Narrow `format.oneOf` to the moves legal for this call (decision 13): the model physically
+/// cannot answer out of turn. `$defs` (the action schema, shared by `act`/`done`) is untouched.
+/// Empty `allowed` keeps every move — used for calls with no state to narrow against.
+fn narrow_schema(mut schema: serde_json::Value, allowed: &[&'static str]) -> serde_json::Value {
+    if allowed.is_empty() { return schema; }
+    if let Some(one_of) = schema["oneOf"].as_array() {
+        let kept: Vec<serde_json::Value> = one_of.iter()
+            .filter(|entry| entry["properties"]["move"]["enum"][0].as_str().map(|m| allowed.contains(&m)).unwrap_or(false))
+            .cloned()
+            .collect();
+        schema["oneOf"] = serde_json::Value::Array(kept);
+    }
+    schema
+}
+
 pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "stream": false,
         "think": false,
-        "format": schema::value(),
+        "format": narrow_schema(schema::value(), &prompt.allowed),
         "options": { "temperature": 0.0, "num_ctx": 8192 },
         "messages": [
             { "role": "system", "content": prompt.system },
@@ -76,7 +91,7 @@ impl Model for OllamaModel {
 mod tests {
     use super::*;
 
-    fn p() -> Prompt { Prompt { system: "sys".into(), user: "hello".into() } }
+    fn p() -> Prompt { Prompt { system: "sys".into(), user: "hello".into(), allowed: vec![] } }
 
     /// Binds an ephemeral local socket, accepts one connection, reads up to the end of the
     /// request headers (the body is irrelevant to these tests), then writes back `response`
@@ -142,6 +157,21 @@ mod tests {
     }
 
     #[test]
+    fn ollama_body_narrows_the_schema_to_allowed_moves() {
+        let narrowed = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply", "start"] };
+        let b = ollama_body("m", &narrowed);
+        let one_of = b["format"]["oneOf"].as_array().unwrap();
+        assert_eq!(one_of.len(), 2);
+        let names: Vec<&str> = one_of.iter().map(|e| e["properties"]["move"]["enum"][0].as_str().unwrap()).collect();
+        assert_eq!(names, ["reply", "start"]);
+        assert!(b["format"]["$defs"].is_object(), "$defs must survive narrowing");
+
+        let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![] };
+        let b2 = ollama_body("m", &all);
+        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 8);
+    }
+
+    #[test]
     fn parses_ollama_reply_content() {
         let resp = serde_json::json!({"message":{"role":"assistant","content":"{\"move\":\"reply\",\"text\":\"hi\"}"}});
         let m = parse_ollama(&resp).unwrap();
@@ -158,6 +188,7 @@ mod tests {
         let prompt = Prompt {
             system: "You answer with one move. For small talk use {\"move\":\"reply\",\"text\":...}.".into(),
             user: "hello, who are you?".into(),
+            allowed: vec![],
         };
         let mv = m.next_move(&prompt).unwrap();
         eprintln!("{mv:?}");

@@ -28,7 +28,29 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(S
          Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, recent_txt, message
     );
-    Prompt { system: SYSTEM.into(), user }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start"] }
+}
+
+/// The moves legal right now, by job state and mode (decision 13): sent as `Prompt::allowed` so
+/// the grammar itself excludes the rest — prose alone ("Legal moves now: ...") doesn't reliably
+/// bind a 9B model. `ask` is legal in `Asking`, and also in `Planning`/working-and-beyond when the
+/// job isn't creative (mirrors `Engine::run_turns`'s match arms exactly).
+fn allowed_moves(job: &Job) -> Vec<&'static str> {
+    match job.state {
+        State::Asking => vec!["ask", "plan"],
+        State::Planning => {
+            let mut v = vec![];
+            if !job.creative { v.push("ask"); }
+            v.push("plan");
+            v
+        }
+        _ => {
+            let mut v = vec![];
+            if !job.creative { v.push("ask"); }
+            v.extend(["act", "replan", "done", "give_up"]);
+            v
+        }
+    }
 }
 
 /// Last 6 steps in full; older ones one line each (budget, parent §4.3).
@@ -72,7 +94,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         "Machine: Ubuntu Linux (python3, apt; no `python`).\nStanding instructions:\n{}\n\nProject: {} (its folder is the working directory)\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}\n\nBLUEPRINT.md:\n{}{}\n\nSteps so far:\n{}{}\n\n{}",
         join_instructions(instructions), job.project, job.goal, mode, job.understood, answers, plan, bp, last, summarise_steps(job), note, hint
     );
-    Prompt { system: SYSTEM.into(), user }
+    Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job) }
 }
 
 #[cfg(test)]
@@ -139,5 +161,31 @@ mod tests {
         let big = "x".repeat(10_000);
         let p = job_turn(&[], &j, Some(&big), None);
         assert!(p.user.len() < 6_000, "blueprint must be capped at 3000 chars: {}", p.user.len());
+    }
+
+    #[test]
+    fn allowed_moves_are_narrowed_by_state_and_mode() {
+        let mut asking = Job::new("p", "g", false, "u");
+        asking.state = State::Asking;
+        assert_eq!(job_turn(&[], &asking, None, None).allowed, vec!["ask", "plan"]);
+
+        let mut planning_creative = Job::new("p", "g", true, "u");
+        planning_creative.state = State::Planning;
+        assert_eq!(job_turn(&[], &planning_creative, None, None).allowed, vec!["plan"]);
+
+        let mut planning_not_creative = Job::new("p", "g", false, "u");
+        planning_not_creative.state = State::Planning;
+        assert_eq!(job_turn(&[], &planning_not_creative, None, None).allowed, vec!["ask", "plan"]);
+
+        let mut working_creative = Job::new("p", "g", true, "u");
+        working_creative.state = State::Working;
+        assert_eq!(job_turn(&[], &working_creative, None, None).allowed, vec!["act", "replan", "done", "give_up"]);
+
+        let mut working_not_creative = Job::new("p", "g", false, "u");
+        working_not_creative.state = State::Working;
+        assert_eq!(job_turn(&[], &working_not_creative, None, None).allowed, vec!["ask", "act", "replan", "done", "give_up"]);
+
+        let p = front_door(&[], &[], &[], "hi");
+        assert_eq!(p.allowed, vec!["reply", "start"]);
     }
 }

@@ -27,7 +27,9 @@ fn the_model_writes_and_proves_a_primes_script() {
     }
     let job = e.store.open_job().unwrap();
     assert!(job.is_none(), "job should be finished, still open: {job:?}");
-    let name = e.store.list_projects().unwrap()[0].name.clone();
+    let projects = e.store.list_projects().unwrap();
+    assert!(!projects.is_empty(), "the model never started a job — replies: {out:?}");
+    let name = projects[0].name.clone();
     let folder = root.join(&name);
     assert!(folder.join("BLUEPRINT.md").exists(), "blueprint must exist");
     let py = std::fs::read_dir(&folder).unwrap().filter_map(|d| d.ok()).any(|d| d.path().extension().map(|x| x == "py").unwrap_or(false));
