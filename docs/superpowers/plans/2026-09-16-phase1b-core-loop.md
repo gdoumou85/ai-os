@@ -1301,8 +1301,10 @@ mod tests {
     fn names_and_yes_no() {
         assert_eq!(sanitize_project_name("Primes Printer!"), "primes-printer");
         assert_eq!(sanitize_project_name("///"), "project");
-        assert!(is_yes("yes, send it")); assert!(is_yes("OK")); assert!(!is_yes("no way"));
-        assert!(is_stop("stop")); assert!(is_stop("leave it")); assert!(!is_stop("don't stop"));
+        assert!(is_yes("yes, send it")); assert!(is_yes("OK")); assert!(is_yes("yes.")); assert!(!is_yes("no way"));
+        assert!(!is_yes("okay so no")); assert!(!is_yes("go away")); assert!(!is_yes("not yet"));
+        assert!(is_stop("stop")); assert!(is_stop("Stop!")); assert!(is_stop("stop.")); assert!(is_stop("leave it"));
+        assert!(!is_stop("don't stop")); assert!(!is_stop("stop asking"));
     }
 }
 ```
@@ -1351,15 +1353,15 @@ pub fn sanitize_project_name(raw: &str) -> String {
 }
 
 // ponytail: fixed word lists, not the model — an approval must never depend on a 9B reading tone.
-pub fn is_yes(text: &str) -> bool {
-    let t = text.trim().to_lowercase();
-    ["yes", "y", "ok", "okay", "go", "do it", "approve", "approved", "send it", "go ahead", "sure"]
-        .iter().any(|w| t == *w || t.starts_with(&format!("{w} ")) || t.starts_with(&format!("{w},")))
-}
-pub fn is_stop(text: &str) -> bool {
-    let t = text.trim().to_lowercase();
-    ["stop", "cancel", "leave it", "abort", "never mind", "forget it"].contains(&t.as_str())
-}
+// (Task 7 ruling) Normalise first: trim, lowercase, strip trailing . ! ? , — then:
+//   is_yes: the whole text is a yes-word, OR its first word (split on whitespace/commas) is a
+//           yes-word AND no negation word (no, not, don't, dont, never, away, stop, cancel)
+//           appears anywhere. "yes, send it" / "yes." / "OK" approve; "okay so no" / "go away" do not.
+//   is_stop: normalised equality against the list, which also has "stop it", "stop now",
+//            "please stop", "stop please". "Stop!" cancels; "don't stop" / "stop asking" do not.
+// The exact implementation is in runtime/core/src/engine.rs (commit d40ae50).
+pub fn is_yes(text: &str) -> bool { /* see engine.rs */ unimplemented!() }
+pub fn is_stop(text: &str) -> bool { /* see engine.rs */ unimplemented!() }
 
 impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, projects_root: PathBuf, log_path: Option<String>, workers: WorkerFactory) -> Self {
