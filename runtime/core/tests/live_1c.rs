@@ -46,10 +46,21 @@ fn listing(dir: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// One line of the conversation: say it, print every reply, and — for a model that asks anyway
-/// after being told to decide, or wants an approval the script never planned for — answer the way
-/// the user already has, a few times at most. Every nudge is printed, so the transcript shows
-/// exactly how much human the run needed. Prints the step count and the seconds the line took,
+/// Remove something the run must start without. Only "it was not there" is acceptable: a path
+/// left behind because it could not be deleted would make the whole acceptance meaningless.
+fn must_clear(path: &str, dir: bool) {
+    let r = if dir { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    if let Err(e) = r {
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "could not clear {path}: {e}");
+    }
+}
+
+/// One line of the conversation: say it, print every reply, and — for a model that asks a
+/// question anyway after being told to decide — answer the way the user already has, a few times
+/// at most. Every nudge is printed, so the transcript shows exactly how much human the run
+/// needed. An *approval* is never given: these four scripts are all Auto work, so a job waiting
+/// for a yes means the model reached outside what the script is about, and that is a failure to
+/// report, not something to wave through. Prints the step count and the seconds the line took,
 /// which is what §11 wants recorded per script.
 fn say(e: &mut Engine<OllamaModel>, label: &str, text: &str) -> Vec<String> {
     let t = Instant::now();
@@ -58,13 +69,15 @@ fn say(e: &mut Engine<OllamaModel>, label: &str, text: &str) -> Vec<String> {
     for l in &out { println!("ai> {l}"); }
     for _ in 0..4 {
         let Some(job) = e.open_job().unwrap() else { break };
-        let nudge = match job.state {
-            State::WaitingAnswer => "You decide.",
-            State::WaitingApproval => "yes",
+        match job.state {
+            State::WaitingAnswer => {}
+            State::WaitingApproval => panic!(
+                "the acceptance needed an approval: {} for {:?}", job.pending_reason, job.pending_action,
+            ),
             _ => break,
-        };
-        println!("you> {nudge}");
-        out = e.handle(nudge).unwrap();
+        }
+        println!("you> You decide.");
+        out = e.handle("You decide.").unwrap();
         for l in &out { println!("ai> {l}"); }
     }
     println!("[{label}] {} steps, {:.1}s", latest_job().steps.len(), t.elapsed().as_secs_f64());
@@ -74,8 +87,9 @@ fn say(e: &mut Engine<OllamaModel>, label: &str, text: &str) -> Vec<String> {
 #[test]
 fn the_machine_moves_its_projects_installs_undoes_and_fetches() {
     if std::env::var("AI_OS_LIVE").as_deref() != Ok("1") { eprintln!("skipped: AI_OS_LIVE=1"); return; }
-    let _ = std::fs::remove_file(DB);
-    let _ = std::fs::remove_dir_all(WORK);
+    must_clear(DB, false);
+    must_clear(WORK, true);
+    assert!(!Path::new(WORK).exists(), "{WORK} must not exist when the run starts");
     // Script 2 measures an install and script 3 the removal of it, so cowsay must start absent.
     // Left over from an interrupted run, it is cleared here — through the same wrapper.
     if installed("cowsay") {
@@ -92,8 +106,15 @@ fn the_machine_moves_its_projects_installs_undoes_and_fetches() {
     // And the setting is not decoration: the next new project lands under it.
     let out = say(&mut e, "script 1b: a project under it", "make me a script that prints the first ten primes, decide yourself");
     let landed = listing(WORK).into_iter().find(|n| Path::new(WORK).join(n).join("BLUEPRINT.md").exists());
-    assert!(landed.is_some(), "a project with a BLUEPRINT.md must land under {WORK} (found {:?}): {out:?}", listing(WORK));
-    println!("[script 1] project folder: {WORK}/{}", landed.unwrap());
+    let landed = landed.unwrap_or_else(|| panic!("a project with a BLUEPRINT.md must land under {WORK} (found {:?}): {out:?}", listing(WORK)));
+    let project = Path::new(WORK).join(&landed);
+    println!("[script 1] project folder: {}", project.display());
+    // A file the job's snapshot cannot possibly contain: it is written after the job ended, so
+    // an undo that really put the project back to its snapshot must take it away again. Proof
+    // that the restore moved files, not just that it printed a line.
+    let marker = project.join("UNDO_MARKER.txt");
+    std::fs::write(&marker, "written after the primes job, before any undo").unwrap();
+    assert!(marker.exists());
 
     // 2. The admin hand: apt through the wrapper.
     let out = say(&mut e, "script 2: install cowsay", "Install cowsay and prove it works");
@@ -102,18 +123,28 @@ fn the_machine_moves_its_projects_installs_undoes_and_fetches() {
     // 3. Undo, newest job first. The primes job sits between the install and the housekeeping
     // job, so "undo" may have to be said more than once before the package goes.
     let mut undos = 0;
+    let mut restored = false;
+    // Every undo checks the same thing: it put something back, and the moment the project's
+    // files went back the marker written after that job was gone with them.
+    let undo = |e: &mut Engine<OllamaModel>, undos: &mut i32, restored: &mut bool| {
+        *undos += 1;
+        let out = say(e, &format!("script 3: undo #{undos}"), "undo");
+        assert!(!out.iter().any(|l| l.contains("Nothing left to undo")), "ran out of jobs to undo: {out:?}");
+        if out.iter().any(|l| l.contains("Restored the files of")) {
+            assert!(!marker.exists(), "the project's files were reported restored, but {} is still there", marker.display());
+            *restored = true;
+        }
+    };
     while installed("cowsay") {
-        undos += 1;
-        assert!(undos <= 3, "cowsay is still installed after {} undos", undos - 1);
-        let out = say(&mut e, &format!("script 3: undo #{undos}"), "undo");
-        assert!(!out.iter().any(|l| l.contains("Nothing left to undo")), "ran out of jobs with cowsay still installed: {out:?}");
+        assert!(undos < 3, "cowsay is still installed after {undos} undos");
+        undo(&mut e, &mut undos, &mut restored);
     }
     while e.store.get_setting("projects_root").unwrap().is_some() {
-        undos += 1;
-        assert!(undos <= 6, "projects_root is still set after {} undos", undos - 1);
-        let out = say(&mut e, &format!("script 3: undo #{undos}"), "undo");
-        assert!(!out.iter().any(|l| l.contains("Nothing left to undo")), "ran out of jobs with projects_root still set: {out:?}");
+        assert!(undos < 6, "projects_root is still set after {undos} undos");
+        undo(&mut e, &mut undos, &mut restored);
     }
+    assert!(restored, "no undo put the project's files back");
+    assert!(!marker.exists(), "the marker written after the primes job must be gone: {}", marker.display());
     // §11: the folder goes "if empty". Undo restores a project's files, it never removes the
     // project folder, so what the primes job left inside can legitimately keep /data/work alive.
     let left = listing(WORK);

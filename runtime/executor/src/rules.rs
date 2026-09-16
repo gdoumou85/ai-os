@@ -66,15 +66,30 @@ pub fn under_any(path: &str, roots: &[&str]) -> bool {
 /// (`apt list --installed`, `cargo build`, `npm test`) stay free: only the verbs that change
 /// something are caught.
 pub fn wrong_hand(argv: &[String]) -> Option<String> {
-    let program = argv.first()?.rsplit('/').next()?;
-    let verbs: Vec<&str> = argv.iter().skip(1).map(String::as_str).filter(|a| !a.starts_with('-')).collect();
+    // `sudo apt install …` and `env apt-get install …` are the same request wearing a hat: step
+    // over the launcher and its own options and judge what it was going to run.
+    let mut rest = argv.iter().map(String::as_str);
+    let mut program = rest.next()?.rsplit('/').next()?;
+    while matches!(program, "sudo" | "env") {
+        match rest.find(|a| !a.starts_with('-') && !a.contains('=')) {
+            Some(next) => program = next.rsplit('/').next()?,
+            None => return None,
+        }
+    }
+    let verbs: Vec<&str> = rest.filter(|a| !a.starts_with('-')).collect();
     let has = |vs: &[&str]| verbs.iter().any(|v| vs.contains(v));
     let system = ["apt", "apt-get", "aptitude", "dpkg", "snap", "flatpak"];
     let language = ["pip", "pip3", "npm", "yarn", "pnpm", "cargo"];
     // `python -m pip install …` is pip by another name.
     let program = if program.starts_with("python") && verbs.first() == Some(&"pip") { "pip" } else { program };
-    if system.contains(&program) && (has(&["install", "remove", "purge", "upgrade", "dist-upgrade", "full-upgrade", "reinstall", "update"]) || argv.iter().any(|a| a == "-i")) {
+    if system.contains(&program) && (has(&["install", "remove", "purge", "upgrade", "dist-upgrade", "full-upgrade", "reinstall", "update"]) || argv.iter().any(|a| a == "-i" || a == "--install")) {
         return Some("software is installed with the `install` action and removed with `remove`, never with run_command: the sandbox has no privileges".into());
+    }
+    // Same lesson, the other hand: `mkdir /data/work` in the jail answers "Read-only file
+    // system", which the live run showed a 9B reads as "this machine cannot make folders at
+    // all". An absolute path means outside the workspace — inside it, paths are relative.
+    if matches!(program, "mkdir" | "rmdir") && verbs.iter().any(|v| v.starts_with('/')) {
+        return Some("a folder outside the working directory is made with the `make_dir` action, never with run_command: the sandbox can only write inside its own folder".into());
     }
     if language.contains(&program) && has(&["install", "add", "ci"]) {
         return Some("language packages come through `fetch_packages` (name the manager and the packages), never with run_command: the sandbox has no network".into());
@@ -154,15 +169,24 @@ mod tests {
     #[test]
     fn a_package_manager_asked_to_change_something_is_sent_to_the_right_hand() {
         let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
-        for line in ["apt-get install -y cowsay", "apt install cowsay", "sudo/dpkg -i x.deb", "/usr/bin/apt-get remove cowsay", "snap install foo", "apt-get update"] {
+        for line in [
+            "apt-get install -y cowsay", "apt install cowsay", "dpkg -i x.deb", "dpkg --install x.deb",
+            "/usr/bin/apt-get remove cowsay", "snap install foo", "apt-get update",
+            // The launcher does not launder it.
+            "sudo apt install cowsay", "env apt-get install x", "env DEBIAN_FRONTEND=noninteractive apt-get install x",
+            "sudo -n /usr/bin/apt-get install x",
+        ] {
             assert!(wrong_hand(&argv(line)).unwrap().contains("`install` action"), "{line}");
         }
         for line in ["pip install tabulate", "python3 -m pip install tabulate", "npm install left-pad", "cargo add serde"] {
             assert!(wrong_hand(&argv(line)).unwrap().contains("fetch_packages"), "{line}");
         }
+        for line in ["mkdir -p /data/work", "sudo mkdir /data/work", "rmdir /home/ai/x"] {
+            assert!(wrong_hand(&argv(line)).unwrap().contains("`make_dir` action"), "{line}");
+        }
         // Reading and building with the same programs stays free — the housekeeping jobs of
         // §7 look at the machine with exactly these.
-        for line in ["apt list --installed", "dpkg-query -W -f ${Package}", "cargo build", "npm test", "python3 primes.py", "ls -l"] {
+        for line in ["apt list --installed", "dpkg-query -W -f ${Package}", "cargo build", "npm test", "python3 primes.py", "ls -l", "sudo ls", "env ls -l", "mkdir build", "mkdir -p src/gen"] {
             assert_eq!(wrong_hand(&argv(line)), None, "{line}");
         }
         assert_eq!(wrong_hand(&[]), None);

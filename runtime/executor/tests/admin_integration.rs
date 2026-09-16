@@ -63,6 +63,9 @@ fn make_dir_then_reverse() {
     if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
     let o = AdminWorker.run(&Action::MakeDir { path: "/data/it-mk".into() });
     assert!(o.ok, "{}", o.detail);
+    // A successful step whose detail is empty tells the model nothing, and the live 1c run
+    // showed it going looking for proof the sandbox cannot see (§11 Results).
+    assert!(o.detail.contains("/data/it-mk"), "the outcome must say what exists: {:?}", o.detail);
     assert!(AdminWorker.reverse(&o.undo.unwrap()).ok);
     assert!(!std::path::Path::new("/data/it-mk").exists());
 }

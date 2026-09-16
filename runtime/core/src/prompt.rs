@@ -32,7 +32,8 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(S
     let user = format!(
         "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk), start (new work: give project, new_project, description, goal, creative, understood), or \
          housekeep (the machine itself: folders, settings, tools; give goal, understood). \
-         Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself.\n\nUser says: {}",
+         Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself. \
+         The goal carries the whole of what the user asked for, including what is to hold from now on — the job never sees this message again.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, recent_txt, message
     );
     Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"] }
@@ -108,7 +109,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
     let (header, bp_block) = if job.housekeeping {
-        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. Anything that must outlive this job is a setting: where projects live from now on is set_setting projects_root=<abs path under /data or /home/ai>, and the job is not done until it is set. The sandbox cannot see outside the scratch folder: ls, cat and test on a path out there answer as if it were not there, so never check anything that way — make_dir is its own proof (it succeeds if the folder is already there). Order: make the folder, set the setting, then done with make_dir as the check.".to_string(), String::new())
+        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. Anything that must outlive this job is a setting. If the goal is where projects live from now on — a projects folder, project storage, where projects go — that is set_setting projects_root=<abs path under /data or /home/ai>, and the job is not done until it is set; check with make_dir (it succeeds if the folder is already there) or run_command ls. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data and /home/ai, and a check out there reports what the sandbox cannot see, not what is not there.".to_string(), String::new())
     } else {
         let bp = match blueprint {
             Some(b) => b.chars().take(3000).collect::<String>(),
@@ -152,6 +153,10 @@ mod tests {
         assert!(p.user.contains("older reply"));
         assert!(p.user.ends_with("add a menu"));
         assert!(p.user.contains("reply") && p.user.contains("start") && p.user.contains("housekeep"), "front door names its three legal moves");
+        // The live run's finding: "prepare a folder where all my projects will live from now on"
+        // reached the job as "create a folder for project storage" — the standing half of the
+        // request was summarised away at the door, and the job could not act on what it never saw.
+        assert!(p.user.contains("The goal carries the whole of what the user asked for"), "{}", p.user);
     }
 
     #[test]
@@ -167,6 +172,9 @@ mod tests {
         // The live run's first finding: without this the 9B tried `run_command mkdir /data/work`,
         // read "Read-only file system" as the machine's truth and gave up on the whole job.
         assert!(SYSTEM.contains("make_dir"));
+        // Third finding: absolute paths for the project's own files put every write one level
+        // above the workspace, so each one needed an approval and nothing landed in the project.
+        assert!(SYSTEM.contains("relative to the working directory"));
     }
 
     #[test]
@@ -179,10 +187,13 @@ mod tests {
         // The live run's second finding: told only "no blueprint", the 9B still wrote and then
         // re-read a BLUEPRINT.md in the folder it had just made, and never reached the setting.
         assert!(p.user.contains("never write or read a BLUEPRINT.md"), "{}", p.user);
+        // The setting recipe is conditional on the goal being about where projects live — a
+        // housekeeping job that installs a tool has no setting to reach.
+        assert!(p.user.contains("If the goal is where projects live from now on"), "{}", p.user);
         assert!(p.user.contains("not done until it is set"), "{}", p.user);
         // Third finding: with no way to look outside the scratch folder, the 9B invented a file
         // to read as its check (`/etc/settings.conf`) and gave up when it could not be read.
-        assert!(p.user.contains("make_dir is its own proof"), "{}", p.user);
+        assert!(p.user.contains("cannot see outside the scratch folder"), "{}", p.user);
     }
 
     #[test]

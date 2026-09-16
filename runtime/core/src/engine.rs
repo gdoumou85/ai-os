@@ -233,10 +233,12 @@ impl<M: Model> Engine<M> {
             Move::Housekeep { goal, understood, remember } => {
                 let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
                 if let Some(r) = remember { self.store.add_instruction(&r)?; }
+                // The sandbox works in this folder too, so when the engine is the first thing to
+                // create it, it gets the same group and mode a project folder gets. A folder the
+                // setup script already made is left exactly as it is.
+                let fresh = !self.housekeeping_dir.exists();
                 std::fs::create_dir_all(&self.housekeeping_dir)?;
-                // The sandbox works in this folder too, so it needs the same group and mode a
-                // project folder gets — the engine may be the first thing ever to create it.
-                snapshot::share_with_sandbox(&self.housekeeping_dir);
+                if fresh { snapshot::share_with_sandbox(&self.housekeeping_dir); }
                 let job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
                 self.store.save_job(&job)?;
                 let mut out = vec![understood];

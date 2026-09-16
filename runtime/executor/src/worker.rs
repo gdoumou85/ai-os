@@ -1,6 +1,6 @@
 use crate::action::{Action, Manager};
 use crate::admin;
-use crate::rules::{resolves_inside, under_any};
+use crate::rules::{resolves_inside, under_any, AI_ROOTS};
 use crate::undo::UndoEntry;
 use std::cell::RefCell;
 use std::fs;
@@ -222,6 +222,30 @@ impl SandboxWorker {
     }
 }
 
+/// What a failed command was really asking about. The jail replaces `/data` and `/mnt` with
+/// empty mounts, so `ls /data/work` answers "No such file or directory" about a folder that is
+/// really there — the live 1c run watched the model read that as proof its own `make_dir` had
+/// failed, and give up on a job it had already done. Never let the sandbox's blindness be
+/// reported as the machine's truth.
+///
+/// Only paths under `roots` (the AI-writable roots) are probed: that is where the folders it
+/// makes live, and it keeps this from stat-ing whatever else an argument list happens to hold.
+/// A path inside the workspace is visible to the sandbox and needs no note; one that does not
+/// exist gets none either — the failure was the truth.
+pub(crate) fn hidden_note(argv: &[String], workspace: &Path, roots: &[&str]) -> Option<String> {
+    let hidden: Vec<&str> = argv.iter().skip(1)
+        .filter(|a| under_any(a, roots) && !resolves_inside(a, workspace) && Path::new(a).exists())
+        .map(String::as_str)
+        .collect();
+    if hidden.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "note: {} exists — the sandbox cannot see outside its working directory, so this command cannot check it. Use a hand that can.",
+        hidden.join(", "),
+    ))
+}
+
 /// systemd resolves a unit's program against `/`, not `--working-directory`, so a
 /// workspace-relative program (`.venv/bin/pip`, `./run.sh`) has to be made absolute before it
 /// goes out — the live 1c run watched the model try `.venv/bin/python3` and be told there is no
@@ -281,19 +305,10 @@ impl Worker for SandboxWorker {
                 absolute_program(&self.workspace.display().to_string(), &mut argv);
                 let out = self.run_in_sandbox("none", &[], &argv);
                 if out.ok { return out; }
-                // The jail replaces /data and /mnt with empty mounts, so `ls /data/work` comes
-                // back "No such file or directory" about a folder that is really there — the
-                // live 1c run watched the model read that as proof its own `make_dir` had
-                // failed, and give up on a job it had already done. Never let the sandbox's
-                // blindness be reported as the machine's truth.
-                let hidden: Vec<&str> = argv.iter().skip(1)
-                    .filter(|a| a.starts_with('/') && !resolves_inside(a, &self.workspace) && Path::new(a).exists())
-                    .map(String::as_str).collect();
-                if hidden.is_empty() { return out; }
-                Outcome::err(format!(
-                    "{} (note: {} exists — the sandbox cannot see outside its working directory, so this command cannot check it. Use a hand that can.)",
-                    out.detail, hidden.join(", "),
-                ))
+                match hidden_note(&argv, &self.workspace, &AI_ROOTS) {
+                    Some(note) => Outcome::err(format!("{} ({note})", out.detail)),
+                    None => out,
+                }
             }
             Action::FetchPackages { manager, packages } => self.fetch(*manager, packages),
             // ponytail: TOCTOU window between `existing_inside`'s canonicalize and the read below
@@ -505,6 +520,28 @@ mod tests {
         let out = w.run(&Action::ReadFile { path: "a.txt".into(), from_line: Some(2), lines: Some(2) });
         assert!(out.ok);
         assert_eq!(out.detail, "2: l2\n3: l3\n");
+    }
+
+    #[test]
+    fn only_a_real_path_under_the_ai_roots_and_outside_the_workspace_earns_the_hidden_note() {
+        // A temp root stands in for /data: the rule is the same, and the test needs a root it
+        // may create in. `roots` is a parameter for exactly this reason.
+        let root = std::env::temp_dir().join(format!("ai-os-hidden-{}", std::process::id()));
+        let ws = root.join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("inside.txt"), "x").unwrap();
+        fs::write(root.join("outside.txt"), "x").unwrap();
+        let roots = [root.to_str().unwrap()];
+        let argv = |p: &Path| vec!["ls".to_string(), p.display().to_string()];
+
+        let note = hidden_note(&argv(&root.join("outside.txt")), &ws, &roots).expect("outside and real");
+        assert!(note.contains("outside.txt") && note.contains("cannot see outside"), "{note}");
+        assert_eq!(hidden_note(&argv(&ws.join("inside.txt")), &ws, &roots), None, "the sandbox can see its own workspace");
+        assert_eq!(hidden_note(&argv(&root.join("never.txt")), &ws, &roots), None, "a missing file's failure was the truth");
+        // /etc/hostname exists on every Linux, and is not under the AI roots: no note.
+        assert_eq!(hidden_note(&argv(Path::new("/etc/hostname")), &ws, &roots), None, "only the AI roots are probed");
+        assert_eq!(hidden_note(&vec!["ls".to_string()], &ws, &roots), None);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
