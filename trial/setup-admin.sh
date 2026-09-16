@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Phase 1c admin setup. Run as root inside the ai-os distro. Idempotent.
+set -euo pipefail
+repo=${AI_OS_REPO:-/mnt/c/Users/gdoum/Desktop/projects/ai-os}
+apt-get install -y python3-venv npm cargo curl
+install -m 0755 -o root -g root "$repo/runtime/admin/ai-os-admin" /usr/local/libexec/ai-os-admin
+sed -i 's/\r$//' /usr/local/libexec/ai-os-admin
+# One grant, nothing else. Removes the workshop's NOPASSWD:ALL and the bare systemd-run line.
+rm -f /etc/sudoers.d/ai /etc/sudoers.d/ai-sandbox-run
+# Written to a .tmp name (sudo ignores names containing a dot), validated, then moved in.
+# `install /dev/stdin` is not idempotent: it fails on an already-present 0440 destination.
+echo 'ai ALL=(root) NOPASSWD: /usr/local/libexec/ai-os-admin' > /etc/sudoers.d/ai-os-admin.tmp
+chmod 0440 /etc/sudoers.d/ai-os-admin.tmp
+visudo -cf /etc/sudoers.d/ai-os-admin.tmp
+mv -f /etc/sudoers.d/ai-os-admin.tmp /etc/sudoers.d/ai-os-admin
+install -d -o ai -g ai-sandbox -m 2770 /data/snapshots /data/housekeeping
+# Leftovers from a script that once ran with CRLF endings.
+rmdir "/data/jobs"$'\r' "/data/projects"$'\r' 2>/dev/null || true
+echo "admin ready"
