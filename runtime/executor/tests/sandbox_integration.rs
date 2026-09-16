@@ -84,3 +84,50 @@ fn symlink_escaping_workspace_is_refused_on_write() {
 
     let _ = std::fs::remove_file(&outside);
 }
+
+fn project(name: &str) -> PathBuf {
+    let ws = PathBuf::from("/data/projects").join(name);
+    std::fs::create_dir_all(&ws).unwrap();
+    assert!(std::process::Command::new("chgrp").arg("ai-sandbox").arg(&ws).status().unwrap().success());
+    assert!(std::process::Command::new("chmod").arg("2770").arg(&ws).status().unwrap().success());
+    ws
+}
+
+#[test]
+fn other_projects_and_the_database_are_invisible() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let mine = project("it-jail-a");
+    let other = project("it-jail-b");
+    std::fs::write(other.join("secret.txt"), "other project").unwrap();
+    std::fs::write("/data/it-jail-db.sqlite", "pretend db").unwrap();
+    let w = SandboxWorker { user: "ai-sandbox".into(), workspace: mine };
+    let peek = w.run(&Action::RunCommand { argv: vec!["cat".into(), "/data/projects/it-jail-b/secret.txt".into()] });
+    assert!(!peek.ok, "another project must be invisible: {}", peek.detail);
+    let db = w.run(&Action::RunCommand { argv: vec!["cat".into(), "/data/it-jail-db.sqlite".into()] });
+    assert!(!db.ok, "the executor's database must be invisible: {}", db.detail);
+    let home = w.run(&Action::RunCommand { argv: vec!["ls".into(), "/home/ai".into()] });
+    assert!(!home.ok, "the user's home must be hidden: {}", home.detail);
+    let _ = std::fs::remove_file("/data/it-jail-db.sqlite");
+}
+
+#[test]
+fn workspace_is_still_writable_and_tools_still_run() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let ws = project("it-jail-c");
+    let w = SandboxWorker { user: "ai-sandbox".into(), workspace: ws.clone() };
+    let out = w.run(&Action::RunCommand { argv: vec!["sh".into(), "-c".into(), "echo hi > out.txt && python3 -c 'print(6*7)'".into()] });
+    assert!(out.ok, "workspace must stay writable and system programs runnable: {}", out.detail);
+    assert!(out.detail.contains("42"));
+    assert_eq!(std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(), "hi");
+}
+
+#[test]
+fn failure_detail_carries_the_end_of_the_error_output() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let ws = project("it-jail-d");
+    let w = SandboxWorker { user: "ai-sandbox".into(), workspace: ws };
+    let out = w.run(&Action::RunCommand { argv: vec!["sh".into(), "-c".into(), "seq 1 2000 >&2; echo THE-REAL-REASON >&2; exit 3".into()] });
+    assert!(!out.ok);
+    assert!(out.detail.contains("exit 3"), "{}", out.detail);
+    assert!(out.detail.contains("THE-REAL-REASON"), "the reason lives at the END of the output: {}", out.detail);
+}

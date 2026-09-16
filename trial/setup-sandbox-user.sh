@@ -4,6 +4,9 @@
 set -e
 id ai-sandbox >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin ai-sandbox
 install -d -o ai-sandbox -g ai-sandbox -m 0770 /data/jobs
+# Phase 1b: projects live here. The executor's user creates each project folder and
+# hands it to the shared group (chgrp ai-sandbox, chmod 2770) so both can write.
+install -d -o ai -g ai-sandbox -m 2770 /data/projects
 # The orchestrator (user "ai") creates job workspaces under /data/jobs; without
 # group membership it can't even mkdir there (0770, no "other" bits). Job
 # subdirs it creates keep their normal 0755-ish perms, which already give

@@ -70,6 +70,13 @@ impl SandboxWorker {
     }
 }
 
+/// Last `n` chars of `s` — for failures the reason is at the end of the output, not the start.
+fn tail(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    s.chars().skip(count.saturating_sub(n)).collect()
+}
+fn head(s: &str, n: usize) -> String { s.chars().take(n).collect() }
+
 impl Worker for SandboxWorker {
     fn run(&self, action: &Action) -> Outcome {
         match action {
@@ -78,27 +85,37 @@ impl Worker for SandboxWorker {
                 // System `systemd-run` (not `--user`): the workshop's `systemd --user` manager
                 // rejects `--uid=` and `PrivateNetwork=` (it runs as one uid and can't grant
                 // either), so this goes through the system manager via passwordless sudo instead.
+                let ws = self.workspace.display().to_string();
                 let out = Command::new("sudo")
                     .args(["-n", "systemd-run", "--quiet", "--pipe", "--wait", "--collect"])
                     .arg(format!("--uid={}", self.user))
-                    .arg(format!("--working-directory={}", self.workspace.display()))
-                    // No network; personal files hidden. System dirs are already unwritable
-                    // to the unprivileged sandbox user, and the workspace stays writable
-                    // (do NOT use ProtectSystem=strict — it would make the workspace read-only).
-                    .args(["--property=PrivateNetwork=yes", "--property=ProtectHome=yes"])
+                    .arg(format!("--working-directory={ws}"))
+                    // The jail (1b spec §7): system programs read-only, the project folder read-write,
+                    // nothing else. /data becomes an empty read-only tmpfs with only this project bound
+                    // into it, so other projects and the executor's database do not exist from inside.
+                    // Home is hidden, /tmp is private, and files the sandbox creates are group-writable
+                    // so the executor's own user can still edit them (shared group on the folder).
+                    .args(["--property=PrivateNetwork=yes", "--property=ProtectHome=yes", "--property=PrivateTmp=yes"])
+                    .args(["--property=ProtectSystem=strict", "--property=UMask=0002"])
+                    .arg("--property=TemporaryFileSystem=/data:ro")
+                    .arg(format!("--property=BindPaths={ws}"))
+                    .arg(format!("--property=ReadWritePaths={ws}"))
                     .arg("--")
                     .args(argv)
                     .output();
                 match out {
-                    Ok(o) => Outcome {
-                        ok: o.status.success(),
-                        detail: format!(
-                            "exit {}; stdout: {} stderr: {}",
-                            o.status.code().unwrap_or(-1),
-                            String::from_utf8_lossy(&o.stdout).chars().take(500).collect::<String>(),
-                            String::from_utf8_lossy(&o.stderr).chars().take(500).collect::<String>()
-                        ),
-                    },
+                    Ok(o) => {
+                        let ok = o.status.success();
+                        let stdout = String::from_utf8_lossy(&o.stdout);
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        // Success: the start of the output is what matters. Failure: the END is where the
+                        // reason lives (1b spec §3), so cut from the tail.
+                        let cut = |s: &str| if ok { head(s, 500) } else { tail(s, 500) };
+                        Outcome {
+                            ok,
+                            detail: format!("exit {}; stdout: {} stderr: {}", o.status.code().unwrap_or(-1), cut(&stdout), cut(&stderr)),
+                        }
+                    }
                     Err(e) => Outcome { ok: false, detail: format!("spawn failed: {e}") },
                 }
             }
