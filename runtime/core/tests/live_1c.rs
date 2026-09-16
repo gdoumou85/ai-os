@@ -40,10 +40,13 @@ fn latest_job() -> Job {
     serde_json::from_str(&json).unwrap()
 }
 
+/// Sorted, so two listings differ only when their contents really do.
 fn listing(dir: &str) -> Vec<String> {
-    std::fs::read_dir(dir)
+    let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 /// Remove something the run must start without. Only "it was not there" is acceptable: a path
@@ -109,9 +112,11 @@ fn the_machine_moves_its_projects_installs_undoes_and_fetches() {
     let landed = landed.unwrap_or_else(|| panic!("a project with a BLUEPRINT.md must land under {WORK} (found {:?}): {out:?}", listing(WORK)));
     let project = Path::new(WORK).join(&landed);
     println!("[script 1] project folder: {}", project.display());
-    // A file the job's snapshot cannot possibly contain: it is written after the job ended, so
-    // an undo that really put the project back to its snapshot must take it away again. Proof
-    // that the restore moved files, not just that it printed a line.
+    // A file of the test's own, to prove later that an undo really moved files rather than only
+    // printing a line. Which snapshot the restore puts back depends on what the model does next
+    // (the live run has had it install cowsay *inside* this project, which takes a second
+    // snapshot and prunes the first — only the newest per project is kept, §12), so the proof
+    // cannot assume one or the other: it is that the folder's contents change.
     let marker = project.join("UNDO_MARKER.txt");
     std::fs::write(&marker, "written after the primes job, before any undo").unwrap();
     assert!(marker.exists());
@@ -122,16 +127,24 @@ fn the_machine_moves_its_projects_installs_undoes_and_fetches() {
 
     // 3. Undo, newest job first. The primes job sits between the install and the housekeeping
     // job, so "undo" may have to be said more than once before the package goes.
+    // The marker goes off disk now, so whichever snapshot the restore puts back, the folder must
+    // come out different from what it is at this moment: the snapshot taken when the last job in
+    // this project started has the marker in it (it comes back), and an older one predates the
+    // project's files entirely (they go). Either way "Restored the files of" has to be a real
+    // move of files, which is what this proves.
+    std::fs::remove_file(&marker).unwrap();
+    let before_undo = listing(&project.display().to_string());
+    println!("[script 3] {} before the undo: {before_undo:?}", project.display());
     let mut undos = 0;
     let mut restored = false;
-    // Every undo checks the same thing: it put something back, and the moment the project's
-    // files went back the marker written after that job was gone with them.
     let undo = |e: &mut Engine<OllamaModel>, undos: &mut i32, restored: &mut bool| {
         *undos += 1;
         let out = say(e, &format!("script 3: undo #{undos}"), "undo");
         assert!(!out.iter().any(|l| l.contains("Nothing left to undo")), "ran out of jobs to undo: {out:?}");
-        if out.iter().any(|l| l.contains("Restored the files of")) {
-            assert!(!marker.exists(), "the project's files were reported restored, but {} is still there", marker.display());
+        if out.iter().any(|l| l.contains("Restored the files of")) && !*restored {
+            let now = listing(&project.display().to_string());
+            println!("[script 3] {} after the restore: {now:?}", project.display());
+            assert_ne!(now, before_undo, "the files were reported restored but nothing on disk moved");
             *restored = true;
         }
     };
@@ -144,7 +157,6 @@ fn the_machine_moves_its_projects_installs_undoes_and_fetches() {
         undo(&mut e, &mut undos, &mut restored);
     }
     assert!(restored, "no undo put the project's files back");
-    assert!(!marker.exists(), "the marker written after the primes job must be gone: {}", marker.display());
     // §11: the folder goes "if empty". Undo restores a project's files, it never removes the
     // project folder, so what the primes job left inside can legitimately keep /data/work alive.
     let left = listing(WORK);

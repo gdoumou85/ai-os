@@ -217,6 +217,8 @@ impl<M: Model> Engine<M> {
                 if let Some(r) = remember { self.store.add_instruction(&r)?; }
                 let mut job = Job::new(&name, &folder, &goal, creative, &understood);
                 job.new_project = is_new;
+                // The model's `goal` is its paraphrase; this is what the user actually said.
+                job.request = text.to_string();
                 self.store.save_job(&job)?;
                 // The files as they were before this job touched them. A plain-folder project
                 // (pre-1c, or any non-btrfs machine) gets no snapshot and no row — undo says so
@@ -239,7 +241,8 @@ impl<M: Model> Engine<M> {
                 let fresh = !self.housekeeping_dir.exists();
                 std::fs::create_dir_all(&self.housekeeping_dir)?;
                 if fresh { snapshot::share_with_sandbox(&self.housekeeping_dir); }
-                let job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
+                let mut job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
+                job.request = text.to_string();
                 self.store.save_job(&job)?;
                 let mut out = vec![understood];
                 if let Some(n) = note { out.push(n); }

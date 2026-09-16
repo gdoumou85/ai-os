@@ -71,6 +71,12 @@ pub struct Job {
     /// whether undoing the job means removing the folder or only putting its files back.
     #[serde(default)]
     pub new_project: bool,
+    /// What the user actually typed to start this job, word for word. `goal` is the model's own
+    /// paraphrase and loses what it did not think mattered — the live 1c run watched "where all
+    /// my projects will live from now on" become "for project storage", and a job cannot act on
+    /// what it never saw. `#[serde(default)]`: see `declined_actions` (I3).
+    #[serde(default)]
+    pub request: String,
 }
 
 impl Job {
@@ -86,7 +92,7 @@ impl Job {
             declined_actions: vec![], rejections: 0, replans: 0,
             note_to_model: None, last_code_change: 0, last_blueprint_update: 0,
             outcome_text: String::new(), housekeeping: false,
-            folder: folder.into(), new_project: false,
+            folder: folder.into(), new_project: false, request: String::new(),
         }
     }
 

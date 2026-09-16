@@ -109,7 +109,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
     let (header, bp_block) = if job.housekeeping {
-        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. Anything that must outlive this job is a setting. If the goal is where projects live from now on — a projects folder, project storage, where projects go — that is set_setting projects_root=<abs path under /data or /home/ai>, and the job is not done until it is set; check with make_dir (it succeeds if the folder is already there) or run_command ls. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data and /home/ai, and a check out there reports what the sandbox cannot see, not what is not there.".to_string(), String::new())
+        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data and /home/ai, and a check out there reports what the sandbox cannot see, not what is not there. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) make_dir the folder, 2) set_setting projects_root=<that absolute path>, 3) done with make_dir (or run_command ls) as the check. The job is not done until the setting is set.".to_string(), String::new())
     } else {
         let bp = match blueprint {
             Some(b) => b.chars().take(3000).collect::<String>(),
@@ -126,9 +126,14 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     // The bounded last-run note (1b spec §6.6): fix first, prove it, then the goal.
     let last = last_run.map(|l| format!("\n\nLAST RUN in this project ended badly:\n{}\nFix this first and prove it with a check, then carry on with the goal.", l.chars().take(1500).collect::<String>())).unwrap_or_default();
     let mode = if job.creative { "creative (do not ask; decide yourself)" } else { "ask" };
+    // `Goal` is the model's own paraphrase from the front door, and it drops what it did not
+    // think mattered ("…where all my projects will live from now on" became "for project
+    // storage"). The words the user actually used go right under it. Jobs saved before 1c
+    // carry none, and then the line is simply not there.
+    let verbatim = if job.request.is_empty() { String::new() } else { format!("The user asked (verbatim): {}\n", job.request) };
     let user = format!(
-        "Machine: Ubuntu Linux (python3, no `python`; apt via install; pip/npm/cargo via fetch_packages).\nStanding instructions:\n{}\n\n{}\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
-        join_instructions(instructions), header, job.goal, mode, job.understood, answers, plan, bp_block, last, summarise_steps(job), note, hint
+        "Machine: Ubuntu Linux (python3, no `python`; apt via install; pip/npm/cargo via fetch_packages).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
+        join_instructions(instructions), header, job.goal, verbatim, mode, job.understood, answers, plan, bp_block, last, summarise_steps(job), note, hint
     );
     Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job) }
 }
@@ -178,6 +183,18 @@ mod tests {
     }
 
     #[test]
+    fn the_job_turn_carries_the_users_own_words_not_only_the_paraphrase() {
+        let mut j = Job::new("p", "/data/projects/p", "Create a folder at /data/work for project storage.", false, "u");
+        assert!(!job_turn(&[], &j, None, None).user.contains("verbatim"), "a job with no recorded request says nothing");
+        j.request = "Prepare a folder at /data/work where all my projects will live from now on".into();
+        let user = job_turn(&[], &j, None, None).user;
+        assert!(user.contains("The user asked (verbatim): Prepare a folder at /data/work where all my projects will live from now on"), "{user}");
+        // Right under the goal, so the paraphrase and the words it came from are read together.
+        assert!(user.find("Goal:").unwrap() < user.find("The user asked (verbatim):").unwrap(), "{user}");
+        assert!(user.find("The user asked (verbatim):").unwrap() < user.find("Mode:").unwrap(), "{user}");
+    }
+
+    #[test]
     fn housekeeping_job_turn_has_no_project_no_blueprint() {
         let mut j = Job::new("scratch", "/data/projects/scratch", "prepare /data/work", false, "Housekeeping: preparing /data/work");
         j.housekeeping = true;
@@ -187,10 +204,12 @@ mod tests {
         // The live run's second finding: told only "no blueprint", the 9B still wrote and then
         // re-read a BLUEPRINT.md in the folder it had just made, and never reached the setting.
         assert!(p.user.contains("never write or read a BLUEPRINT.md"), "{}", p.user);
-        // The setting recipe is conditional on the goal being about where projects live — a
-        // housekeeping job that installs a tool has no setting to reach.
-        assert!(p.user.contains("If the goal is where projects live from now on"), "{}", p.user);
-        assert!(p.user.contains("not done until it is set"), "{}", p.user);
+        // The setting recipe is conditional on the user's request being about where projects
+        // live — a housekeeping job that installs a tool has no setting to reach — and inside
+        // that condition it is ordered, because the 9B needs the order (§11 Results).
+        assert!(p.user.contains("If the user's request is about where projects live from now on"), "{}", p.user);
+        assert!(p.user.contains("1) make_dir the folder, 2) set_setting projects_root"), "{}", p.user);
+        assert!(p.user.contains("The job is not done until the setting is set"), "{}", p.user);
         // Third finding: with no way to look outside the scratch folder, the 9B invented a file
         // to read as its check (`/etc/settings.conf`) and gave up when it could not be read.
         assert!(p.user.contains("cannot see outside the scratch folder"), "{}", p.user);
