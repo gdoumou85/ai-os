@@ -121,7 +121,9 @@ Carry-forward from the 1b review. Today a job can end `done` with no blueprint i
 
 `SYSTEM` gains: software is installed with `install`, never with `run_command apt`; services with `service`; language packages come through `fetch_packages` because the sandbox has no network; a file outside the project needs the user's yes, so say why; the machine's own layout and settings are housekeeping. The schema (`schema.rs`) gains the six action shapes and the `housekeep` move, discriminator first (key order is load-bearing, 1b finding). `Machine:` line in `job_turn` gains "apt via install; pip/npm/cargo via fetch_packages".
 
-The live acceptance added four more, each after watching the 9B walk past the rule it needed (§11 Results): a folder outside the working directory is made with `make_dir`, never `run_command mkdir`; the project's own files are named relative to the working directory, never by an absolute path; a step that already succeeded is not repeated; and the housekeeping header forbids a `BLUEPRINT.md` by name, says the job is not done until the setting is set, and gives the order — make the folder, set the setting, then `done` with `make_dir` as the check, because the sandbox cannot see out of its scratch folder to check anything else.
+The live acceptance added more, each after watching the 9B walk past the rule it needed (§11 Results): a folder outside the working directory is made with `make_dir`, never `run_command mkdir`; the project's own files are named relative to the working directory, never by an absolute path; a step that already succeeded is not repeated; and the housekeeping header forbids a `BLUEPRINT.md` by name, warns that the sandbox's blindness outside the scratch folder limits checking and never doing, and — **only when the user's request is about where projects live from now on** — spells the recipe out in order: make_dir the folder, `set_setting projects_root`, then `done` with `make_dir` (or `run_command ls`) as the check, and the job is not done until the setting is set.
+
+The job also carries **`Job.request`, the user's message word for word**, and `job_turn` prints it right under the goal ("The user asked (verbatim): …"). `Goal` is the model's own paraphrase from the front door and it drops what it did not think mattered; a job cannot act on what it never saw (§11 Results finding 9). An ordered recipe keyed on a paraphrase is worth nothing — this is what makes the conditional one reachable.
 
 ## 10. Changes to the parent spec (applied at close-out)
 
@@ -149,8 +151,8 @@ All of it inside the `ai-os` distro as user `ai`, `runtime/` as the working dire
 
 ```
      Running unittests src/lib.rs (target/debug/deps/aios_core-2698f216674a1c5b)
-running 85 tests
-test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+running 86 tests
+test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
      Running unittests src/main.rs (target/debug/deps/ai_os_chat-e1f7f512f1c84eb3)
 running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -165,7 +167,7 @@ running 1 test
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
      Running unittests src/lib.rs (target/debug/deps/executor-8e29a400eeb57364)
 running 64 tests
-test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
      Running unittests src/main.rs (target/debug/deps/executor-8f54303fc6d950d5)
 running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -188,16 +190,16 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
      Running unittests src/lib.rs (target/debug/deps/executor-7780159ae869c28d)
 running 64 tests
-test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.15s
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.18s
      Running unittests src/main.rs (target/debug/deps/executor-424083cac5610998)
 running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
      Running tests/admin_integration.rs (target/debug/deps/admin_integration-a0145212066ea07c)
 running 7 tests
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.63s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.05s
      Running tests/sandbox_integration.rs (target/debug/deps/sandbox_integration-aaba29069491d76f)
 running 9 tests
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
    Doc-tests executor
 running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -209,7 +211,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 1 test
 test a_project_subvolume_snapshots_and_restores_as_the_ai_user ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
 ```
 
 `bash runtime/admin/test-admin.sh` — 36 checks, every one PASS, exit 0:
@@ -255,21 +257,23 @@ PASS venv works in jail
 
 **Live acceptance** — `AI_OS_LIVE=1 cargo test -p aios-core --test live_1c -- --nocapture`, fresh `/data/ai-os-live-1c.db`, `/data/work` cleared and asserted gone first, no human: the test answers "You decide." to a question (printed in the transcript) and **never** approves anything — a job that waits for an approval fails the run, because all four scripts are Auto work.
 
-**All four scripts passed, 140.47s in total**, on the build of 2026-09-16:
+**All four scripts passed, 346.90s in total** (2026-09-16, after the review round):
 
 | script | steps | seconds | what was asserted on the machine |
 |---|---|---|---|
-| 1a the projects folder | 3 | 20.1 | `/data/work` exists and `projects_root` = `/data/work` |
-| 1b a project under it | 5 | 22.5 | `/data/work/prime-script/BLUEPRINT.md` exists |
-| 2 install cowsay | 5 | 18.6 | `pkg-list` through the wrapper contains `cowsay` |
-| 3 undo ×3 | — | 2.2 / 0.1 / 0.1 | cowsay gone, project files restored (the marker written after the job is gone with them), `projects_root` back to unset |
-| 4 fetch a pip package | 10 | 76.6 | a `fetch_packages` row in the action log whose outcome starts `ok:` |
+| 1a the projects folder | 6 | 28.7 | `/data/work` exists and `projects_root` = `/data/work` |
+| 1b a project under it | 5 | 37.6 | `/data/work/prime-script/BLUEPRINT.md` exists |
+| 2 install cowsay | 8 | 107.7 | `pkg-list` through the wrapper contains `cowsay` |
+| 3 undo ×3 | — | 2.7 / 0.1 / 0.1 | cowsay gone, the project's files really moved, `projects_root` back to unset |
+| 4 fetch a pip package | 4 | 169.6 | a `fetch_packages` row in the action log whose outcome starts `ok:` |
 
-The reversal report, verbatim from that run: "Removed the 1 packages installed (cowsay)" / "Restored the files of /data/work/prime-script from before the job" / "Setting projects_root back to /data/work", "Cleared setting projects_root", "Could not undo: Removed the folder /data/work — left as is (rmdir: failed to remove '/data/work': Directory not empty)". That last line is §11's "removed **if empty**" being honest: undo restores a project's files but never removes the project folder, so what the primes job left inside `/data/work` keeps the folder alive. After the run `/data` holds no cowsay and no `projects_root` setting; `/data/work/prime-script` and `/data/projects/primes` (the latter from the 1b live test) are the only project folders left.
+The undo of the files is proven, not taken on trust: the test writes `UNDO_MARKER.txt` into the project after script 1b, deletes it from disk before the first undo, and the restore brings it back out of the snapshot — `before the undo: ["BLUEPRINT.md", "primes.py"]` → `after the restore: ["BLUEPRINT.md", "UNDO_MARKER.txt", "primes.py"]`.
 
-**Open, as of review round 1 (2026-09-16):** the housekeeping prompt line that made script 1a land reliably ("make the folder, set the setting, then done") was replaced by a conditional one on review, and six re-runs since have stopped at script 1a with `/data/work` made but `projects_root` never set — the 9B plans from the goal it wrote at the front door ("create a folder at /data/work for project storage"), which no longer trips the condition. The wording is the open question; nothing else in the acceptance changed.
+The reversal report, verbatim: "Removed the 1 packages installed (cowsay)" / "Restored the files of /data/work/prime-script from before the job" / "Cleared setting projects_root" / "Could not undo: Removed the folder /data/work — left as is (rmdir: failed to remove '/data/work': Directory not empty)". That last line is §11's "removed **if empty**" being honest: undo restores a project's files but never removes the project folder, so what the primes job left inside `/data/work` keeps the folder alive. After the run there is no cowsay and no `projects_root`; `/data/work/prime-script` and `/data/projects/primes` (the latter from the 1b live test) are the project folders left.
 
-**What the live runs changed** — fifteen runs in all, and every failure named something missing in the product, never in the test:
+**Two things the passing run shows that are worth reading as they are.** The second undo said *"Could not undo: Restored the files of /data/work/prime-script … (btrfs property set ro false: ERROR: Could not open: No such file or directory)"* — the model had done the cowsay work *inside* the primes project, so that job's snapshot replaced the primes job's (only the newest per project is kept, §12) and the older job's files could not be put back. The ceiling is known; the message is how it looks from the front. And script 4's fetch succeeded on its first step, but the job then gave up after six replans without a finished script: the acceptance asserts the fetch, which is what §11 asks of that script, not that the 9B finishes the table.
+
+**What the live runs changed** — eighteen runs in all, and every failure named something missing in the product, never in the test:
 
 1. **`mkdir` instead of `make_dir`.** The model ran `run_command mkdir -p /data/work`, read the jail's "Read-only file system" as the machine's truth, and gave up on a machine "without root". `SYSTEM` names `make_dir`, and — after the model reached for `mkdir` again anyway — the executor refuses `mkdir`/`rmdir` on an absolute path and names the hand instead (`rules::wrong_hand`).
 2. **A blueprint in a housekeeping job.** Told only "no project, no blueprint", it wrote and then re-read a `BLUEPRINT.md` in the folder it had just made, burning the job on approvals. The housekeeping header forbids it by name.
@@ -279,7 +283,9 @@ The reversal report, verbatim from that run: "Removed the 1 packages installed (
 6. **A successful `make_dir` said nothing.** The wrapper prints nothing, so the step's detail was empty and the model went looking for other proof. The outcome now reads `/data/work exists`.
 7. **The jail's blindness read as the machine's truth.** `ls -ld /data/work` answers "No such file or directory" because `/data` is an empty tmpfs inside the jail. A failed `run_command` whose arguments name a path under the AI roots that really exists now carries that fact in its detail (`worker::hidden_note`).
 8. **A workspace-relative program never ran.** `.venv/bin/python3 prime-script.py` came back "Failed to find executable": systemd resolves a unit's program against `/` (§13 item 14), which the fetch step already worked around privately. `worker::absolute_program` now does it for `run_command` too — a program with a slash resolves against the workspace, a bare name stays on PATH, exactly like a shell.
-9. **The front door summarises the standing half of a request away.** "Prepare a folder where all my projects will live from now on" reached the job as "create a folder at /data/work for project storage", and the job cannot act on what it never saw. The front-door prompt now says the goal carries the whole of what the user asked for.
+9. **The front door summarises the standing half of a request away — and that was the root cause of the last six failures.** "Prepare a folder where all my projects will live from now on" reached the job as "create a folder at /data/work for project storage", so the job never saw the part that asks for a setting, and no rule keyed on the goal could reach it. Fixed at the cause: `Job.request` carries the user's message word for word and `job_turn` shows it right under the goal as "The user asked (verbatim): …". Telling the front door to keep the whole request was not enough on its own; carrying the words is.
+
+10. **Only the newest snapshot per project is kept, and a second job in the same project consumes it.** The model installed cowsay *inside* the primes project, which took a second snapshot and pruned the first, so undoing the older job answered "Could not undo: Restored the files of … (btrfs property set ro false: ERROR: Could not open: No such file or directory)". The ceiling is the one already carried in §12; what the run adds is how it reads from the front, and that the acceptance must not assume which snapshot a restore puts back.
 
 Still true of the 9B and recorded rather than papered over: it asks a question or two even in creative mode (the test answers "You decide." once), and it will repeat an identical failing *check* up to the three-strike cap — a check is deliberately exempt from the identical-action dedup (engine `perform`'s `is_check`, and the 1b test that pins it), so a check that keeps failing with nothing changed in between still costs a job three strikes.
 
