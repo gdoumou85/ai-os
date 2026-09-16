@@ -3,5 +3,6 @@
 pub mod job;
 pub mod model;
 pub mod moves;
+pub mod prompt;
 pub mod schema;
 pub mod store;
