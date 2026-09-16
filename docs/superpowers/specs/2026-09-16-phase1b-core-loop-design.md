@@ -142,7 +142,7 @@ Phase 3 turns these into saved skills — a workaround that passed its check is 
 
 ## 7. The safety carry-forward — first task of the phase
 
-From the 1a review (parent §11, item 1): `run_command` runs unprivileged and network-off but can still **read** outside its workspace. Before the model runs a single command, it is jailed: the sandbox process sees the system's programs read-only, its own project folder read-write, and **nothing else** — not `/etc`'s secrets, not the user's home, not other projects. Proven by a test: `cat /etc/passwd` (and `ls /data/projects`) fail from inside a job.
+From the 1a review (parent §11, item 1): `run_command` runs unprivileged and network-off but can still **read** outside its workspace. Before the model runs a single command, it is jailed: the sandbox process sees the system's programs read-only, its own project folder read-write, and **nothing else** — not `/etc`'s secrets, not the user's home, not other projects. Proven by tests from inside a job: another project's files and the executor's own database do not exist as far as the command can see; the user's home is empty; the workspace is still writable. (`/etc/passwd` stays readable — it holds no secrets and every tool needs it to look up users; `/etc/shadow` was never readable to the sandbox user.)
 
 This does not limit what the AI can *use*: every program installed on the OS is visible and runnable inside a job. It limits only what data it can reach.
 
