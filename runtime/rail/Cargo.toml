@@ -1,0 +1,17 @@
+[package]
+name = "aios-rail"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "aios_rail"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ai-os-rail"
+path = "src/main.rs"
+
+[dependencies]
+aios-proto = { path = "../proto" }
+serde_json = { version = "1", features = ["preserve_order"] }
+gtk4 = { version = "0.11", features = ["v4_18"] }
