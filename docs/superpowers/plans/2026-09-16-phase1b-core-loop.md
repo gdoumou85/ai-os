@@ -1162,7 +1162,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     let last = last_run.map(|l| format!("\n\nLAST RUN in this project ended badly:\n{}\nFix this first and prove it with a check, then carry on with the goal.", l.chars().take(1500).collect::<String>())).unwrap_or_default();
     let mode = if job.creative { "creative (do not ask; decide yourself)" } else { "ask" };
     let user = format!(
-        "Standing instructions:\n{}\n\nProject: {} (its folder is the working directory)\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}\n\nBLUEPRINT.md:\n{}{}\n\nSteps so far:\n{}{}\n\n{}",
+        "Machine: Ubuntu Linux (python3, apt; no `python`).\nStanding instructions:\n{}\n\nProject: {} (its folder is the working directory)\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}\n\nBLUEPRINT.md:\n{}{}\n\nSteps so far:\n{}{}\n\n{}",
         join_instructions(instructions), job.project, job.goal, mode, job.understood, answers, plan, bp, last, summarise_steps(job), note, hint
     );
     Prompt { system: SYSTEM.into(), user }
@@ -1615,6 +1615,26 @@ git commit -m "feat(core): engine front door — reply, start, remember, cancel,
     }
 
     #[test]
+    fn same_command_is_allowed_again_after_a_file_was_fixed() {
+        // Spike finding: run fails → edit the file → the same run is the right move, not a repeat.
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")),
+            act(2, run("python3")),
+            act(2, Action::EditFile { path: "primes.py".into(), find: "prnt".into(), replace: "print".into() }),
+            act(2, run("python3")),
+            act(2, write("BLUEPRINT.md")), done(run("python3")),
+        ], "retry-after-fix");
+        rec.outcomes.borrow_mut().extend([
+            Outcome { ok: true, detail: "ok".into() },
+            Outcome { ok: false, detail: "NameError: prnt".into() },
+            Outcome { ok: true, detail: "edited".into() },
+        ]);
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == run("python3")).count(), 3, "failed run, re-run after the fix, and the check");
+    }
+
+    #[test]
     fn three_different_failures_on_one_step_give_up() {
         let (mut e, rec, _) = engine_with(vec![
             start("p", true), plan(), act(1, run("a")), act(1, run("b")), act(1, run("c")), act(1, run("d")),
@@ -1811,6 +1831,9 @@ git commit -m "feat(core): engine front door — reply, start, remember, cancel,
                         Some(false) => job.last_code_change = job.steps.len(),
                         None => {}
                     }
+                    // Something changed on disk, so an earlier failure may now succeed:
+                    // re-running the same command after a fix is legitimate (spike finding).
+                    if Self::is_blueprint(&action).is_some() { job.failed_actions.clear(); }
                 } else {
                     job.failed_actions.push(key);
                     let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
@@ -1907,7 +1930,7 @@ Add the needed imports at the top of `engine.rs`: `use crate::job::StepRecord; u
 
 Note for the implementer: `perform`'s `plan_step` for the check uses the last plan step; the `Done` arm rejects with a blueprint note *before* running the check, so an unrecorded blueprint costs no executor call.
 
-- [ ] **Step 4: Run** — `cargo test -p aios-core` → all pass (17 + 18). If a test's `prompts[i]` index is off by one because of an extra rejected turn, fix the *test's* index only after confirming the engine's behaviour matches the spec — never loosen the assertion.
+- [ ] **Step 4: Run** — `cargo test -p aios-core` → all pass (17 + 19). If a test's `prompts[i]` index is off by one because of an extra rejected turn, fix the *test's* index only after confirming the engine's behaviour matches the spec — never loosen the assertion.
 
 - [ ] **Step 5: Commit**
 ```bash
