@@ -14,12 +14,19 @@ pub const MOVE_SCHEMA: &str = r##"{
       { "type":"object", "properties": { "kind": {"enum":["read_file"]}, "path": {"type":"string"}, "from_line": {"type":"integer","minimum":1}, "lines": {"type":"integer","minimum":1} }, "required":["kind","path"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["write_file"]}, "path": {"type":"string"}, "contents": {"type":"string"} }, "required":["kind","path","contents"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["edit_file"]}, "path": {"type":"string"}, "find": {"type":"string"}, "replace": {"type":"string"} }, "required":["kind","path","find","replace"], "additionalProperties": false },
-      { "type":"object", "properties": { "kind": {"enum":["http_post"]}, "url": {"type":"string"}, "body": {"type":"string"} }, "required":["kind","url","body"], "additionalProperties": false }
+      { "type":"object", "properties": { "kind": {"enum":["http_post"]}, "url": {"type":"string"}, "body": {"type":"string"} }, "required":["kind","url","body"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["install"]}, "packages": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":10} }, "required":["kind","packages"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["remove"]}, "packages": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":10} }, "required":["kind","packages"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["service"]}, "name": {"type":"string"}, "do": {"enum":["enable","disable","restart"]} }, "required":["kind","name","do"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["make_dir"]}, "path": {"type":"string"} }, "required":["kind","path"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["fetch_packages"]}, "manager": {"enum":["pip","npm","cargo"]}, "packages": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":10} }, "required":["kind","manager","packages"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["set_setting"]}, "key": {"enum":["projects_root"]}, "value": {"type":"string"} }, "required":["kind","key","value"], "additionalProperties": false }
     ] }
   },
   "oneOf": [
     { "type":"object", "properties": { "move": {"enum":["reply"]}, "text": {"type":"string"}, "remember": {"type":"string"} }, "required":["move","text"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["start"]}, "project": {"type":"string"}, "new_project": {"type":"boolean"}, "description": {"type":"string"}, "goal": {"type":"string"}, "creative": {"type":"boolean"}, "understood": {"type":"string"}, "remember": {"type":"string"} }, "required":["move","project","new_project","description","goal","creative","understood"], "additionalProperties": false },
+    { "type":"object", "properties": { "move": {"enum":["housekeep"]}, "goal": {"type":"string"}, "understood": {"type":"string"}, "remember": {"type":"string"} }, "required":["move","goal","understood"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["ask"]}, "questions": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":3} }, "required":["move","questions"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["plan"]}, "steps": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8} }, "required":["move","steps"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["act"]}, "step": {"type":"integer","minimum":1}, "action": {"$ref":"#/$defs/action"} }, "required":["move","step","action"], "additionalProperties": false },
@@ -55,5 +62,19 @@ mod tests {
             let first = props.keys().next().unwrap();
             assert_eq!(first, "kind", "discriminator must be written first: {entry}");
         }
+    }
+
+    /// A new `Action` variant (executor::action) must be taught to the grammar here, in the same
+    /// order and under the same names — this pins the full $defs.action.oneOf list against silent
+    /// drift when a kind is added to one side and not the other.
+    #[test]
+    fn action_kinds_match_the_enum() {
+        let v = value();
+        let kinds: Vec<String> = v["$defs"]["action"]["oneOf"].as_array().unwrap().iter()
+            .map(|o| o["properties"]["kind"]["enum"][0].as_str().unwrap().to_string()).collect();
+        assert_eq!(kinds, [
+            "run_command", "read_file", "write_file", "edit_file", "http_post",
+            "install", "remove", "service", "make_dir", "fetch_packages", "set_setting",
+        ]);
     }
 }

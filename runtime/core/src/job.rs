@@ -56,6 +56,11 @@ pub struct Job {
     pub last_code_change: usize,
     pub last_blueprint_update: usize,
     pub outcome_text: String,
+    /// True for a housekeeping job (machine-level: folders, settings, tools) — no project, no
+    /// blueprint. `#[serde(default)]`: a job saved before this field existed must still
+    /// deserialise (I3; standing convention — see `declined_actions`).
+    #[serde(default)]
+    pub housekeeping: bool,
 }
 
 impl Job {
@@ -70,7 +75,7 @@ impl Job {
             pending_action: None, pending_reason: String::new(), failed_actions: vec![],
             declined_actions: vec![], rejections: 0, replans: 0,
             note_to_model: None, last_code_change: 0, last_blueprint_update: 0,
-            outcome_text: String::new(),
+            outcome_text: String::new(), housekeeping: false,
         }
     }
     pub fn is_open(&self) -> bool { !matches!(self.state, State::Done | State::Failed | State::Cancelled) }

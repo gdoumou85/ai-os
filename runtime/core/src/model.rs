@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(b["think"], false);
         assert_eq!(b["options"]["temperature"], 0.0);
         assert_eq!(b["options"]["num_ctx"], 8192);
-        assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 8);
+        assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 9);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
     }
@@ -177,7 +177,7 @@ mod tests {
 
         let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![] };
         let b2 = ollama_body("m", &all);
-        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 8);
+        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 9);
     }
 
     #[test]

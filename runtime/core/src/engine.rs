@@ -371,7 +371,7 @@ impl<M: Model> Engine<M> {
                 }
                 (_, Move::Act { .. }) | (_, Move::Done { .. }) | (_, Move::Replan { .. }) | (_, Move::GiveUp { .. }) => Some("give a plan first".to_string()),
                 (_, Move::Plan { .. }) => Some("not now".to_string()),
-                (_, Move::Reply { .. }) | (_, Move::Start { .. }) => Some("a job is running: use ask, plan, act, replan, done or give_up".to_string()),
+                (_, Move::Reply { .. }) | (_, Move::Start { .. }) | (_, Move::Housekeep { .. }) => Some("a job is running: use ask, plan, act, replan, done or give_up".to_string()),
             };
             if let Some(why) = rejected {
                 if let Some(stop) = self.reject(&mut job, &why)? { return Ok(stop); }

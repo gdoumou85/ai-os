@@ -13,7 +13,10 @@ Rules:
 - Edit code in place with edit_file (quote the exact passage). Use write_file only for new files. Use read_file with from_line/lines to read the part you need.
 - A step that failed once will fail again. Read the reason and do something different, or replan. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
-- If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.";
+- If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.
+- Install software with `install` (apt), never with run_command apt. Enable, disable or restart services with `service`. Language packages (pip, npm, crates) come through `fetch_packages`: the sandbox has no other network.
+- A file outside the project needs the user's yes; say in one line why you need it.
+- The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.";
 
 fn join_instructions(instructions: &[String]) -> String {
     if instructions.is_empty() { "(none)".into() } else { instructions.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n") }
@@ -25,11 +28,12 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(S
     };
     let recent_txt = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
     let user = format!(
-        "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk) or start (new work: give project, new_project, description, goal, creative, understood). \
+        "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk), start (new work: give project, new_project, description, goal, creative, understood), or \
+         housekeep (the machine itself: folders, settings, tools; give goal, understood). \
          Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, recent_txt, message
     );
-    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start"] }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"] }
 }
 
 /// The moves legal right now, by job state and mode (decision 13): sent as `Prompt::allowed` so
@@ -101,9 +105,14 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     let plan = if job.plan.is_empty() { "(no plan yet)".into() } else {
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
-    let bp = match blueprint {
-        Some(b) => b.chars().take(3000).collect::<String>(),
-        None => "(no blueprint yet — create BLUEPRINT.md with write_file before changing anything else)".into(),
+    let (header, bp_block) = if job.housekeeping {
+        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint. Anything that must outlive this job is a setting: set_setting projects_root=<abs path under /data or /home/ai>.".to_string(), String::new())
+    } else {
+        let bp = match blueprint {
+            Some(b) => b.chars().take(3000).collect::<String>(),
+            None => "(no blueprint yet — create BLUEPRINT.md with write_file before changing anything else)".into(),
+        };
+        (format!("Project: {} (its folder is the working directory)", job.project), format!("\n\nBLUEPRINT.md:\n{bp}"))
     };
     let hint = match job.state {
         State::Asking => "Legal moves now: ask (1-3 questions) or plan (if you have no questions).",
@@ -115,8 +124,8 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     let last = last_run.map(|l| format!("\n\nLAST RUN in this project ended badly:\n{}\nFix this first and prove it with a check, then carry on with the goal.", l.chars().take(1500).collect::<String>())).unwrap_or_default();
     let mode = if job.creative { "creative (do not ask; decide yourself)" } else { "ask" };
     let user = format!(
-        "Machine: Ubuntu Linux (python3, apt; no `python`).\nStanding instructions:\n{}\n\nProject: {} (its folder is the working directory)\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}\n\nBLUEPRINT.md:\n{}{}\n\nSteps so far:\n{}{}\n\n{}",
-        join_instructions(instructions), job.project, job.goal, mode, job.understood, answers, plan, bp, last, summarise_steps(job), note, hint
+        "Machine: Ubuntu Linux (python3, no `python`; apt via install; pip/npm/cargo via fetch_packages).\nStanding instructions:\n{}\n\n{}\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
+        join_instructions(instructions), header, job.goal, mode, job.understood, answers, plan, bp_block, last, summarise_steps(job), note, hint
     );
     Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job) }
 }
@@ -140,7 +149,28 @@ mod tests {
         assert!(p.user.contains("primes — prime printer"));
         assert!(p.user.contains("older reply"));
         assert!(p.user.ends_with("add a menu"));
-        assert!(p.user.contains("reply") && p.user.contains("start"), "front door names its two legal moves");
+        assert!(p.user.contains("reply") && p.user.contains("start") && p.user.contains("housekeep"), "front door names its three legal moves");
+    }
+
+    #[test]
+    fn front_door_allows_housekeep() {
+        let p = front_door(&[], &[], &[], "hi");
+        assert_eq!(p.allowed, vec!["reply", "start", "housekeep"]);
+    }
+
+    #[test]
+    fn system_rules_mention_the_new_hands() {
+        assert!(SYSTEM.contains("install"));
+        assert!(SYSTEM.contains("fetch_packages"));
+    }
+
+    #[test]
+    fn housekeeping_job_turn_has_no_project_no_blueprint() {
+        let mut j = Job::new("scratch", "prepare /data/work", false, "Housekeeping: preparing /data/work");
+        j.housekeeping = true;
+        let p = job_turn(&[], &j, None, None);
+        assert!(p.user.contains("no project, no blueprint"), "{}", p.user);
+        assert!(!p.user.contains("no blueprint yet"), "{}", p.user);
     }
 
     #[test]
@@ -222,7 +252,7 @@ mod tests {
         assert_eq!(job_turn(&[], &working_not_creative, None, None).allowed, vec!["ask", "act", "replan", "done", "give_up"]);
 
         let p = front_door(&[], &[], &[], "hi");
-        assert_eq!(p.allowed, vec!["reply", "start"]);
+        assert_eq!(p.allowed, vec!["reply", "start", "housekeep"]);
     }
 
     /// `allowed_moves` and `front_door`'s `allowed` are hand-typed move-name lists, separate from
