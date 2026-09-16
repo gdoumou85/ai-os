@@ -38,14 +38,31 @@ pub fn sanitize_project_name(raw: &str) -> String {
 }
 
 // ponytail: fixed word lists, not the model — an approval must never depend on a 9B reading tone.
+fn normalize(text: &str) -> String {
+    text.trim().to_lowercase().trim_end_matches(['.', '!', '?', ',']).trim().to_string()
+}
+
+fn words(t: &str) -> impl Iterator<Item = &str> {
+    t.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty())
+}
+
 pub fn is_yes(text: &str) -> bool {
-    let t = text.trim().to_lowercase();
-    ["yes", "y", "ok", "okay", "go", "do it", "approve", "approved", "send it", "go ahead", "sure"]
-        .iter().any(|w| t == *w || t.starts_with(&format!("{w} ")) || t.starts_with(&format!("{w},")))
+    const YES_WORDS: [&str; 11] = ["yes", "y", "ok", "okay", "go", "do it", "approve", "approved", "send it", "go ahead", "sure"];
+    const NEGATIONS: [&str; 8] = ["no", "not", "don't", "dont", "never", "away", "stop", "cancel"];
+    let t = normalize(text);
+    if YES_WORDS.contains(&t.as_str()) { return true; }
+    let result = match words(&t).next() {
+        Some(first) if YES_WORDS.contains(&first) => !words(&t).any(|w| NEGATIONS.contains(&w)),
+        _ => false,
+    };
+    result
 }
 pub fn is_stop(text: &str) -> bool {
-    let t = text.trim().to_lowercase();
-    ["stop", "cancel", "leave it", "abort", "never mind", "forget it"].contains(&t.as_str())
+    const STOP_PHRASES: [&str; 10] = [
+        "stop", "cancel", "leave it", "abort", "never mind", "forget it",
+        "stop it", "stop now", "please stop", "stop please",
+    ];
+    STOP_PHRASES.contains(&normalize(text).as_str())
 }
 
 impl<M: Model> Engine<M> {
@@ -90,7 +107,8 @@ impl<M: Model> Engine<M> {
     fn handle_inner(&mut self, text: &str) -> Result<Vec<String>, EngineError> {
         if let Some(mut job) = self.open_job() {
             if is_stop(text) {
-                return self.finish(job.clone(), State::Cancelled, format!("Stopped the job in {}.", job.project));
+                let message = format!("Stopped the job in {}.", job.project);
+                return self.finish(job, State::Cancelled, message);
             }
             match job.state {
                 State::WaitingAnswer => {
@@ -200,6 +218,18 @@ mod tests {
         assert_eq!(sanitize_project_name("Primes Printer!"), "primes-printer");
         assert_eq!(sanitize_project_name("///"), "project");
         assert!(is_yes("yes, send it")); assert!(is_yes("OK")); assert!(!is_yes("no way"));
+        assert!(is_yes("yes.")); assert!(!is_yes("okay so no")); assert!(!is_yes("go away")); assert!(!is_yes("not yet"));
         assert!(is_stop("stop")); assert!(is_stop("leave it")); assert!(!is_stop("don't stop"));
+        assert!(is_stop("Stop!")); assert!(is_stop("stop.")); assert!(!is_stop("stop asking"));
+    }
+
+    #[test]
+    fn stop_cancels_an_open_job_through_handle() {
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()] }], "cancel");
+        e.handle("make p").unwrap();
+        let out = e.handle("Stop.").unwrap();
+        assert!(out.iter().any(|l| l.contains("Stopped")), "{out:?}");
+        assert!(e.open_job().is_none());
+        assert_eq!(e.model.prompts.borrow().len(), 1);
     }
 }
