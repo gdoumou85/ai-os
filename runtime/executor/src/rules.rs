@@ -1,4 +1,4 @@
-use crate::action::Action;
+use crate::action::{valid_name, Action};
 use std::path::{Path, PathBuf};
 
 /// The risky-actions verdict. `Auto` runs without asking; `NeedsConfirm` must be
@@ -10,23 +10,60 @@ pub enum Risk {
     NeedsConfirm(String),
 }
 
+/// Lexically resolve `..`/`.` components without touching disk. `None` if a `..`
+/// would escape past the root (e.g. `/../x`).
+fn normalize(path: &Path) -> Option<PathBuf> {
+    let mut norm = PathBuf::new();
+    for c in path.components() {
+        use std::path::Component::*;
+        match c {
+            ParentDir => {
+                if !norm.pop() {
+                    return None;
+                }
+            }
+            CurDir => {}
+            other => norm.push(other.as_os_str()),
+        }
+    }
+    Some(norm)
+}
+
 /// Resolve a possibly-relative path against the workspace, without touching disk.
 /// `pub(crate)`: also used by `worker::SandboxWorker` as a defense-in-depth check
 /// before it touches the filesystem.
 pub(crate) fn resolves_inside(path: &str, workspace: &Path) -> bool {
     let p = Path::new(path);
     let joined: PathBuf = if p.is_absolute() { p.to_path_buf() } else { workspace.join(p) };
-    // Reject any `..` escape by normalizing lexically.
-    let mut norm = PathBuf::new();
-    for c in joined.components() {
-        use std::path::Component::*;
-        match c {
-            ParentDir => { if !norm.pop() { return false; } }
-            CurDir => {}
-            other => norm.push(other.as_os_str()),
-        }
+    match normalize(&joined) {
+        Some(norm) => norm.starts_with(workspace),
+        None => false,
     }
-    norm.starts_with(workspace)
+}
+
+/// AI-writable roots outside the per-job workspace — `make_dir` may create inside these.
+pub const AI_ROOTS: [&str; 2] = ["/data", "/home/ai"];
+
+/// Whether an absolute path normalizes under one of `roots` (lexical, `..`-safe, like
+/// `resolves_inside`). Relative paths are always rejected — there is no "under" without
+/// an absolute path to check.
+pub fn under_any(path: &str, roots: &[&str]) -> bool {
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return false;
+    }
+    match normalize(p) {
+        Some(norm) => roots.iter().any(|r| norm.starts_with(Path::new(r))),
+        None => false,
+    }
+}
+
+fn names_ok(ns: &[String]) -> Risk {
+    match ns.iter().find(|n| !valid_name(n)) {
+        None if !ns.is_empty() => Risk::Auto,
+        Some(n) => Risk::NeedsConfirm(format!("invalid name: {n}")),
+        None => Risk::NeedsConfirm("no names given".into()),
+    }
 }
 
 pub fn classify(action: &Action, workspace: &Path) -> Risk {
@@ -34,9 +71,10 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
         // Auto: unprivileged, network-isolated, and (since Phase 1b) filesystem-jailed to the
         // project folder — system programs read-only, nothing else visible. See worker.rs.
         Action::RunCommand { .. } => Risk::Auto,
-        // Reading inside the workspace is harmless; outside is a privacy/secrets leak.
+        // Reading inside the workspace is harmless; so is reading system config under /etc
+        // (world-readable already). Outside either is a privacy/secrets leak.
         Action::ReadFile { path, .. } => {
-            if resolves_inside(path, workspace) {
+            if resolves_inside(path, workspace) || under_any(path, &["/etc"]) {
                 Risk::Auto
             } else {
                 Risk::NeedsConfirm(format!("reads outside the workspace: {path}"))
@@ -60,12 +98,27 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
         }
         // Leaves the machine → always ask (a snapshot cannot bring it back).
         Action::HttpPost { url, .. } => Risk::NeedsConfirm(format!("sends data off the machine to {url}")),
+        // Installing/removing/(re)starting a service is reversible and unprivileged via the
+        // package manager / systemd — auto, gated only on the name being safe to interpolate.
+        Action::Install { packages } | Action::Remove { packages } => names_ok(packages),
+        Action::Service { name, .. } => names_ok(std::slice::from_ref(name)),
+        Action::FetchPackages { packages, .. } => names_ok(packages),
+        Action::MakeDir { path } => {
+            if under_any(path, &AI_ROOTS) {
+                Risk::Auto
+            } else {
+                Risk::NeedsConfirm(format!("creates a folder outside the AI's areas: {path}"))
+            }
+        }
+        // A setting is a DB row, not a filesystem/process change — always reversible.
+        Action::SetSetting { .. } => Risk::Auto,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action::{Manager, ServiceDo};
 
     fn ws() -> PathBuf { PathBuf::from("/data/jobs/j1") }
 
@@ -88,7 +141,9 @@ mod tests {
 
     #[test]
     fn read_outside_workspace_needs_confirm() {
-        let a = Action::ReadFile { path: "/etc/passwd".into(), from_line: None, lines: None };
+        // /etc is a carved-out exception (see etc_read_is_auto_but_etc_write_is_not below);
+        // this checks the general case of an outside-workspace path with no such allowance.
+        let a = Action::ReadFile { path: "/root/secret.txt".into(), from_line: None, lines: None };
         assert!(matches!(classify(&a, &ws()), Risk::NeedsConfirm(_)));
     }
 
@@ -116,5 +171,41 @@ mod tests {
     fn http_post_needs_confirm() {
         let a = Action::HttpPost { url: "https://x".into(), body: "b".into() };
         assert!(matches!(classify(&a, &ws()), Risk::NeedsConfirm(_)));
+    }
+
+    #[test]
+    fn install_remove_service_are_auto() {
+        assert_eq!(classify(&Action::Install { packages: vec!["cowsay".into()] }, &ws()), Risk::Auto);
+        assert_eq!(classify(&Action::Remove { packages: vec!["cowsay".into()] }, &ws()), Risk::Auto);
+        assert_eq!(classify(&Action::Service { name: "nginx".into(), action: ServiceDo::Disable }, &ws()), Risk::Auto);
+    }
+
+    #[test]
+    fn bad_names_are_blocked_not_run() {
+        assert!(matches!(classify(&Action::Install { packages: vec!["-o".into()] }, &ws()), Risk::NeedsConfirm(_)));
+        assert!(matches!(classify(&Action::Service { name: "/tmp/x.service".into(), action: ServiceDo::Enable }, &ws()), Risk::NeedsConfirm(_)));
+        assert!(matches!(classify(&Action::FetchPackages { manager: Manager::Pip, packages: vec!["a b".into()] }, &ws()), Risk::NeedsConfirm(_)));
+    }
+
+    #[test]
+    fn make_dir_roots() {
+        assert_eq!(classify(&Action::MakeDir { path: "/data/work".into() }, &ws()), Risk::Auto);
+        assert_eq!(classify(&Action::MakeDir { path: "/home/ai/x".into() }, &ws()), Risk::Auto);
+        assert!(matches!(classify(&Action::MakeDir { path: "/opt/x".into() }, &ws()), Risk::NeedsConfirm(_)));
+        assert!(matches!(classify(&Action::MakeDir { path: "/data/../etc".into() }, &ws()), Risk::NeedsConfirm(_)));
+        assert!(matches!(classify(&Action::MakeDir { path: "relative".into() }, &ws()), Risk::NeedsConfirm(_)));
+    }
+
+    #[test]
+    fn etc_read_is_auto_but_etc_write_is_not() {
+        assert_eq!(classify(&Action::ReadFile { path: "/etc/fstab".into(), from_line: None, lines: None }, &ws()), Risk::Auto);
+        assert!(matches!(classify(&Action::WriteFile { path: "/etc/fstab".into(), contents: "x".into() }, &ws()), Risk::NeedsConfirm(_)));
+        assert!(matches!(classify(&Action::ReadFile { path: "/etc/../root/x".into(), from_line: None, lines: None }, &ws()), Risk::NeedsConfirm(_)));
+    }
+
+    #[test]
+    fn fetch_and_set_setting_are_auto() {
+        assert_eq!(classify(&Action::FetchPackages { manager: Manager::Npm, packages: vec!["left-pad".into()] }, &ws()), Risk::Auto);
+        assert_eq!(classify(&Action::SetSetting { key: "projects_root".into(), value: "/data/work".into() }, &ws()), Risk::Auto);
     }
 }
