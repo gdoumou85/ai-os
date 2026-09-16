@@ -159,6 +159,7 @@ impl<M: Model> Engine<M> {
     const MAX_STEPS: usize = 25;
     const MAX_FAILS_PER_STEP: usize = 3;
     const MAX_REJECTIONS: u32 = 2;
+    const MAX_REPLANS: u32 = 5;
 
     /// Mark a job finished (done/failed/cancelled) and report the one line that explains it.
     fn finish(&self, mut job: Job, state: State, text: String) -> Result<Vec<String>, EngineError> {
@@ -218,6 +219,10 @@ impl<M: Model> Engine<M> {
     /// way it caps a stuck act.
     fn perform(&self, job: &mut Job, plan_step: usize, action: Action, approved: bool, is_check: bool) -> Result<Option<Vec<String>>, EngineError> {
         let key = serde_json::to_string(&action).unwrap_or_default();
+        // A human's "no" never expires — not cleared by a later file write, unlike failed_actions.
+        if job.declined_actions.contains(&key) {
+            return self.reject(job, "the user declined that action; do not repeat it");
+        }
         if !is_check && !approved && job.failed_actions.contains(&key) {
             let earlier = job.steps.iter().rev().find(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).map(|s| s.detail.clone()).unwrap_or_default();
             return self.reject(job, &format!("that exact action already failed with: {earlier} — work around it or replan"));
@@ -225,6 +230,7 @@ impl<M: Model> Engine<M> {
         let exec = self.executor_for(&job.project)?;
         match exec.execute(&job.id, &action, approved)? {
             ExecOutcome::Blocked(reason) => {
+                job.rejections = 0; // a legal act needing approval is a valid move, not a rejection
                 job.pending_action = Some((plan_step, action));
                 job.pending_reason = reason.clone();
                 job.state = State::WaitingApproval;
@@ -245,7 +251,10 @@ impl<M: Model> Engine<M> {
                     // re-running the same command after a fix is legitimate (spike finding).
                     if Self::is_blueprint(&action).is_some() { job.failed_actions.clear(); }
                 } else {
-                    if !is_check { job.failed_actions.push(key); }
+                    // Recorded even for a check (only the identical-action *lookup* above is
+                    // check-exempt): a later `act` proposing this same action must still see why
+                    // it already failed.
+                    job.failed_actions.push(key);
                     let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
                     if fails >= Self::MAX_FAILS_PER_STEP {
                         let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", job.project, outcome.detail);
@@ -261,11 +270,15 @@ impl<M: Model> Engine<M> {
     fn resume_after_approval(&mut self, mut job: Job, approved: bool, text: &str) -> Result<Vec<String>, EngineError> {
         let (plan_step, action) = match job.pending_action.take() { Some(p) => p, None => { job.state = State::Working; return self.run_turns(job); } };
         job.state = State::Working;
+        if job.steps.len() >= Self::MAX_STEPS {
+            let text = format!("I gave up on {}: {} steps without finishing.", job.project, Self::MAX_STEPS);
+            return self.finish(job, State::Failed, text);
+        }
         if approved {
             if let Some(stop) = self.perform(&mut job, plan_step, action, true, false)? { return Ok(stop); }
         } else {
             job.note_to_model = Some(format!("the user declined that action ({}): \"{text}\". Do not repeat it; find another way or finish without it.", job.pending_reason));
-            job.failed_actions.push(serde_json::to_string(&action).unwrap_or_default());
+            job.declined_actions.push(serde_json::to_string(&action).unwrap_or_default());
             self.store.save_job(&job)?;
         }
         self.run_turns(job)
@@ -283,21 +296,34 @@ impl<M: Model> Engine<M> {
             let mv = self.model.next_move(&p)?;
             let rejected = match (job.state, mv) {
                 (State::Asking, Move::Ask { questions }) | (State::Working, Move::Ask { questions }) | (State::Planning, Move::Ask { questions }) if !job.creative => {
-                    job.pending_questions = questions.clone();
-                    job.state = State::WaitingAnswer;
-                    job.rejections = 0;
-                    job.note_to_model = None;
-                    self.store.save_job(&job)?;
-                    return Ok(questions.iter().map(|q| format!("Question: {q}")).collect());
+                    if questions.is_empty() {
+                        Some("ask needs at least one question".to_string())
+                    } else {
+                        job.pending_questions = questions.clone();
+                        job.state = State::WaitingAnswer;
+                        job.rejections = 0;
+                        job.note_to_model = None;
+                        self.store.save_job(&job)?;
+                        return Ok(questions.iter().map(|q| format!("Question: {q}")).collect());
+                    }
                 }
                 (_, Move::Ask { .. }) if job.creative => Some("this job is in creative mode: decide yourself instead of asking".to_string()),
                 (_, Move::Ask { .. }) => Some("ask only before planning or while working".to_string()),
                 (State::Asking, Move::Plan { steps }) | (State::Planning, Move::Plan { steps }) => {
-                    job.plan = steps; job.state = State::Working; job.rejections = 0; job.note_to_model = None;
-                    self.store.save_job(&job)?; None
+                    if steps.is_empty() {
+                        Some("plan needs at least one step".to_string())
+                    } else {
+                        job.plan = steps; job.state = State::Working; job.rejections = 0; job.note_to_model = None;
+                        self.store.save_job(&job)?; None
+                    }
                 }
                 (State::Working, Move::Plan { .. }) => Some("you already have a plan; use replan to change it".to_string()),
                 (State::Working, Move::Replan { steps, why }) => {
+                    job.replans += 1;
+                    if job.replans > Self::MAX_REPLANS {
+                        let text = format!("I gave up on {}: the plan kept changing ({} replans) without progress.", job.project, job.replans);
+                        return self.finish(job, State::Failed, text);
+                    }
                     job.plan = steps; job.rejections = 0;
                     job.note_to_model = Some(format!("plan revised because: {why}"));
                     self.store.save_job(&job)?; None
@@ -674,5 +700,107 @@ mod tests {
         let out = e2.handle("python").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         assert!(e2.open_job().is_none());
+    }
+
+    #[test]
+    fn a_model_that_only_ever_replans_eventually_gives_up() {
+        let mut moves = vec![start("p", true), plan()];
+        for i in 0..6 { moves.push(Move::Replan { steps: vec![format!("attempt {i}")], why: format!("attempt {i} failed") }); }
+        let (mut e, _, _) = engine_with(moves, "replan-cap");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
+        assert!(e.open_job().is_none());
+        // front door + plan + 6 replans
+        assert!(e.model.prompts.borrow().len() <= 8, "{}", e.model.prompts.borrow().len());
+    }
+
+    #[test]
+    fn empty_ask_is_rejected_then_a_real_question_goes_through() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", false), Move::Ask { questions: vec![] }, Move::Ask { questions: vec!["Which language?".into()] },
+        ], "empty-ask");
+        let out = e.handle("go").unwrap();
+        assert!(out.iter().any(|l| l.contains("Which language?")), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[2].user.contains("rejected: ask needs at least one question"), "{}", prompts[2].user);
+    }
+
+    #[test]
+    fn a_failed_checks_reason_blocks_an_identical_act_until_something_changes() {
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")),
+            done(run("python3")),                       // check fails
+            act(2, run("python3")),                      // identical to the failed check -> refused
+            act(2, Action::EditFile { path: "primes.py".into(), find: "prnt".into(), replace: "print".into() }),
+            act(2, write("BLUEPRINT.md")),                // keep the blueprint gate satisfied
+            done(run("python3")),                        // now passes
+        ], "check-then-act");
+        rec.outcomes.borrow_mut().extend([
+            Outcome { ok: true, detail: "ok".into() },                    // blueprint write
+            Outcome { ok: false, detail: "NameError: prnt".into() },      // check fails
+            Outcome { ok: true, detail: "edited".into() },                // edit succeeds
+            Outcome { ok: true, detail: "2 3 5 7".into() },                // check passes
+        ]);
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[5].user.contains("rejected: that exact action already failed with: NameError: prnt"), "{}", prompts[5].user);
+    }
+
+    #[test]
+    fn empty_plan_is_rejected() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", true), Move::Plan { steps: vec![] }, plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "empty-plan");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[2].user.contains("rejected: plan needs at least one step"), "{}", prompts[2].user);
+    }
+
+    #[test]
+    fn declined_action_never_becomes_allowed_again_even_after_a_file_change() {
+        let post = Action::HttpPost { url: "https://x".into(), body: "b".into() };
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(2, post.clone()),
+            act(2, write("other.py")),
+            act(2, write("BLUEPRINT.md")),                // keep the blueprint gate satisfied
+            act(2, post.clone()),
+            done(run("true")),
+        ], "declined-forever");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("Needs your OK"), "{out:?}");
+        let out = e.handle("no, don't").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert!(!rec.calls.borrow().contains(&post), "a declined action must never reach the executor, even after a file changed and it was proposed again");
+    }
+
+    #[test]
+    fn blocked_action_resets_rejections() {
+        let post = Action::HttpPost { url: "https://x".into(), body: "b".into() };
+        let (mut e, _, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")),
+            Move::Ask { questions: vec!["?".into()] },   // rejected: creative mode (rejections -> 1)
+            act(2, post.clone()),                          // blocked -> should reset rejections to 0
+        ], "blocked-resets");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("Needs your OK"), "{out:?}");
+        assert_eq!(e.open_job().unwrap().rejections, 0, "a legal act needing approval resets the rejection count");
+    }
+
+    #[test]
+    fn step_cap_is_rechecked_on_the_approval_path() {
+        let (mut e, rec, _) = engine_with(vec![], "cap-approval");
+        let mut job = Job::new("p", "goal", true, "Starting p");
+        job.plan = vec!["step".into()];
+        job.state = State::WaitingApproval;
+        for i in 0..25 { job.steps.push(StepRecord { plan_step: 1, action: write(&format!("f{i}")), ok: true, detail: "ok".into() }); }
+        job.pending_action = Some((1, Action::HttpPost { url: "https://x".into(), body: "b".into() }));
+        job.pending_reason = "network access".into();
+        e.store.save_job(&job).unwrap();
+        let out = e.handle("yes").unwrap();
+        assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
+        assert!(rec.calls.borrow().is_empty(), "the capped job must not reach the executor");
+        assert!(e.open_job().is_none());
     }
 }

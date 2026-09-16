@@ -34,7 +34,13 @@ pub struct Job {
     pub pending_action: Option<(usize, Action)>,
     pub pending_reason: String,
     pub failed_actions: Vec<String>,
+    /// A human's "no" to a risky action. Unlike `failed_actions`, this is never cleared by a
+    /// later file write — a decline is not a fixable failure, it must never expire.
+    pub declined_actions: Vec<String>,
     pub rejections: u32,
+    /// Bounded like `rejections`/MAX_FAILS_PER_STEP: a model that only ever replans never
+    /// produces output otherwise (engine::MAX_REPLANS).
+    pub replans: u32,
     pub note_to_model: Option<String>,
     pub last_code_change: usize,
     pub last_blueprint_update: usize,
@@ -50,7 +56,8 @@ impl Job {
             state: if creative { State::Planning } else { State::Asking },
             answers: vec![], pending_questions: vec![], plan: vec![], steps: vec![],
             pending_action: None, pending_reason: String::new(), failed_actions: vec![],
-            rejections: 0, note_to_model: None, last_code_change: 0, last_blueprint_update: 0,
+            declined_actions: vec![], rejections: 0, replans: 0,
+            note_to_model: None, last_code_change: 0, last_blueprint_update: 0,
             outcome_text: String::new(),
         }
     }
