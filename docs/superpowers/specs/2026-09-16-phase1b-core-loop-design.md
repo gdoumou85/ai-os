@@ -133,6 +133,9 @@ A project is a row: name, folder (`/data/projects/<name>` in the workshop), desc
 
 ---
 
+### 6.6 The last run — a bounded note about what went wrong
+Memory must not grow. An unfinished job leaves one small file in the project folder, `LAST_RUN.md`, written **by the loop from the job record** (never from the model's own account): the goal, the plan step it was on, the last error in full, and what it said was missing. The next job in that project reads it first and is told: **fix this first, then prove it, then carry on**. The loop **wipes the file the moment a job in that project ends proven done** — the check passed, so the old problem is gone and must not be re-read. A second failure overwrites it. There is never more than one, and it never accumulates.
+
 ### 6.5 Self-improvement — what 1b lays down for Phase 3
 "I can't do that" is where the AI must get better, not stop (parent rule 3). The loop stays fixed code — the model never rewrites the executor, its rules, or the loop; what it improves is its **knowledge**. In 1b:
 - A failure forces a **different** attempt or a `replan` (§3, §4); the model is told to find another way (another tool, another approach) before it may give up.

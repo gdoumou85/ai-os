@@ -1013,7 +1013,7 @@ git commit -m "feat(core): job record and SQLite store (projects, jobs, instruct
   ```rust
   pub const SYSTEM: &str;  // the model's standing rules, one text for both prompts
   pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(String, String)], message: &str) -> Prompt
-  pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>) -> Prompt
+  pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, last_run: Option<&str>) -> Prompt
   pub fn summarise_steps(job: &Job) -> String   // last 6 in full, older one line each
   ```
 
@@ -1048,16 +1048,26 @@ mod tests {
         j.plan = vec!["write primes.py".into(), "run it".into()];
         j.state = State::Working;
         j.note_to_model = Some("done needs a check".into());
-        let p = job_turn(&instr(), &j, Some("# primes\nprints primes"));
+        let p = job_turn(&instr(), &j, Some("# primes\nprints primes"), None);
         assert!(p.user.contains("print ten primes"));
         assert!(p.user.contains("Which language? -> python"));
         assert!(p.user.contains("1. write primes.py"));
         assert!(p.user.contains("prints primes"));
         assert!(p.user.contains("done needs a check"));
         assert!(p.user.contains("act"), "working state hints the legal moves");
+        assert!(!p.user.contains("LAST RUN"), "no last-run section when there is no note");
         let asking = Job::new("primes", "g", false, "u");
-        assert!(job_turn(&[], &asking, None).user.contains("no blueprint yet"));
-        assert!(job_turn(&[], &asking, None).user.contains("ask"));
+        assert!(job_turn(&[], &asking, None, None).user.contains("no blueprint yet"));
+        assert!(job_turn(&[], &asking, None, None).user.contains("ask"));
+    }
+
+    #[test]
+    fn last_run_note_is_shown_with_the_fix_first_rule() {
+        let j = Job::new("primes", "g", true, "u");
+        let p = job_turn(&[], &j, None, Some("goal: print primes\nfailed at plan step 2\nlast error: NameError: prmes"));
+        assert!(p.user.contains("LAST RUN"));
+        assert!(p.user.contains("NameError: prmes"));
+        assert!(p.user.contains("Fix this first"), "{}", p.user);
     }
 
     #[test]
@@ -1071,7 +1081,7 @@ mod tests {
         assert!(!s.contains("detail-2"), "old details are dropped: {s}");
         assert!(s.contains("detail-8"), "recent details are kept: {s}");
         let big = "x".repeat(10_000);
-        let p = job_turn(&[], &j, Some(&big));
+        let p = job_turn(&[], &j, Some(&big), None);
         assert!(p.user.len() < 6_000, "blueprint must be capped at 3000 chars: {}", p.user.len());
     }
 }
@@ -1131,7 +1141,7 @@ pub fn summarise_steps(job: &Job) -> String {
     if out.is_empty() { "(nothing done yet)".into() } else { out }
 }
 
-pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>) -> Prompt {
+pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, last_run: Option<&str>) -> Prompt {
     let answers = if job.answers.is_empty() { "(none)".into() } else {
         job.answers.iter().map(|(q, a)| format!("- {q} -> {a}")).collect::<Vec<_>>().join("\n")
     };
@@ -1148,17 +1158,19 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>) -> 
         _ => "Legal moves now: act (one action for the plan step it serves), replan, done (with a check action), give_up (say what was missing).",
     };
     let note = job.note_to_model.as_deref().map(|n| format!("\n\nNote from the executor: {n}")).unwrap_or_default();
+    // The bounded last-run note (1b spec §6.6): fix first, prove it, then the goal.
+    let last = last_run.map(|l| format!("\n\nLAST RUN in this project ended badly:\n{}\nFix this first and prove it with a check, then carry on with the goal.", l.chars().take(1500).collect::<String>())).unwrap_or_default();
     let mode = if job.creative { "creative (do not ask; decide yourself)" } else { "ask" };
     let user = format!(
-        "Standing instructions:\n{}\n\nProject: {} (its folder is the working directory)\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}\n\nBLUEPRINT.md:\n{}\n\nSteps so far:\n{}{}\n\n{}",
-        join_instructions(instructions), job.project, job.goal, mode, job.understood, answers, plan, bp, summarise_steps(job), note, hint
+        "Standing instructions:\n{}\n\nProject: {} (its folder is the working directory)\nGoal: {}\nMode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}\n\nBLUEPRINT.md:\n{}{}\n\nSteps so far:\n{}{}\n\n{}",
+        join_instructions(instructions), job.project, job.goal, mode, job.understood, answers, plan, bp, last, summarise_steps(job), note, hint
     );
     Prompt { system: SYSTEM.into(), user }
 }
 ```
 Add `pub mod prompt;` to `lib.rs`.
 
-- [ ] **Step 4: Run** — `cargo test -p aios-core` → 12 pass.
+- [ ] **Step 4: Run** — `cargo test -p aios-core` → 13 pass.
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -1391,10 +1403,7 @@ impl<M: Model> Engine<M> {
     fn handle_inner(&mut self, text: &str) -> Result<Vec<String>, EngineError> {
         if let Some(mut job) = self.open_job() {
             if is_stop(text) {
-                job.state = State::Cancelled;
-                job.outcome_text = "stopped by the user".into();
-                self.store.save_job(&job)?;
-                return Ok(vec![format!("Stopped the job in {}.", job.project)]);
+                return self.finish(job.clone(), State::Cancelled, format!("Stopped the job in {}.", job.project));
             }
             match job.state {
                 State::WaitingAnswer => {
@@ -1447,7 +1456,7 @@ impl<M: Model> Engine<M> {
 }
 ```
 
-- [ ] **Step 5: Run** — `cargo test -p aios-core` → 16 pass.
+- [ ] **Step 5: Run** — `cargo test -p aios-core` → 17 pass.
 
 - [ ] **Step 6: Commit**
 ```bash
@@ -1684,6 +1693,26 @@ git commit -m "feat(core): engine front door — reply, start, remember, cancel,
     }
 
     #[test]
+    fn failed_job_leaves_a_last_run_note_and_the_next_job_reads_it_first() {
+        let (mut e, rec, root) = engine_with(vec![
+            start("p", true), plan(), act(1, run("python3")),
+            Move::GiveUp { reason: "the script crashes".into(), missing: "a working loop".into() },
+            // next job in the same project
+            Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "make it work".into(), creative: true, understood: "Continuing p".into(), remember: None },
+            plan(), act(1, write("BLUEPRINT.md")), done(run("python3")),
+        ], "lastrun");
+        rec.outcomes.borrow_mut().push_back(Outcome { ok: false, detail: "exit 1; stderr: NameError: prmes".into() });
+        e.handle("make p").unwrap();
+        let note = std::fs::read_to_string(root.join("p").join("LAST_RUN.md")).expect("LAST_RUN.md written by the loop");
+        assert!(note.contains("NameError: prmes") && note.contains("the script crashes") && note.contains("a working loop"), "{note}");
+        let out = e.handle("make it work").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[5].user.contains("LAST RUN") && prompts[5].user.contains("NameError: prmes"), "{}", prompts[5].user);
+        assert!(!root.join("p").join("LAST_RUN.md").exists(), "wiped once a job in the project is proven done");
+    }
+
+    #[test]
     fn a_waiting_job_resumes_from_the_store_after_a_restart() {
         let (mut e, _, root) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Language?".into()] }], "restart");
         e.handle("make it").unwrap();
@@ -1712,7 +1741,29 @@ git commit -m "feat(core): engine front door — reply, start, remember, cancel,
         job.state = state;
         job.outcome_text = text.clone();
         self.store.save_job(&job)?;
+        self.write_or_wipe_last_run(&job);
         Ok(vec![text])
+    }
+
+    /// The bounded last-run note (1b spec §6.6): written from the record when a job ends
+    /// badly, wiped when a job in the project is proven done. Never more than one file.
+    fn write_or_wipe_last_run(&self, job: &Job) {
+        let path = self.workspace(&job.project).join("LAST_RUN.md");
+        match job.state {
+            State::Done => { let _ = std::fs::remove_file(&path); }
+            State::Failed | State::Cancelled => {
+                let last_fail = job.steps.iter().rev().find(|s| !s.ok);
+                let note = format!(
+                    "goal: {}\nended: {}\nfailed at plan step: {}\nlast error: {}\n",
+                    job.goal,
+                    job.outcome_text,
+                    last_fail.map(|s| s.plan_step.to_string()).unwrap_or_else(|| "-".into()),
+                    last_fail.map(|s| s.detail.clone()).unwrap_or_else(|| "-".into()),
+                );
+                if let Err(e) = std::fs::write(&path, note) { eprintln!("core: could not write LAST_RUN.md: {e}"); }
+            }
+            _ => {}
+        }
     }
 
     fn reject(&self, job: &mut Job, why: &str) -> Result<Option<Vec<String>>, EngineError> {
@@ -1793,7 +1844,8 @@ git commit -m "feat(core): engine front door — reply, start, remember, cancel,
             if job.steps.len() >= Self::MAX_STEPS {
                 return self.finish(job, State::Failed, format!("I gave up on {}: {} steps without finishing.", job.project, Self::MAX_STEPS));
             }
-            let p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job.project).as_deref());
+            let last_run = std::fs::read_to_string(self.workspace(&job.project).join("LAST_RUN.md")).ok();
+            let p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job.project).as_deref(), last_run.as_deref());
             let mv = self.model.next_move(&p)?;
             let rejected = match (job.state, mv) {
                 (State::Asking, Move::Ask { questions }) | (State::Working, Move::Ask { questions }) if !job.creative => {
@@ -1855,7 +1907,7 @@ Add the needed imports at the top of `engine.rs`: `use crate::job::StepRecord; u
 
 Note for the implementer: `perform`'s `plan_step` for the check uses the last plan step; the `Done` arm rejects with a blueprint note *before* running the check, so an unrecorded blueprint costs no executor call.
 
-- [ ] **Step 4: Run** — `cargo test -p aios-core` → all pass (16 + 17). If a test's `prompts[i]` index is off by one because of an extra rejected turn, fix the *test's* index only after confirming the engine's behaviour matches the spec — never loosen the assertion.
+- [ ] **Step 4: Run** — `cargo test -p aios-core` → all pass (17 + 18). If a test's `prompts[i]` index is off by one because of an extra rejected turn, fix the *test's* index only after confirming the engine's behaviour matches the spec — never loosen the assertion.
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -1969,7 +2021,7 @@ git commit -m "feat(core): ai-os-chat builder front + live primes acceptance tes
 
 ## Self-review
 
-**Spec coverage (1b spec):** §2 conversation → Task 7 (front door; stop/answer/approval routing) ✓. §3 job life, modes, limits, resume → Tasks 5, 8 ✓. §4 moves and every loop rule → Tasks 3, 8 (tests named per rule) ✓; failure tails → Task 1 ✓. §5 model connection → Task 4 ✓. §6.1 instructions → Tasks 5, 6, 7 (`remember`) ✓; §6.2 blueprint read/enforce → Tasks 6, 8 ✓; §6.3 job record → Task 5 ✓; §6.4 projects → Tasks 5, 7 ✓; §6.5 replan / give_up-with-missing → Tasks 3, 8 ✓. §7 jail + shared folder + one workspace reference → Tasks 1, 7 (`executor_for`) ✓. §8 install hands → 1c, out of scope by design. §9 proof → Tasks 8 (fake) and 9 (live) ✓. `edit_file` + windowed `read_file` → Task 2 ✓.
+**Spec coverage (1b spec):** §2 conversation → Task 7 (front door; stop/answer/approval routing) ✓. §3 job life, modes, limits, resume → Tasks 5, 8 ✓. §4 moves and every loop rule → Tasks 3, 8 (tests named per rule) ✓; failure tails → Task 1 ✓. §5 model connection → Task 4 ✓. §6.1 instructions → Tasks 5, 6, 7 (`remember`) ✓; §6.2 blueprint read/enforce → Tasks 6, 8 ✓; §6.3 job record → Task 5 ✓; §6.4 projects → Tasks 5, 7 ✓; §6.6 last-run note written/read/wiped by the loop → Tasks 6, 8 ✓; §6.5 replan / give_up-with-missing → Tasks 3, 8 ✓. §7 jail + shared folder + one workspace reference → Tasks 1, 7 (`executor_for`) ✓. §8 install hands → 1c, out of scope by design. §9 proof → Tasks 8 (fake) and 9 (live) ✓. `edit_file` + windowed `read_file` → Task 2 ✓.
 
 **Placeholder scan:** none; every step has code. Task 1's fallback mount recipe is explicit.
 
