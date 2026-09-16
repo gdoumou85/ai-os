@@ -24,6 +24,7 @@ dependencies = [
 name = "aios-core"
 version = "0.0.1"
 dependencies = [
+ "aios-proto",
  "executor",
  "rusqlite",
  "serde",

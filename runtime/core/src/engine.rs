@@ -1,9 +1,11 @@
+use crate::event::describe;
 use crate::job::{Job, State, StepRecord};
 use crate::model::{Model, ModelError};
 use crate::moves::Move;
 use crate::prompt;
 use crate::snapshot::{self, RealSnapshotter, Snapshotter};
 use crate::store::{Store, StoreError};
+use aios_proto::{Event, UndoLine};
 use executor::action::Action;
 use executor::executor::{ExecOutcome, Executor};
 use executor::log::{ActionLog, LogError};
@@ -39,6 +41,10 @@ pub struct Engine<M: Model> {
     /// The files half of undo. A seam so the job-start ordering and the undo report can be
     /// proven without btrfs; the real one is `snapshot::RealSnapshotter`.
     snapshotter: Box<dyn Snapshotter>,
+    /// Where events go the moment they happen (the service's broadcast). Default: nowhere.
+    sink: Box<dyn FnMut(&Event)>,
+    /// The events of the `handle_events` call in progress, returned at its end.
+    out: Vec<Event>,
 }
 
 pub fn sanitize_project_name(raw: &str) -> String {
@@ -100,7 +106,7 @@ fn display_name(job: &Job) -> &str {
 
 impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf, snapshots_dir: PathBuf) -> Self {
-        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir, snapshotter: Box::new(RealSnapshotter) }
+        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir, snapshotter: Box::new(RealSnapshotter), sink: Box::new(|_| {}), out: vec![] }
     }
 
     /// Swap the files half of undo. Tests only in practice; kept off `new` so the six call
@@ -108,6 +114,18 @@ impl<M: Model> Engine<M> {
     pub fn with_snapshotter(mut self, s: Box<dyn Snapshotter>) -> Self {
         self.snapshotter = s;
         self
+    }
+
+    /// Hand every event to `sink` as it happens — what the service broadcasts from.
+    pub fn with_sink(mut self, sink: Box<dyn FnMut(&Event)>) -> Self {
+        self.sink = sink;
+        self
+    }
+
+    /// One event out: to the sink now, and onto this call's list for `handle_events`.
+    fn emit(&mut self, ev: Event) {
+        (self.sink)(&ev);
+        self.out.push(ev);
     }
 
     pub fn housekeeping_dir(&self) -> &Path { &self.housekeeping_dir }
@@ -143,22 +161,36 @@ impl<M: Model> Engine<M> {
         std::fs::read_to_string(self.workspace(job).join("BLUEPRINT.md")).ok()
     }
 
-    /// The only entry point: one user message in, the lines to show the user out.
+    /// One user message in, the lines to show the user out — the terminal's view of
+    /// `handle_events`.
     pub fn handle(&mut self, text: &str) -> Result<Vec<String>, EngineError> {
+        Ok(self.handle_events(text)?.iter().flat_map(crate::event::lines).collect())
+    }
+
+    /// The same, as typed events; each one reached the sink as it happened.
+    pub fn handle_events(&mut self, text: &str) -> Result<Vec<Event>, EngineError> {
         self.store.push_message("user", text)?;
-        let out = self.handle_inner(text)?;
-        for line in &out { self.store.push_message("assistant", line)?; }
+        self.out.clear();
+        let r = self.handle_inner(text);
+        // The events already reached the sink (and every client) even when `r` is an error, so the
+        // conversation history must hold them too — record before propagating.
+        let out = std::mem::take(&mut self.out);
+        for l in out.iter().flat_map(crate::event::lines) { self.store.push_message("assistant", &l)?; }
+        r?;
         Ok(out)
     }
 
-    fn handle_inner(&mut self, text: &str) -> Result<Vec<String>, EngineError> {
+    fn handle_inner(&mut self, text: &str) -> Result<(), EngineError> {
         let open = self.open_job()?;
         // Undo is deterministic, like stop and the approvals: no model call either way. It is
         // one job at a time here too — a running job's changes are not finished being made, so
         // there is nothing coherent to put back yet.
         if is_undo(text) {
             return match open {
-                Some(_) => Ok(vec!["Finish or stop the current job first, then say undo.".into()]),
+                Some(_) => {
+                    self.emit(Event::Said { text: "Finish or stop the current job first, then say undo.".into() });
+                    Ok(())
+                }
                 None => self.undo_last(),
             };
         }
@@ -170,7 +202,8 @@ impl<M: Model> Engine<M> {
                 job.state = State::Failed;
                 job.outcome_text = "This job predates the folder record; please start it again.".into();
                 self.store.save_job(&job)?;
-                return Ok(vec![job.outcome_text]);
+                self.emit(Event::Failed { job_id: job.id.clone(), text: job.outcome_text, files: vec![] });
+                return Ok(());
             }
             if is_stop(text) {
                 let message = format!("Stopped the job in {}.", display_name(&job));
@@ -200,9 +233,12 @@ impl<M: Model> Engine<M> {
         let p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &self.store.recent_messages(4)?, text);
         match self.model.next_move(&p)? {
             Move::Reply { text, remember } => {
-                let mut out = vec![text];
-                if let Some(r) = remember { self.store.add_instruction(&r)?; out.push(format!("(Noted for the future: {r})")); }
-                Ok(out)
+                self.emit(Event::Said { text });
+                if let Some(r) = remember {
+                    self.store.add_instruction(&r)?;
+                    self.emit(Event::Said { text: format!("(Noted for the future: {r})") });
+                }
+                Ok(())
             }
             Move::Start { project, new_project: _, description, goal, creative, understood, remember } => {
                 let name = sanitize_project_name(&project);
@@ -220,7 +256,8 @@ impl<M: Model> Engine<M> {
                 // refuses it rather than hand someone else's directory to the sandbox user.
                 if is_new {
                     if let Err(e) = snapshot::create_project_dir(&folder) {
-                        return Ok(vec![format!("I could not start *{name}*: {e}")]);
+                        self.emit(Event::Said { text: format!("I could not start *{name}*: {e}") });
+                        return Ok(());
                     }
                 }
                 let desc = existing.map(|p| p.description).unwrap_or(description);
@@ -242,16 +279,19 @@ impl<M: Model> Engine<M> {
                 // no row — undo says so rather than pretending the files were covered.
                 let snap = match self.snapshotter.take(Path::new(&folder), &self.snapshots_dir, &job.id) {
                     Ok(s) => s,
-                    Err(e) => return Ok(vec![format!("I could not start *{name}*: the files could not be put safe first ({e}).")]),
+                    Err(e) => {
+                        self.emit(Event::Said { text: format!("I could not start *{name}*: the files could not be put safe first ({e}).") });
+                        return Ok(());
+                    }
                 };
                 self.store.save_job(&job)?;
                 if let Some(snap) = snap {
                     self.store.add_undo(&job.id, &UndoEntry::ProjectSnapshot { folder: folder.clone(), snapshot: snap.display().to_string() })?;
                 }
-                let mut out = vec![understood];
-                if let Some(n) = note { out.push(n); }
-                out.extend(self.run_turns(job)?);
-                Ok(out)
+                // Understood first, then the note, then the turns — the order today's lines have.
+                self.emit(Event::Understood { job_id: job.id.clone(), name: display_name(&job).to_string(), text: understood, housekeeping: job.housekeeping });
+                if let Some(n) = note { self.emit(Event::Said { text: n }); }
+                self.run_turns(job)
             }
             // The machine itself: no project row, no blueprint, one shared scratch folder.
             Move::Housekeep { goal, understood, remember } => {
@@ -266,12 +306,14 @@ impl<M: Model> Engine<M> {
                 let mut job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
                 job.request = text.to_string();
                 self.store.save_job(&job)?;
-                let mut out = vec![understood];
-                if let Some(n) = note { out.push(n); }
-                out.extend(self.run_turns(job)?);
-                Ok(out)
+                self.emit(Event::Understood { job_id: job.id.clone(), name: display_name(&job).to_string(), text: understood, housekeeping: job.housekeeping });
+                if let Some(n) = note { self.emit(Event::Said { text: n }); }
+                self.run_turns(job)
             }
-            other => Ok(vec![format!("(I answered out of turn — {other:?} — please say that again.)")]),
+            other => {
+                self.emit(Event::Said { text: format!("(I answered out of turn — {other:?} — please say that again.)") });
+                Ok(())
+            }
         }
     }
 
@@ -280,13 +322,25 @@ impl<M: Model> Engine<M> {
     const MAX_REJECTIONS: u32 = 2;
     const MAX_REPLANS: u32 = 5;
 
-    /// Mark a job finished (done/failed/cancelled) and report the one line that explains it.
-    fn finish(&self, mut job: Job, state: State, text: String) -> Result<Vec<String>, EngineError> {
+    /// Mark a job finished (done/failed/cancelled) and say in one line what it came to.
+    fn finish(&mut self, mut job: Job, state: State, text: String) -> Result<(), EngineError> {
         job.state = state;
         job.outcome_text = text.clone();
         self.store.save_job(&job)?;
         self.write_or_wipe_last_run(&job);
-        Ok(vec![text])
+        let job_id = job.id.clone();
+        // `files` is the rail's "what changed" list — Task 3 fills it.
+        let ev = match state {
+            State::Done => {
+                let check = job.steps.last().map(|s| format!("{}: {}", describe(&s.action), if s.ok { "ok" } else { "failed" }));
+                Event::Done { job_id, text, check, files: vec![] }
+            }
+            State::Cancelled => Event::Stopped { job_id, text, files: vec![] },
+            // `finish` is only ever called with done/cancelled/failed; anything else ended badly.
+            _ => Event::Failed { job_id, text, files: vec![] },
+        };
+        self.emit(ev);
+        Ok(())
     }
 
     /// "Undo that": put back everything the most recent finished job changed, newest change
@@ -294,16 +348,21 @@ impl<M: Model> Engine<M> {
     ///
     /// A reversal that fails is reported and marked applied all the same: it must not be retried
     /// blindly the next time the user says undo, and every other row still runs.
-    fn undo_last(&mut self) -> Result<Vec<String>, EngineError> {
+    fn undo_last(&mut self) -> Result<(), EngineError> {
         let job = match self.store.last_undoable_job()? {
             Some(j) => j,
-            None => return Ok(vec!["Nothing left to undo.".into()]),
+            None => {
+                self.emit(Event::Said { text: "Nothing left to undo.".into() });
+                return Ok(());
+            }
         };
         let rows = self.store.unapplied_undo(&job.id)?;
         // One executor for the whole reversal, like one job's worth of work: `executor_for`
         // opens the action log, which is not something to do once per row.
         let exec = self.executor_for(&job)?;
-        let mut out = vec![format!("Undoing the last job ({}):", display_name(&job))];
+        // One card for the whole reversal: every row's sentence, then whatever it could not cover.
+        let mut lines: Vec<UndoLine> = vec![];
+        let mut notes: Vec<String> = vec![];
         for (row_id, entry) in rows {
             // Settings and snapshots are the engine's own: no worker holds either. Everything
             // else was done by the privileged hand, so the privileged hand puts it back.
@@ -330,26 +389,28 @@ impl<M: Model> Engine<M> {
                     eprintln!("core: failed to log an undo: {e}");
                 }
             }
-            out.push(match result {
-                Ok(()) => entry.describe(),
-                Err(detail) => format!("Could not undo: {} — left as is ({detail})", entry.describe()),
+            lines.push(match result {
+                Ok(()) => UndoLine { text: entry.describe(), ok: true },
+                Err(detail) => UndoLine { text: format!("Could not undo: {} — left as is ({detail})", entry.describe()), ok: false },
             });
             // The change is already put back, so a store that cannot record it is the end of the
             // run — but the user still gets every line earned so far rather than an error page.
             if let Err(e) = self.store.mark_undo_applied(row_id) {
-                out.push(format!("Undo stopped early: {e}"));
-                return Ok(out);
+                notes.push(format!("Undo stopped early: {e}"));
+                self.emit(Event::Undone { job_id: job.id.clone(), name: display_name(&job).to_string(), lines, notes });
+                return Ok(());
             }
         }
-        out.push("Not covered: unsaved work in open programs; files written outside the project; a package version the archive no longer carries (a reinstall takes the current one).".into());
+        notes.push("Not covered: unsaved work in open programs; files written outside the project; a package version the archive no longer carries (a reinstall takes the current one).".into());
         // A plain project folder (it predates 1c, or the filesystem is not btrfs) never had a
         // snapshot taken, so its files were not covered. Asked of the folder itself rather than
         // of the rows: an undo run that has already put the snapshot back has no row left to
         // read, and would otherwise start claiming the files were never covered.
         if !job.housekeeping && !snapshot::is_subvolume(Path::new(&job.folder)) {
-            out.push(format!("Files in *{}* were not covered: the project predates undo.", job.project));
+            notes.push(format!("Files in *{}* were not covered: the project predates undo.", job.project));
         }
-        Ok(out)
+        self.emit(Event::Undone { job_id: job.id.clone(), name: display_name(&job).to_string(), lines, notes });
+        Ok(())
     }
 
     /// The bounded last-run note (1b spec §6.6): written from the record when a job ends
@@ -396,15 +457,17 @@ impl<M: Model> Engine<M> {
         Ok(Outcome::ok(format!("setting {key} = {value}")).with_undo(UndoEntry::Setting { key: key.into(), previous }))
     }
 
-    fn reject(&self, job: &mut Job, why: &str) -> Result<Option<Vec<String>>, EngineError> {
+    /// `true` means the job stopped here (it gave up) and the caller must return.
+    fn reject(&mut self, job: &mut Job, why: &str) -> Result<bool, EngineError> {
         job.rejections += 1;
         job.note_to_model = Some(format!("your last move was rejected: {why}"));
         if job.rejections >= Self::MAX_REJECTIONS {
             let text = format!("I gave up on {}: I kept answering in a way the system could not accept ({why}).", display_name(job));
-            return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
+            self.finish(job.clone(), State::Failed, text)?;
+            return Ok(true);
         }
         self.store.save_job(job)?;
-        Ok(None)
+        Ok(false)
     }
 
     /// I5: matching by file name alone let `docs/BLUEPRINT.md` satisfy the gate, even though
@@ -421,14 +484,14 @@ impl<M: Model> Engine<M> {
     }
 
     /// Run one action through the executor's door and record what happened on the job.
-    /// Returns the lines to show the user if the job must stop here (waiting for OK / gave up).
+    /// `true` means the job must stop here (waiting for OK / gave up) and the caller must return.
     ///
     /// `is_check`: a `done` move's proof action is exempt from the identical-action dedup
     /// below — a check is meant to be re-run verbatim after a fix elsewhere (that's the whole
     /// point of a check), unlike an `act` step repeating the same failed command with nothing
     /// changed. Both still count toward MAX_FAILS_PER_STEP, which caps a stuck check the same
     /// way it caps a stuck act.
-    fn perform(&self, job: &mut Job, plan_step: usize, action: Action, approved: bool, is_check: bool) -> Result<Option<Vec<String>>, EngineError> {
+    fn perform(&mut self, job: &mut Job, plan_step: usize, action: Action, approved: bool, is_check: bool) -> Result<bool, EngineError> {
         let key = serde_json::to_string(&action).unwrap_or_default();
         // A human's "no" never expires — not cleared by a later file write, unlike failed_actions.
         if job.declined_actions.contains(&key) {
@@ -452,6 +515,7 @@ impl<M: Model> Engine<M> {
             job.rejections = 0;
             job.note_to_model = None;
             job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
+            self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
             if outcome.ok {
                 if let Some(entry) = outcome.undo { self.store.add_undo(&job.id, &entry)?; }
             } else {
@@ -459,25 +523,29 @@ impl<M: Model> Engine<M> {
                 let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
                 if fails >= Self::MAX_FAILS_PER_STEP {
                     let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", display_name(job), outcome.detail);
-                    return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
+                    self.finish(job.clone(), State::Failed, text)?;
+                    return Ok(true);
                 }
             }
             self.store.save_job(job)?;
-            return Ok(None);
+            return Ok(false);
         }
         match exec.execute(&job.id, &action, approved)? {
             ExecOutcome::Blocked(reason) => {
                 job.rejections = 0; // a legal act needing approval is a valid move, not a rejection
+                let what = describe(&action);
                 job.pending_action = Some((plan_step, action));
                 job.pending_reason = reason.clone();
                 job.state = State::WaitingApproval;
                 self.store.save_job(job)?;
-                Ok(Some(vec![format!("Needs your OK: {reason}. Say yes to allow it, or anything else to refuse.")]))
+                self.emit(Event::NeedsOk { job_id: job.id.clone(), what, why: reason });
+                Ok(true)
             }
             ExecOutcome::Ran(outcome) => {
                 job.rejections = 0;
                 job.note_to_model = None;
                 job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
+                self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
                 // Not gated on `outcome.ok`: a worker records an undo entry only when it really
                 // changed something, and a change made by an action that then failed is exactly
                 // the one the user most needs put back.
@@ -502,16 +570,17 @@ impl<M: Model> Engine<M> {
                     let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
                     if fails >= Self::MAX_FAILS_PER_STEP {
                         let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", display_name(job), outcome.detail);
-                        return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
+                        self.finish(job.clone(), State::Failed, text)?;
+                        return Ok(true);
                     }
                 }
                 self.store.save_job(job)?;
-                Ok(None)
+                Ok(false)
             }
         }
     }
 
-    fn resume_after_approval(&mut self, mut job: Job, approved: bool, text: &str) -> Result<Vec<String>, EngineError> {
+    fn resume_after_approval(&mut self, mut job: Job, approved: bool, text: &str) -> Result<(), EngineError> {
         let (plan_step, action) = match job.pending_action.take() { Some(p) => p, None => { job.state = State::Working; return self.run_turns(job); } };
         job.state = State::Working;
         if job.steps.len() >= Self::MAX_STEPS {
@@ -519,7 +588,7 @@ impl<M: Model> Engine<M> {
             return self.finish(job, State::Failed, text);
         }
         if approved {
-            if let Some(stop) = self.perform(&mut job, plan_step, action, true, false)? { return Ok(stop); }
+            if self.perform(&mut job, plan_step, action, true, false)? { return Ok(()); }
         } else {
             job.note_to_model = Some(format!("the user declined that action ({}): \"{text}\". Do not repeat it; find another way or finish without it.", job.pending_reason));
             job.declined_actions.push(serde_json::to_string(&action).unwrap_or_default());
@@ -529,7 +598,7 @@ impl<M: Model> Engine<M> {
     }
 
     /// Turn after turn until the job is done, failed, or needs the user (1b spec §3–§4).
-    fn run_turns(&mut self, mut job: Job) -> Result<Vec<String>, EngineError> {
+    fn run_turns(&mut self, mut job: Job) -> Result<(), EngineError> {
         loop {
             if job.steps.len() >= Self::MAX_STEPS {
                 let text = format!("I gave up on {}: {} steps without finishing.", display_name(&job), Self::MAX_STEPS);
@@ -548,7 +617,8 @@ impl<M: Model> Engine<M> {
                         job.rejections = 0;
                         job.note_to_model = None;
                         self.store.save_job(&job)?;
-                        return Ok(questions.iter().map(|q| format!("Question: {q}")).collect());
+                        self.emit(Event::NeedsAnswer { job_id: job.id.clone(), questions });
+                        return Ok(());
                     }
                 }
                 (_, Move::Ask { .. }) if job.creative => Some("this job is in creative mode: decide yourself instead of asking".to_string()),
@@ -558,7 +628,9 @@ impl<M: Model> Engine<M> {
                         Some("plan needs at least one step".to_string())
                     } else {
                         job.plan = steps; job.state = State::Working; job.rejections = 0; job.note_to_model = None;
-                        self.store.save_job(&job)?; None
+                        self.store.save_job(&job)?;
+                        self.emit(Event::Plan { job_id: job.id.clone(), steps: job.plan.clone() });
+                        None
                     }
                 }
                 (State::Working, Move::Plan { .. }) => Some("you already have a plan; use replan to change it".to_string()),
@@ -570,10 +642,12 @@ impl<M: Model> Engine<M> {
                     }
                     job.plan = steps; job.rejections = 0;
                     job.note_to_model = Some(format!("plan revised because: {why}"));
-                    self.store.save_job(&job)?; None
+                    self.store.save_job(&job)?;
+                    self.emit(Event::Plan { job_id: job.id.clone(), steps: job.plan.clone() });
+                    None
                 }
                 (State::Working, Move::Act { step, action }) => {
-                    if let Some(stop) = self.perform(&mut job, step, action, false, false)? { return Ok(stop); }
+                    if self.perform(&mut job, step, action, false, false)? { return Ok(()); }
                     None
                 }
                 (State::Working, Move::Done { summary, check }) => {
@@ -601,17 +675,13 @@ impl<M: Model> Engine<M> {
                         Some(why)
                     } else {
                         let key_step = job.plan.len().max(1);
-                        match self.perform(&mut job, key_step, check, false, true)? {
-                            Some(stop) => return Ok(stop),
-                            None => {
-                                if job.steps.last().map(|s| s.ok).unwrap_or(false) {
-                                    return self.finish(job, State::Done, summary);
-                                }
-                                job.note_to_model = Some("your check failed — read its output above, fix the work, then say done again with a check".to_string());
-                                self.store.save_job(&job)?;
-                                None
-                            }
+                        if self.perform(&mut job, key_step, check, false, true)? { return Ok(()); }
+                        if job.steps.last().map(|s| s.ok).unwrap_or(false) {
+                            return self.finish(job, State::Done, summary);
                         }
+                        job.note_to_model = Some("your check failed — read its output above, fix the work, then say done again with a check".to_string());
+                        self.store.save_job(&job)?;
+                        None
                     }
                 }
                 (State::Working, Move::GiveUp { reason, missing }) => {
@@ -622,7 +692,7 @@ impl<M: Model> Engine<M> {
                 (_, Move::Reply { .. }) | (_, Move::Start { .. }) | (_, Move::Housekeep { .. }) => Some("a job is running: use ask, plan, act, replan, done or give_up".to_string()),
             };
             if let Some(why) = rejected {
-                if let Some(stop) = self.reject(&mut job, &why)? { return Ok(stop); }
+                if self.reject(&mut job, &why)? { return Ok(()); }
             }
         }
     }
@@ -1522,5 +1592,85 @@ mod tests {
         let blocked: i64 = conn.query_row("SELECT COUNT(*) FROM actions WHERE outcome LIKE 'blocked:%'", [], |r| r.get(0)).unwrap();
         assert_eq!(blocked, 0);
         let _ = std::fs::remove_file(&log_path);
+    }
+
+    use aios_proto::Event;
+    use crate::testing::events_of;
+
+    #[test]
+    fn chat_emits_said() {
+        let (mut e, _, _) = engine_with(vec![Move::Reply { text: "A prime is…".into(), remember: Some("use python3".into()) }], "ev-said");
+        let ev = events_of(&mut e, "what's a prime?");
+        assert_eq!(ev, vec![Event::Said { text: "A prime is…".into() }, Event::Said { text: "(Noted for the future: use python3)".into() }]);
+    }
+
+    #[test]
+    fn a_job_emits_understood_plan_steps_and_done_with_the_check() {
+        // With the fake snapshotter, so the finished job leaves an undo row and
+        // `last_undoable_job` can hand this test the id the events must carry.
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, _) = crate::testing::engine_with_snapshots(happy_path(), "ev-job", &snap);
+        let ev = events_of(&mut e, "make it, decide yourself");
+        let job_id = e.store.last_undoable_job().unwrap().unwrap().id;
+        assert!(matches!(&ev[0], Event::Understood { job_id: j, name, text, housekeeping: false } if j == &job_id && name == "p" && text == "Starting a new project p"));
+        assert!(matches!(&ev[1], Event::Plan { steps, .. } if steps == &vec!["write it".to_string(), "run it".to_string()]));
+        let steps: Vec<&Event> = ev.iter().filter(|e| matches!(e, Event::Step { .. })).collect();
+        assert_eq!(steps.len(), 4, "3 acts + the check: {ev:?}");
+        assert!(matches!(steps[0], Event::Step { plan_step: 1, text, ok: true, .. } if text == "wrote BLUEPRINT.md"));
+        assert!(matches!(steps[3], Event::Step { text, .. } if text == "ran python3"));
+        assert!(matches!(ev.last().unwrap(), Event::Done { text, check: Some(c), .. } if text == "finished" && c == "ran python3: ok"));
+    }
+
+    #[test]
+    fn events_stream_to_the_sink_as_they_happen() {
+        use std::cell::RefCell; use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+        let s2 = seen.clone();
+        let (e, _, _) = engine_with(happy_path(), "ev-sink");
+        let mut e = e.with_sink(Box::new(move |ev| s2.borrow_mut().push(serde_json::to_string(ev).unwrap())));
+        let ev = e.handle_events("make it").unwrap();
+        assert_eq!(seen.borrow().len(), ev.len());
+        assert!(seen.borrow()[0].starts_with("{\"kind\":\"understood\""));
+    }
+
+    #[test]
+    fn questions_and_approvals_are_events() {
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Which language?".into()] }], "ev-ask");
+        let ev = events_of(&mut e, "make it");
+        assert!(matches!(ev.last().unwrap(), Event::NeedsAnswer { questions, .. } if questions == &vec!["Which language?".to_string()]));
+
+        let (mut e, _, _) = engine_with(vec![start("p", true), plan(), act(1, Action::HttpPost { url: "https://x".into(), body: "b".into() })], "ev-ok");
+        let ev = events_of(&mut e, "post it");
+        assert!(matches!(ev.last().unwrap(), Event::NeedsOk { what, why, .. } if what == "http post to https://x" && !why.is_empty()), "{ev:?}");
+    }
+
+    #[test]
+    fn stop_and_give_up_are_events_and_lines_match_the_old_prose() {
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()] }], "ev-stop");
+        e.handle("make p").unwrap();
+        let ev = events_of(&mut e, "stop");
+        assert!(matches!(&ev[0], Event::Stopped { text, .. } if text == "Stopped the job in p."));
+        assert_eq!(crate::event::lines(&ev[0]), vec!["Stopped the job in p.".to_string()]);
+
+        let (mut e, _, _) = engine_with(vec![start("p", true), plan(), Move::GiveUp { reason: "no compiler".into(), missing: "gcc".into() }], "ev-giveup");
+        let ev = events_of(&mut e, "make p");
+        assert!(matches!(ev.last().unwrap(), Event::Failed { text, .. } if text == "I gave up on p: no compiler. Missing: gcc."));
+    }
+
+    #[test]
+    fn describe_names_every_action_in_plain_words() {
+        use crate::event::describe;
+        use executor::action::{Manager, ServiceDo};
+        assert_eq!(describe(&write("a.py")), "wrote a.py");
+        assert_eq!(describe(&Action::EditFile { path: "a.py".into(), find: "x".into(), replace: "y".into() }), "edited a.py");
+        assert_eq!(describe(&Action::ReadFile { path: "a.py".into(), from_line: None, lines: None }), "read a.py");
+        assert_eq!(describe(&Action::RunCommand { argv: vec!["python3".into(), "a.py".into()] }), "ran python3 a.py");
+        assert_eq!(describe(&Action::HttpPost { url: "https://x".into(), body: "".into() }), "http post to https://x");
+        assert_eq!(describe(&Action::Install { packages: vec!["cowsay".into()] }), "installed cowsay");
+        assert_eq!(describe(&Action::Remove { packages: vec!["cowsay".into()] }), "removed cowsay");
+        assert_eq!(describe(&Action::Service { name: "nginx".into(), action: ServiceDo::Restart }), "service nginx restart");
+        assert_eq!(describe(&Action::MakeDir { path: "/data/work".into() }), "made folder /data/work");
+        assert_eq!(describe(&Action::FetchPackages { manager: Manager::Pip, packages: vec!["tabulate".into()] }), "fetched tabulate with pip");
+        assert_eq!(describe(&Action::SetSetting { key: "projects_root".into(), value: "/data/work".into() }), "set projects_root = /data/work");
     }
 }
