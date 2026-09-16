@@ -145,65 +145,143 @@ Live acceptance, no human, qwen3.5:9b, in this order:
 
 All of it inside the `ai-os` distro as user `ai`, `runtime/` as the working directory, Ollama up with `qwen3.5:9b`.
 
-`cargo test` (everything; the two live tests skip without `AI_OS_LIVE`):
+`cargo test 2>&1 | grep -E "^( +Running|running|test result|   Doc-tests)"` — everything; the two live tests skip without `AI_OS_LIVE`, and the build is warning-free:
 
 ```
-     Running unittests src/lib.rs (aios_core)
+     Running unittests src/lib.rs (target/debug/deps/aios_core-2698f216674a1c5b)
+running 85 tests
 test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
-     Running tests/live_1c.rs
+     Running unittests src/main.rs (target/debug/deps/ai_os_chat-e1f7f512f1c84eb3)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/live_1c.rs (target/debug/deps/live_1c-0237a372fc8c595b)
+running 1 test
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-     Running tests/live_primes.rs
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-     Running tests/snapshot_it.rs
+     Running tests/live_primes.rs (target/debug/deps/live_primes-57f7390f04ae5e82)
+running 1 test
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-     Running unittests src/lib.rs (executor)
-test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
-     Running tests/admin_integration.rs
+     Running tests/snapshot_it.rs (target/debug/deps/snapshot_it-19313ce4fcec988e)
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/executor-8e29a400eeb57364)
+running 64 tests
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running unittests src/main.rs (target/debug/deps/executor-8f54303fc6d950d5)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/admin_integration.rs (target/debug/deps/admin_integration-f141a0a17a058a3c)
+running 7 tests
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-     Running tests/sandbox_integration.rs
+     Running tests/sandbox_integration.rs (target/debug/deps/sandbox_integration-16f0894823b99626)
+running 9 tests
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests aios_core
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests executor
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-`AI_OS_SANDBOX_IT=1 cargo test -p executor` (the machine tests really run):
+`AI_OS_SANDBOX_IT=1 cargo test -p executor` (the machine tests really run), same filter:
 
 ```
-test result: ok. 63 passed; 0 failed; ... finished in 8.17s        (lib)
-test result: ok. 7 passed; 0 failed; ... finished in 4.17s         (admin_integration)
-test result: ok. 9 passed; 0 failed; ... finished in 0.37s         (sandbox_integration)
+     Running unittests src/lib.rs (target/debug/deps/executor-7780159ae869c28d)
+running 64 tests
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.15s
+     Running unittests src/main.rs (target/debug/deps/executor-424083cac5610998)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/admin_integration.rs (target/debug/deps/admin_integration-a0145212066ea07c)
+running 7 tests
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.63s
+     Running tests/sandbox_integration.rs (target/debug/deps/sandbox_integration-aaba29069491d76f)
+running 9 tests
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+   Doc-tests executor
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
 `AI_OS_SANDBOX_IT=1 cargo test -p aios-core --test snapshot_it`:
 
 ```
+running 1 test
 test a_project_subvolume_snapshots_and_restores_as_the_ai_user ... ok
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
 ```
 
-`bash runtime/admin/test-admin.sh` — 31 checks, all PASS: bad package name, apt suffix as package, trailing dash, unit path as service, protected service, protected unit suffix, path outside roots, sudoers write, shadow read, read outside roots, empty path, relative path, make-dir outside roots, sandbox cwd outside, symlink write, symlink read, symlink target untouched, pkg-list has bash, service state, write/read file, remove-file, existing mode kept, new parent dir owner, make-dir owner, remove-dir, sandbox-run uid, net=none blocked, dollar survives, games on PATH, allowlist reaches pypi, allowlist blocks example.com, venv works in jail.
+`bash runtime/admin/test-admin.sh` — 36 checks, every one PASS, exit 0:
 
-**Live acceptance** — `AI_OS_LIVE=1 cargo test -p aios-core --test live_1c -- --nocapture`, fresh `/data/ai-os-live-1c.db`, no human (the test answers "You decide." to a question and "yes" to an approval, at most four times per line, and every one of those is printed in the transcript). **All four scripts pass, 140.47s in total:**
+```
+PASS unknown verb
+PASS essential remove
+PASS runtime remove
+PASS option as package
+PASS bad package name
+PASS apt suffix as package
+PASS trailing dash
+PASS unit path as service
+PASS protected service
+PASS protected unit suffix
+PASS path outside roots
+PASS sudoers write
+PASS shadow read
+PASS read outside roots
+PASS empty path
+PASS relative path
+PASS make-dir outside roots
+PASS sandbox cwd outside
+PASS symlink write
+PASS symlink read
+PASS symlink target untouched
+PASS pkg-list has bash
+PASS service state
+PASS write/read file
+PASS remove-file
+PASS existing mode kept
+PASS new parent dir owner
+PASS make-dir owner
+PASS remove-dir
+PASS sandbox-run uid
+PASS net=none blocked
+PASS dollar survives
+PASS games on PATH
+PASS allowlist reaches pypi
+PASS allowlist blocks example.com
+PASS venv works in jail
+```
+
+**Live acceptance** — `AI_OS_LIVE=1 cargo test -p aios-core --test live_1c -- --nocapture`, fresh `/data/ai-os-live-1c.db`, `/data/work` cleared and asserted gone first, no human: the test answers "You decide." to a question (printed in the transcript) and **never** approves anything — a job that waits for an approval fails the run, because all four scripts are Auto work.
+
+**All four scripts passed, 140.47s in total**, on the build of 2026-09-16:
 
 | script | steps | seconds | what was asserted on the machine |
 |---|---|---|---|
 | 1a the projects folder | 3 | 20.1 | `/data/work` exists and `projects_root` = `/data/work` |
 | 1b a project under it | 5 | 22.5 | `/data/work/prime-script/BLUEPRINT.md` exists |
 | 2 install cowsay | 5 | 18.6 | `pkg-list` through the wrapper contains `cowsay` |
-| 3 undo ×3 | — | 2.2 / 0.1 / 0.1 | cowsay gone, project files restored, `projects_root` back to unset |
+| 3 undo ×3 | — | 2.2 / 0.1 / 0.1 | cowsay gone, project files restored (the marker written after the job is gone with them), `projects_root` back to unset |
 | 4 fetch a pip package | 10 | 76.6 | a `fetch_packages` row in the action log whose outcome starts `ok:` |
 
-The reversal report, verbatim from the run: "Removed the 1 packages installed (cowsay)" / "Restored the files of /data/work/prime-script from before the job" / "Setting projects_root back to /data/work", "Cleared setting projects_root", "Could not undo: Removed the folder /data/work — left as is (rmdir: failed to remove '/data/work': Directory not empty)". That last line is §11's "removed **if empty**" being honest: undo restores a project's files but never removes the project folder, so the folder the primes job left inside `/data/work` keeps it alive. Afterwards `/data` carries no `/data/work` content but the two project folders (`/data/work/prime-script`, `/data/projects/primes`), and cowsay is not installed.
+The reversal report, verbatim from that run: "Removed the 1 packages installed (cowsay)" / "Restored the files of /data/work/prime-script from before the job" / "Setting projects_root back to /data/work", "Cleared setting projects_root", "Could not undo: Removed the folder /data/work — left as is (rmdir: failed to remove '/data/work': Directory not empty)". That last line is §11's "removed **if empty**" being honest: undo restores a project's files but never removes the project folder, so what the primes job left inside `/data/work` keeps the folder alive. After the run `/data` holds no cowsay and no `projects_root` setting; `/data/work/prime-script` and `/data/projects/primes` (the latter from the 1b live test) are the only project folders left.
 
-**What the live runs changed** (seven runs; each finding is a product gap the 9B walked into, not a test that was loosened):
+**Open, as of review round 1 (2026-09-16):** the housekeeping prompt line that made script 1a land reliably ("make the folder, set the setting, then done") was replaced by a conditional one on review, and six re-runs since have stopped at script 1a with `/data/work` made but `projects_root` never set — the 9B plans from the goal it wrote at the front door ("create a folder at /data/work for project storage"), which no longer trips the condition. The wording is the open question; nothing else in the acceptance changed.
 
-1. **`mkdir` instead of `make_dir`.** Run 1: the model ran `run_command mkdir -p /data/work`, read the jail's "Read-only file system" as the machine's truth, and gave up on a machine "without root". `SYSTEM` now names `make_dir` for a folder outside the working directory.
-2. **A blueprint in a housekeeping job.** Runs 2–3: told only "no project, no blueprint", it wrote and then re-read a `BLUEPRINT.md` in the folder it had just made, burning the whole job on approvals. The housekeeping header now forbids it by name, says the job is not done until the setting is set, and gives the order (folder, setting, done with `make_dir` as the check).
-3. **Absolute paths for the project's own files.** Run 3: inside its project it wrote `/data/work/BLUEPRINT.md` — one level above its workspace — so every write needed an approval and nothing landed in the project. `SYSTEM` now says the project's own files are named relative to the working directory.
-4. **`apt` as a free command.** Run 4: nine steps of `apt-get`, `pip3`, `ensurepip`, all failing with permission errors that convinced it the machine has no root. The executor now refuses a package manager's *changing* verbs (`rules::wrong_hand`) before they reach the sandbox and names the hand that does the job; read-only uses (`apt list --installed`, `cargo build`) stay free. The very next run installed cowsay through the `install` hand on the second step.
-5. **`/usr/games` was not on the sandbox's PATH**, so the cowsay it had just installed could not be run to prove it (`Failed to find executable cowsay`). The wrapper sets PATH for `sandbox-run` now, with a check in `test-admin.sh`.
-6. **A successful `make_dir` said nothing.** The wrapper prints nothing, so the step's detail was empty; the model went looking for other proof. The outcome now reads `/data/work exists`.
-7. **The jail's blindness read as the machine's truth.** `ls -ld /data/work` answers "No such file or directory" because `/data` is an empty tmpfs inside the jail. A failed `run_command` whose arguments name a path that really exists outside the workspace now carries that fact in its detail; and a workspace-relative program (`.venv/bin/python3`) is made absolute before it goes out, which is what let script 4 finish.
+**What the live runs changed** — fifteen runs in all, and every failure named something missing in the product, never in the test:
 
-Still true of the 9B and recorded rather than papered over: it asks a question or two even in creative mode (the test answers "You decide." once), and it will repeat an identical failing check up to the three-strike cap before it replans.
+1. **`mkdir` instead of `make_dir`.** The model ran `run_command mkdir -p /data/work`, read the jail's "Read-only file system" as the machine's truth, and gave up on a machine "without root". `SYSTEM` names `make_dir`, and — after the model reached for `mkdir` again anyway — the executor refuses `mkdir`/`rmdir` on an absolute path and names the hand instead (`rules::wrong_hand`).
+2. **A blueprint in a housekeeping job.** Told only "no project, no blueprint", it wrote and then re-read a `BLUEPRINT.md` in the folder it had just made, burning the job on approvals. The housekeeping header forbids it by name.
+3. **Absolute paths for the project's own files.** Inside its project it wrote `/data/work/BLUEPRINT.md` — one level above its workspace — so every write needed an approval and nothing landed in the project. `SYSTEM` now says the project's own files are named relative to the working directory.
+4. **`apt` as a free command.** Nine steps of `apt-get`, `pip3`, `ensurepip`, all failing with permission errors that convinced it the machine has no root. `rules::wrong_hand` refuses a package manager's changing verbs (and looks past a leading `sudo`/`env`) before they reach the sandbox, naming the hand that does the job; read-only uses (`apt list --installed`, `cargo build`) stay free. The next run installed cowsay through the `install` hand on the step right after the refusal.
+5. **`/usr/games` was not on the sandbox's PATH**, so the cowsay it had just installed could not be run to prove it. The wrapper sets PATH for `sandbox-run` now, with a check in `test-admin.sh`.
+6. **A successful `make_dir` said nothing.** The wrapper prints nothing, so the step's detail was empty and the model went looking for other proof. The outcome now reads `/data/work exists`.
+7. **The jail's blindness read as the machine's truth.** `ls -ld /data/work` answers "No such file or directory" because `/data` is an empty tmpfs inside the jail. A failed `run_command` whose arguments name a path under the AI roots that really exists now carries that fact in its detail (`worker::hidden_note`).
+8. **A workspace-relative program never ran.** `.venv/bin/python3 prime-script.py` came back "Failed to find executable": systemd resolves a unit's program against `/` (§13 item 14), which the fetch step already worked around privately. `worker::absolute_program` now does it for `run_command` too — a program with a slash resolves against the workspace, a bare name stays on PATH, exactly like a shell.
+9. **The front door summarises the standing half of a request away.** "Prepare a folder where all my projects will live from now on" reached the job as "create a folder at /data/work for project storage", and the job cannot act on what it never saw. The front-door prompt now says the goal carries the whole of what the user asked for.
+
+Still true of the 9B and recorded rather than papered over: it asks a question or two even in creative mode (the test answers "You decide." once), and it will repeat an identical failing *check* up to the three-strike cap — a check is deliberately exempt from the identical-action dedup (engine `perform`'s `is_check`, and the 1b test that pins it), so a check that keeps failing with nothing changed in between still costs a job three strikes.
 
 ## 12. Out of scope, carried forward
 
