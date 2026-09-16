@@ -5,7 +5,7 @@ use crate::moves::Move;
 use crate::prompt;
 use crate::snapshot::{self, RealSnapshotter, Snapshotter};
 use crate::store::{Store, StoreError};
-use aios_proto::{ChangedFile, Event, FileKind, UndoLine};
+use aios_proto::{ChangedFile, Event, FileKind, JobState, StepView, UndoLine, Waiting};
 use executor::action::Action;
 use executor::executor::{ExecOutcome, Executor};
 use executor::log::{ActionLog, LogError};
@@ -113,6 +113,7 @@ pub fn is_yes(text: &str) -> bool {
 /// A plain "no" to an action waiting for the user's OK — anything else (a question, "why",
 /// "hmm") is not a refusal, it goes to the model instead (1d §2.1).
 pub fn is_refusal(text: &str) -> bool {
+    if text.contains('?') { return false; }
     const NO_WORDS: [&str; 8] = ["no", "n", "don't", "dont", "no thanks", "refuse", "not that", "cancel that"];
     let t = normalize(text);
     NO_WORDS.contains(&t.as_str()) || matches!(words(&t).next(), Some(first) if NO_WORDS.contains(&first))
@@ -176,6 +177,23 @@ impl<M: Model> Engine<M> {
     /// (a corrupt row, a locked file) looked exactly like "no job open", so the engine would
     /// silently start a fresh one over it. Propagate instead.
     pub fn open_job(&self) -> Result<Option<Job>, EngineError> { Ok(self.store.open_job()?) }
+
+    /// The open job as a front door needs to draw it (1d §2.2).
+    pub fn state(&self) -> Result<Option<JobState>, EngineError> {
+        Ok(self.open_job()?.map(|job| JobState {
+            id: job.id.clone(),
+            name: display_name(&job).to_string(),
+            housekeeping: job.housekeeping,
+            understood: job.understood.clone(),
+            plan: job.plan.clone(),
+            steps: job.steps.iter().map(|s| StepView { plan_step: s.plan_step, text: crate::event::describe(&s.action), ok: s.ok }).collect(),
+            waiting: match (job.state, &job.pending_action) {
+                (State::WaitingAnswer, _) => Waiting::Answer { questions: job.pending_questions.clone() },
+                (State::WaitingApproval, Some((_, a))) => Waiting::Ok { what: crate::event::describe(a), why: job.pending_reason.clone() },
+                _ => Waiting::None,
+            },
+        }))
+    }
 
     /// The job's own folder, as recorded on the job — never recomputed from the project name,
     /// so moving the root (or a project) cannot redirect a job that is already running.
@@ -674,9 +692,9 @@ impl<M: Model> Engine<M> {
     }
 
     fn resume_after_approval(&mut self, mut job: Job, approved: bool, text: &str) -> Result<(), EngineError> {
+        job.ok_questions = 0;
         let (plan_step, action) = match job.pending_action.take() { Some(p) => p, None => { job.state = State::Working; return self.run_turns(job); } };
         job.state = State::Working;
-        job.ok_questions = 0;
         if job.steps.len() >= Self::MAX_STEPS {
             let text = format!("I gave up on {}: {} steps without finishing.", display_name(&job), Self::MAX_STEPS);
             return self.finish(job, State::Failed, text);
@@ -1867,6 +1885,8 @@ mod tests {
     fn refusal_words() {
         for t in ["no", "No.", "n", "don't", "dont", "no thanks", "refuse", "not that", "cancel that", "no, don't"] { assert!(is_refusal(t), "{t}"); }
         for t in ["what does it send?", "yes", "why", "hmm"] { assert!(!is_refusal(t), "{t}"); }
+        assert!(!is_refusal("no idea, what does that do?"));
+        assert!(!is_refusal("no?"));
     }
 
     /// `tag` must differ per test: `temp_root` wipes the tag's folder, and tests run in parallel.
@@ -1923,5 +1943,37 @@ mod tests {
         assert!(matches!(&ev[0], Event::Said { text } if text == "c"));
         assert!(matches!(&ev[1], Event::Said { text } if text.contains("taking that as a no")), "{ev:?}");
         assert!(matches!(ev.last().unwrap(), Event::Failed { .. }), "{ev:?}");
+    }
+
+    #[test]
+    fn state_mirrors_the_open_job_and_what_it_waits_for() {
+        use aios_proto::Waiting;
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Which language?".into()] }], "state-ans");
+        assert!(e.state().unwrap().is_none());
+        e.handle("make p").unwrap();
+        let st = e.state().unwrap().unwrap();
+        assert_eq!((st.name.as_str(), st.housekeeping, st.understood.as_str()), ("p", false, "Starting a new project p"));
+        assert_eq!(st.waiting, Waiting::Answer { questions: vec!["Which language?".into()] });
+
+        let (e, _) = waiting_ok("state-ok");
+        let st = e.state().unwrap().unwrap();
+        assert_eq!(st.plan, vec!["write it".to_string(), "run it".to_string()]);
+        assert_eq!(st.waiting, Waiting::Ok { what: "http post to https://x".into(), why: e.open_job().unwrap().unwrap().pending_reason });
+
+        // A job left mid-work: run one to completion, then rewind the saved record to Working
+        // with its steps (the same rewind Task 4's resume test uses). `last_undoable_job` below
+        // only finds a job with an unapplied undo row, and a plain `engine_with` never takes one
+        // on this non-btrfs test filesystem (same trap Task 4's `resume` test hit) — use the
+        // working `FakeSnapshotter` fixture, matching that precedent.
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, _) = crate::testing::engine_with_snapshots(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "state-steps", &snap);
+        e.handle("make p").unwrap();
+        let mut job = e.store.last_undoable_job().unwrap().unwrap();
+        job.state = State::Working; job.steps.truncate(1); job.outcome_text.clear();
+        e.store.save_job(&job).unwrap();
+        let st = e.state().unwrap().unwrap();
+        assert_eq!(st.steps.len(), 1);
+        assert_eq!((st.steps[0].plan_step, st.steps[0].text.as_str(), st.steps[0].ok), (1, "wrote BLUEPRINT.md", true));
+        assert_eq!(st.waiting, Waiting::None);
     }
 }
