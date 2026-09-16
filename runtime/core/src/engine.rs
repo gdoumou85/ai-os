@@ -110,6 +110,13 @@ pub fn is_yes(text: &str) -> bool {
     };
     result
 }
+/// A plain "no" to an action waiting for the user's OK — anything else (a question, "why",
+/// "hmm") is not a refusal, it goes to the model instead (1d §2.1).
+pub fn is_refusal(text: &str) -> bool {
+    const NO_WORDS: [&str; 8] = ["no", "n", "don't", "dont", "no thanks", "refuse", "not that", "cancel that"];
+    let t = normalize(text);
+    NO_WORDS.contains(&t.as_str()) || matches!(words(&t).next(), Some(first) if NO_WORDS.contains(&first))
+}
 pub fn is_stop(text: &str) -> bool {
     const STOP_PHRASES: [&str; 10] = [
         "stop", "cancel", "leave it", "abort", "never mind", "forget it",
@@ -219,13 +226,27 @@ impl<M: Model> Engine<M> {
     pub fn resume(&mut self) -> Result<Vec<Event>, EngineError> {
         self.out.clear();
         let job = match self.open_job()? { Some(j) if matches!(j.state, State::Working | State::Planning | State::Asking) => j, _ => return Ok(vec![]) };
-        let r = self.run_turns(job);
+        // Same pre-1c guard `handle_inner` applies: a job with no recorded folder must not reach
+        // the model, here either.
+        let r = if job.folder.is_empty() { self.fail_predates_folder(job) } else { self.run_turns(job) };
         // Same invariant as `handle_events`: the events already reached the sink even when `r`
         // is an error, so the conversation history must hold them too — record before propagating.
         let out = std::mem::take(&mut self.out);
         for l in out.iter().flat_map(crate::event::lines) { self.store.push_message("assistant", &l)?; }
         r?;
         Ok(out)
+    }
+
+    /// A job saved before 1c recorded folders has none, so every one of its actions would run in
+    /// the process's own directory. Fail it on sight — no model call, and not through `finish`,
+    /// which would drop a LAST_RUN.md in that same directory. Shared by `handle_inner` and
+    /// `resume`: either can find such a job open.
+    fn fail_predates_folder(&mut self, mut job: Job) -> Result<(), EngineError> {
+        job.state = State::Failed;
+        job.outcome_text = "This job predates the folder record; please start it again.".into();
+        self.store.save_job(&job)?;
+        self.emit(Event::Failed { job_id: job.id.clone(), text: job.outcome_text, files: vec![] });
+        Ok(())
     }
 
     fn handle_inner(&mut self, text: &str) -> Result<(), EngineError> {
@@ -247,11 +268,7 @@ impl<M: Model> Engine<M> {
             // run in the process's own directory. Fail it on sight — no model call, and not
             // through `finish`, which would drop a LAST_RUN.md in that same directory.
             if job.folder.is_empty() {
-                job.state = State::Failed;
-                job.outcome_text = "This job predates the folder record; please start it again.".into();
-                self.store.save_job(&job)?;
-                self.emit(Event::Failed { job_id: job.id.clone(), text: job.outcome_text, files: vec![] });
-                return Ok(());
+                return self.fail_predates_folder(job);
             }
             if is_stop(text) {
                 let message = format!("Stopped the job in {}.", display_name(&job));
@@ -268,8 +285,25 @@ impl<M: Model> Engine<M> {
                     return self.run_turns(job);
                 }
                 State::WaitingApproval => {
-                    let approved = is_yes(text);
-                    return self.resume_after_approval(job, approved, text);
+                    if is_yes(text) { return self.resume_after_approval(job, true, text); }
+                    if is_refusal(text) { return self.resume_after_approval(job, false, text); }
+                    // Neither: a question. Answer it, then ask for the OK again — the action
+                    // stays exactly where it is. Bounded like every other loop the model is in.
+                    let (what, why) = match &job.pending_action {
+                        Some((_, a)) => (crate::event::describe(a), job.pending_reason.clone()),
+                        None => { job.state = State::Working; self.store.save_job(&job)?; return self.run_turns(job); }
+                    };
+                    let p = prompt::approval_question(&self.store.instructions()?, &job, &what, &why, text);
+                    let answer = match self.model.next_move(&p)? { Move::Reply { text, .. } => text, other => format!("(I answered out of turn — {other:?})") };
+                    self.emit(Event::Said { text: answer });
+                    job.ok_questions += 1;
+                    if job.ok_questions >= 3 {
+                        self.emit(Event::Said { text: "Three questions and no yes: taking that as a no.".into() });
+                        return self.resume_after_approval(job, false, "no answer after three questions");
+                    }
+                    self.store.save_job(&job)?;
+                    self.emit(Event::NeedsOk { job_id: job.id.clone(), what, why });
+                    return Ok(());
                 }
                 _ => {
                     // A job left mid-work (crash/restart): carry on with it.
@@ -642,6 +676,7 @@ impl<M: Model> Engine<M> {
     fn resume_after_approval(&mut self, mut job: Job, approved: bool, text: &str) -> Result<(), EngineError> {
         let (plan_step, action) = match job.pending_action.take() { Some(p) => p, None => { job.state = State::Working; return self.run_turns(job); } };
         job.state = State::Working;
+        job.ok_questions = 0;
         if job.steps.len() >= Self::MAX_STEPS {
             let text = format!("I gave up on {}: {} steps without finishing.", display_name(&job), Self::MAX_STEPS);
             return self.finish(job, State::Failed, text);
@@ -763,6 +798,7 @@ mod tests {
     use super::*;
     use crate::moves::Move;
     use crate::testing::engine_with;
+    use crate::testing::Recorder;
 
     fn start(project: &str, creative: bool) -> Move {
         Move::Start { project: project.into(), new_project: true, description: "prime printer".into(), goal: "print ten primes".into(), creative, understood: format!("Starting a new project {project}"), remember: None }
@@ -1781,7 +1817,7 @@ mod tests {
     #[test]
     fn a_raised_stop_flag_cancels_the_job_between_steps() {
         // The model would write two files; the flag is raised by the first step's worker call.
-        let (mut e, rec, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(1, write("b.py")), done(run("true"))], "flag");
+        let (e, rec, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(1, write("b.py")), done(run("true"))], "flag");
         let flag = e.stop_flag();
         let f2 = flag.clone();
         // ScriptedWorker records calls; raise the flag once the first call has landed by
@@ -1812,5 +1848,80 @@ mod tests {
         assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
         assert!(e.open_job().unwrap().is_none());
         assert!(e.resume().unwrap().is_empty(), "nothing open, nothing to resume");
+    }
+
+    #[test]
+    fn resume_fails_a_job_that_predates_the_folder_record() {
+        let (mut e, _, _) = engine_with(vec![], "resume-no-folder");
+        let mut job = Job::new("p", "/data/projects/p", "g", true, "u");
+        job.state = State::Working;
+        job.folder = String::new();
+        e.store.save_job(&job).unwrap();
+        let ev = e.resume().unwrap();
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert!(matches!(&ev[0], Event::Failed { text, .. } if text == "This job predates the folder record; please start it again."), "{ev:?}");
+        assert!(e.open_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn refusal_words() {
+        for t in ["no", "No.", "n", "don't", "dont", "no thanks", "refuse", "not that", "cancel that", "no, don't"] { assert!(is_refusal(t), "{t}"); }
+        for t in ["what does it send?", "yes", "why", "hmm"] { assert!(!is_refusal(t), "{t}"); }
+    }
+
+    /// `tag` must differ per test: `temp_root` wipes the tag's folder, and tests run in parallel.
+    fn waiting_ok(tag: &str) -> (crate::engine::Engine<crate::model::FakeModel>, Recorder) {
+        let (mut e, rec, _) = engine_with(vec![start("p", true), plan(), act(1, Action::HttpPost { url: "https://x".into(), body: "b".into() })], tag);
+        e.handle("post it").unwrap();
+        assert_eq!(e.open_job().unwrap().unwrap().state, State::WaitingApproval);
+        (e, rec)
+    }
+
+    #[test]
+    fn a_question_at_needs_ok_is_answered_and_the_ok_asked_again() {
+        let (mut e, rec) = waiting_ok("okq-question");
+        e.model = crate::model::FakeModel::new(vec![Move::Reply { text: "It sends the body b to x.".into(), remember: None }]);
+        let ev = events_of(&mut e, "what does it send?");
+        assert!(matches!(&ev[0], Event::Said { text } if text == "It sends the body b to x."), "{ev:?}");
+        assert!(matches!(&ev[1], Event::NeedsOk { what, .. } if what == "http post to https://x"));
+        let job = e.open_job().unwrap().unwrap();
+        assert_eq!(job.state, State::WaitingApproval);
+        assert!(job.pending_action.is_some(), "the action is still waiting");
+        assert_eq!(job.ok_questions, 1);
+        assert!(rec.calls.borrow().is_empty() && rec.admin_calls.borrow().is_empty(), "nothing ran");
+        let p = e.model.prompts.borrow();
+        assert_eq!(p.last().unwrap().allowed, vec!["reply"]);
+        assert!(p.last().unwrap().user.contains("what does it send?"));
+        assert!(p.last().unwrap().user.contains("http post to https://x"));
+    }
+
+    #[test]
+    fn no_still_declines_and_yes_still_approves() {
+        let (mut e, rec) = waiting_ok("okq-no");
+        e.model = crate::model::FakeModel::new(vec![Move::GiveUp { reason: "declined".into(), missing: "your ok".into() }]);
+        let ev = events_of(&mut e, "no thanks");
+        assert!(matches!(ev.last().unwrap(), Event::Failed { .. }), "{ev:?}");
+        assert!(rec.calls.borrow().is_empty());
+        let (mut e, rec) = waiting_ok("okq-yes");
+        // The post approved by "yes" runs no BLUEPRINT.md write, so the new-project gate in
+        // `run_turns` still demands one before `done` — the same reason
+        // `risky_action_waits_for_ok_and_runs_after_yes` writes it first.
+        e.model = crate::model::FakeModel::new(vec![act(1, write("BLUEPRINT.md")), done(run("true"))]);
+        e.handle("yes").unwrap();
+        assert_eq!(rec.calls.borrow().len(), 3, "the post ran, then the blueprint the new-project gate demands, then the check");
+    }
+
+    #[test]
+    fn three_questions_without_an_answer_decline_the_action() {
+        let (mut e, _) = waiting_ok("okq-three");
+        e.model = crate::model::FakeModel::new(vec![
+            Move::Reply { text: "a".into(), remember: None }, Move::Reply { text: "b".into(), remember: None }, Move::Reply { text: "c".into(), remember: None },
+            Move::GiveUp { reason: "declined".into(), missing: "your ok".into() },
+        ]);
+        e.handle("why?").unwrap(); e.handle("why though?").unwrap();
+        let ev = events_of(&mut e, "and why is that?");
+        assert!(matches!(&ev[0], Event::Said { text } if text == "c"));
+        assert!(matches!(&ev[1], Event::Said { text } if text.contains("taking that as a no")), "{ev:?}");
+        assert!(matches!(ev.last().unwrap(), Event::Failed { .. }), "{ev:?}");
     }
 }

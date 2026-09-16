@@ -139,6 +139,16 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job) }
 }
 
+/// The user asked something instead of yes or no while an action waits for their OK (1d §2.1).
+/// Reply only: the answer is words, never a move that changes the job.
+pub fn approval_question(instructions: &[String], job: &Job, what: &str, why: &str, question: &str) -> Prompt {
+    let user = format!(
+        "Standing instructions:\n{}\n\nJob: {} — {}\nAn action is waiting for the user's OK: {what} (reason: {why}).\nThe user asked: {question}\nAnswer the question in one or two plain sentences so they can decide. Do not act, do not decide for them, do not ask them for the OK yourself (the system asks again).",
+        join_instructions(instructions), if job.housekeeping { "housekeeping" } else { &job.project }, job.goal,
+    );
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply"] }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +348,16 @@ mod tests {
         let mut working_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         working_not_creative.state = State::Working;
         check(&job_turn(&[], &working_not_creative, None, None));
+
+        check(&approval_question(&[], &Job::new("p", "/data/projects/p", "g", false, "u"), "w", "y", "q"));
+    }
+
+    #[test]
+    fn approval_question_is_reply_only_and_carries_the_action() {
+        let job = Job::new("p", "/data/projects/p", "g", false, "u");
+        let p = approval_question(&[], &job, "http post to https://x", "network access", "what does it send?");
+        assert_eq!(p.allowed, vec!["reply"]);
+        assert!(p.user.contains("http post to https://x") && p.user.contains("network access") && p.user.contains("what does it send?"));
+        assert!(p.user.contains("Do not") , "tells the model not to act");
     }
 }

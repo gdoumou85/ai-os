@@ -81,6 +81,12 @@ pub struct Job {
     /// `#[serde(default)]`: a job saved before 1d has no such key.
     #[serde(default)]
     pub started_at: u64,
+    /// How many times, while an action waited for the user's OK, they asked something instead
+    /// of yes/no. Reset to 0 in `resume_after_approval` once the OK is settled either way; three
+    /// unanswered questions in a row count as a no (engine::is_refusal, engine's WaitingApproval
+    /// arm). `#[serde(default)]`: see `declined_actions` (I3).
+    #[serde(default)]
+    pub ok_questions: u32,
 }
 
 impl Job {
@@ -98,6 +104,7 @@ impl Job {
             outcome_text: String::new(), housekeeping: false,
             folder: folder.into(), new_project: false, request: String::new(),
             started_at: (millis / 1000) as u64,
+            ok_questions: 0,
         }
     }
 
