@@ -280,7 +280,8 @@ None of the engineering above is the hard part. The hard part is whether an 8B l
 
 **Workshop-only shortcuts that MUST NOT ship to the product (packaging phase):**
 - A sudoers `NOPASSWD: /usr/bin/systemd-run` grant for user `ai` (root-equivalent) — used because the workshop executor runs as `ai`; the product's executor daemon is already privileged and needs no such grant.
-- `/data` was made world-writable (777) so the trial db could be created; the product sets `/data` ownership/permissions properly.
+- `/data` is 0777 root-owned with no sticky bit, so the trial db could be created; the product sets `/data` ownership/permissions properly. Without the sticky bit any user who can write there can also rename or remove another user's entries.
+- The wrapper is installed from the Windows-mounted repo (`/mnt/c/...`) by `trial/setup-admin.sh`: what runs as root is copied from a filesystem Windows can write. The product ships the privileged daemon from a package.
 
 ## Phase 1c status (2026-09-16)
 
