@@ -12,8 +12,9 @@ names(){ [ $# -gt 0 ] || refuse "no names"; for n in "$@"; do [[ "$n" =~ $NAME_R
 nonempty(){ [ -n "${1:-}" ] || refuse "empty path"; }
 # The caller owns the directories under /data, so it can plant symlinks there. Never follow one.
 nolink(){ if [ -L "$1" ]; then refuse "symlink not allowed: $1"; fi; }
-# realpath -m: resolves symlinks in the existing prefix, no need for the leaf to exist
-under(){ local p; p=$(realpath -m -- "$1"); for r in "${@:2}"; do [[ "$p" == "$r" || "$p" == "$r/"* ]] && { echo "$p"; return; }; done; refuse "path outside allowed roots: $1"; }
+# realpath -m: resolves symlinks in the existing prefix, no need for the leaf to exist.
+# A relative path would resolve against the CALLER's cwd, which is not what anyone approved.
+under(){ local p; [[ "$1" = /* ]] || refuse "relative path: $1"; p=$(realpath -m -- "$1"); for r in "${@:2}"; do [[ "$p" == "$r" || "$p" == "$r/"* ]] && { echo "$p"; return; }; done; refuse "path outside allowed roots: $1"; }
 not_refused_file(){ case "$1" in /etc/sudoers|/etc/sudoers.d|/etc/sudoers.d/*|/etc/passwd|/etc/shadow|/etc/group|/etc/gshadow) refuse "protected file: $1";; esac; }
 # A new directory under /data belongs to the sandbox, not to root.
 own_dir(){ case "$1" in /data/*) chown ai:ai-sandbox -- "$1"; chmod 2770 -- "$1";; *) chown ai:ai -- "$1";; esac; }

@@ -22,6 +22,7 @@ refuses "sudoers write"           write-file /etc/sudoers.d/x
 refuses "shadow read"             read-file /etc/shadow
 refuses "read outside roots"      read-file /root/.bashrc
 refuses "empty path"              write-file ""
+refuses "relative path"           write-file relative/x
 refuses "make-dir outside roots"  make-dir /opt/x
 refuses "sandbox cwd outside"     sandbox-run --net=none --cwd=/etc -- id
 ln -sf /etc/hostname /data/housekeeping/lnk-t1c; host_before=$(cat /etc/hostname)

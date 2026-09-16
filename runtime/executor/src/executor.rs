@@ -36,7 +36,9 @@ pub fn lane(action: &Action, workspace: &Path, approved: bool) -> Lane {
             }
         }
         Action::SetSetting { .. } => Lane::Engine,
-        _ => Lane::Sandbox,
+        // Listed, not `_`: a new action kind must fail to compile here rather than land
+        // silently in the sandbox.
+        Action::RunCommand { .. } | Action::HttpPost { .. } | Action::FetchPackages { .. } => Lane::Sandbox,
     }
 }
 
@@ -98,7 +100,9 @@ impl<W: Worker> Executor<W> {
     pub fn reverse(&self, job_id: &str, entry: &UndoEntry) -> Result<Outcome, LogError> {
         let outcome = self.admin.reverse(entry);
         let tag = if outcome.ok { "ok" } else { "error" };
-        if let Err(e) = self.log.append_text(job_id, &format!("undo: {tag}: {}", outcome.detail)) {
+        // The entry goes in the line: there is no action column behind an undo, so this is the
+        // only record of WHAT was put back.
+        if let Err(e) = self.log.append_text(job_id, &format!("undo: {entry:?}: {tag}: {}", outcome.detail)) {
             eprintln!("executor: failed to log undo outcome: {e}");
         }
         Ok(outcome)
@@ -169,7 +173,9 @@ mod tests {
             ExecOutcome::Blocked(_)
         ));
         e.execute("j", &Action::WriteFile { path: "/etc/x".into(), contents: "x".into() }, true).unwrap();
-        assert_eq!(e.sandbox.calls.borrow().len(), 1);
+        // Approval alone never promotes a lane: inside the workspace stays in the sandbox.
+        e.execute("j", &Action::WriteFile { path: "a.py".into(), contents: "x".into() }, true).unwrap();
+        assert_eq!(e.sandbox.calls.borrow().len(), 2);
         assert_eq!(e.admin.calls.borrow().len(), 1);
     }
 

@@ -261,8 +261,25 @@ impl AdminWorker {
     }
 }
 
+/// The path an action carries, if it carries one.
+fn action_path(action: &Action) -> Option<&str> {
+    match action {
+        Action::ReadFile { path, .. }
+        | Action::WriteFile { path, .. }
+        | Action::EditFile { path, .. }
+        | Action::MakeDir { path } => Some(path),
+        _ => None,
+    }
+}
+
 impl Worker for AdminWorker {
     fn run(&self, action: &Action) -> Outcome {
+        // The wrapper runs with no cwd of its own, so its `realpath -m` would resolve a relative
+        // path against THIS process's cwd — the user would approve one path and root would act on
+        // another. Refuse before spawning; the wrapper refuses relative paths too (belt and braces).
+        if action_path(action).is_some_and(|p| !Path::new(p).is_absolute()) {
+            return Outcome::err("admin paths must be absolute");
+        }
         match action {
             Action::Install { packages } => Self::packages("install", packages),
             Action::Remove { packages } => Self::packages("remove", packages),
@@ -333,6 +350,22 @@ impl Worker for AdminWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No machine needed: every one of these must return before the wrapper is ever spawned.
+    #[test]
+    fn a_relative_path_is_refused_before_the_wrapper_is_called() {
+        for a in [
+            Action::WriteFile { path: "../../etc/x".into(), contents: "x".into() },
+            Action::ReadFile { path: "x.py".into(), from_line: None, lines: None },
+            Action::EditFile { path: "a/b".into(), find: "x".into(), replace: "y".into() },
+            Action::MakeDir { path: "relative".into() },
+        ] {
+            let out = AdminWorker.run(&a);
+            assert!(!out.ok, "{a:?} must be refused");
+            assert_eq!(out.detail, "admin paths must be absolute", "{a:?}");
+            assert!(out.undo.is_none(), "a refusal changed nothing: {a:?}");
+        }
+    }
 
     #[test]
     fn set_difference_is_the_undo_list() {
