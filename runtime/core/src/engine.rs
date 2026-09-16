@@ -6,11 +6,15 @@ use crate::store::{Store, StoreError};
 use executor::action::Action;
 use executor::executor::{ExecOutcome, Executor};
 use executor::log::{ActionLog, LogError};
-use executor::worker::Worker;
+use executor::undo::UndoEntry;
+use executor::worker::{Outcome, Worker};
 use std::path::{Path, PathBuf};
 
 /// One project folder in, the two hands that serve it out: (sandbox, admin).
 pub type WorkerFactory = Box<dyn Fn(&Path) -> (Box<dyn Worker>, Box<dyn Worker>)>;
+
+/// The scratch folder a housekeeping job works in — the machine's own jobs have no project.
+pub const HOUSEKEEPING_DIR: &str = "/data/housekeeping";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -27,6 +31,8 @@ pub struct Engine<M: Model> {
     default_root: PathBuf,
     log_path: Option<String>,
     workers: WorkerFactory,
+    /// The workspace every housekeeping job runs in (it has no project folder).
+    housekeeping_dir: PathBuf,
 }
 
 pub fn sanitize_project_name(raw: &str) -> String {
@@ -69,9 +75,11 @@ pub fn is_stop(text: &str) -> bool {
 }
 
 impl<M: Model> Engine<M> {
-    pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory) -> Self {
-        Self { store, model, default_root, log_path, workers }
+    pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf) -> Self {
+        Self { store, model, default_root, log_path, workers, housekeeping_dir }
     }
+
+    pub fn housekeeping_dir(&self) -> &Path { &self.housekeeping_dir }
 
     /// I3: a store error here used to be swallowed (`.ok().flatten()`) — a job left unreadable
     /// (a corrupt row, a locked file) looked exactly like "no job open", so the engine would
@@ -123,6 +131,15 @@ impl<M: Model> Engine<M> {
 
     fn handle_inner(&mut self, text: &str) -> Result<Vec<String>, EngineError> {
         if let Some(mut job) = self.open_job()? {
+            // A job saved before 1c recorded folders has none, so every one of its actions would
+            // run in the process's own directory. Fail it on sight — no model call, and not
+            // through `finish`, which would drop a LAST_RUN.md in that same directory.
+            if job.folder.is_empty() {
+                job.state = State::Failed;
+                job.outcome_text = "This job predates the folder record; please start it again.".into();
+                self.store.save_job(&job)?;
+                return Ok(vec![job.outcome_text]);
+            }
             if is_stop(text) {
                 let message = format!("Stopped the job in {}.", job.project);
                 return self.finish(job, State::Cancelled, message);
@@ -182,6 +199,18 @@ impl<M: Model> Engine<M> {
                 out.extend(self.run_turns(job)?);
                 Ok(out)
             }
+            // The machine itself: no project row, no blueprint, one shared scratch folder.
+            Move::Housekeep { goal, understood, remember } => {
+                let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
+                if let Some(r) = remember { self.store.add_instruction(&r)?; }
+                std::fs::create_dir_all(&self.housekeeping_dir)?;
+                let job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
+                self.store.save_job(&job)?;
+                let mut out = vec![understood];
+                if let Some(n) = note { out.push(n); }
+                out.extend(self.run_turns(job)?);
+                Ok(out)
+            }
             other => Ok(vec![format!("(I answered out of turn — {other:?} — please say that again.)")]),
         }
     }
@@ -221,6 +250,24 @@ impl<M: Model> Engine<M> {
             }
             _ => {}
         }
+    }
+
+    /// The engine's own lane (`executor::Lane::Engine`): a setting is a row in our store, so no
+    /// worker can apply it. One known key so far; an unknown one names what is known.
+    fn apply_setting(&self, key: &str, value: &str) -> Result<Outcome, EngineError> {
+        if key != "projects_root" {
+            return Ok(Outcome::err(format!("unknown setting '{key}'; known settings: projects_root")));
+        }
+        // The constructor's own root counts as a root: a test (and a machine with a custom
+        // AI_OS_PROJECTS) lives outside /data and /home/ai, and its own root is not an escape.
+        let default_root = self.default_root.display().to_string();
+        let mut roots: Vec<&str> = executor::rules::AI_ROOTS.to_vec();
+        roots.push(&default_root);
+        if !executor::rules::under_any(value, &roots) {
+            return Ok(Outcome::err("projects_root must be an absolute path under /data or /home/ai"));
+        }
+        let previous = self.store.set_setting(key, value)?;
+        Ok(Outcome::ok(format!("setting {key} = {value}")).with_undo(UndoEntry::Setting { key: key.into(), previous }))
     }
 
     fn reject(&self, job: &mut Job, why: &str) -> Result<Option<Vec<String>>, EngineError> {
@@ -266,6 +313,32 @@ impl<M: Model> Engine<M> {
             return self.reject(job, &format!("that exact action already failed with: {earlier} — work around it or replan"));
         }
         let exec = self.executor_for(job)?;
+        // `SetSetting` never reaches a worker (executor::lane -> Lane::Engine): the engine applies
+        // it and records it with `log_only`. A failure counts like any other failed step.
+        if let Action::SetSetting { key: name, value } = &action {
+            let outcome = self.apply_setting(name, value)?;
+            // Same invariant as `Executor::execute`: the setting is already written, so a logging
+            // failure must not abort the turn — that would lose both the step and the undo row,
+            // leaving a changed setting nothing can put back.
+            if let Err(e) = exec.log_only(&job.id, &action, &format!("{}: {}", if outcome.ok { "ok" } else { "error" }, outcome.detail)) {
+                eprintln!("core: failed to log a setting change: {e}");
+            }
+            job.rejections = 0;
+            job.note_to_model = None;
+            job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
+            if outcome.ok {
+                if let Some(entry) = outcome.undo { self.store.add_undo(&job.id, &entry)?; }
+            } else {
+                job.failed_actions.push(key);
+                let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
+                if fails >= Self::MAX_FAILS_PER_STEP {
+                    let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", job.project, outcome.detail);
+                    return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
+                }
+            }
+            self.store.save_job(job)?;
+            return Ok(None);
+        }
         match exec.execute(&job.id, &action, approved)? {
             ExecOutcome::Blocked(reason) => {
                 job.rejections = 0; // a legal act needing approval is a valid move, not a rejection
@@ -280,10 +353,13 @@ impl<M: Model> Engine<M> {
                 job.note_to_model = None;
                 job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
                 if outcome.ok {
-                    match Self::is_blueprint(&action) {
-                        Some(true) => job.last_blueprint_update = job.steps.len(),
-                        Some(false) => job.last_code_change = job.steps.len(),
-                        None => {}
+                    // A housekeeping job has no blueprint, so neither counter means anything to it.
+                    if !job.housekeeping {
+                        match Self::is_blueprint(&action) {
+                            Some(true) => job.last_blueprint_update = job.steps.len(),
+                            Some(false) => job.last_code_change = job.steps.len(),
+                            None => {}
+                        }
                     }
                     // Something changed on disk, so an earlier failure may now succeed:
                     // re-running the same command after a fix is legitimate (spike finding).
@@ -371,8 +447,28 @@ impl<M: Model> Engine<M> {
                     None
                 }
                 (State::Working, Move::Done { summary, check }) => {
-                    if job.last_code_change > job.last_blueprint_update {
+                    // The absolute gate: a new project must leave a real BLUEPRINT.md behind,
+                    // whether or not this job happened to change code — the counters only
+                    // compare steps to each other, so a job that never wrote a file passed the
+                    // old rule with no blueprint at all. Housekeeping has no project and no
+                    // blueprint, so neither rule applies to it.
+                    //
+                    // Order: the step-counter rule first. Both rules are true at once whenever a
+                    // new project has changed code and has no root blueprint yet; the counter
+                    // rule is the older contract (I5's test pins its wording), and either message
+                    // asks for the same next move. The absolute rule still catches every case the
+                    // counters cannot see — including a new project that wrote no file at all.
+                    let gate = if job.housekeeping {
+                        None
+                    } else if job.last_code_change > job.last_blueprint_update {
                         Some("update BLUEPRINT.md for what you changed before saying done".to_string())
+                    } else if job.new_project && !self.workspace(&job).join("BLUEPRINT.md").exists() {
+                        Some("create BLUEPRINT.md for this new project before saying done".to_string())
+                    } else {
+                        None
+                    };
+                    if let Some(why) = gate {
+                        Some(why)
                     } else {
                         let key_step = job.plan.len().max(1);
                         match self.perform(&mut job, key_step, check, false, true)? {
@@ -749,9 +845,9 @@ mod tests {
         drop(e);
         // New engine, same store: the answer must land on the saved job.
         let rec = crate::testing::Recorder::default();
-        let r2 = rec.clone();
+        let housekeeping = root.join("housekeeping");
         let mut e2 = Engine::new(store, crate::model::FakeModel::new(vec![plan(), act(1, write("BLUEPRINT.md")), done(run("true"))]), root, None,
-            Box::new(move |_| crate::testing::scripted_pair(&r2)));
+            crate::testing::scripted_workers(&rec), housekeeping);
         let out = e2.handle("python").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         assert!(e2.open_job().unwrap().is_none());
@@ -896,17 +992,19 @@ mod tests {
     /// several `executor_for` calls one job makes, and hands the test the path to read directly.
     fn engine_with_log(moves: Vec<Move>, tag: &str) -> (Engine<crate::model::FakeModel>, PathBuf) {
         let rec = crate::testing::Recorder::default();
-        let r2 = rec.clone();
         let root = crate::testing::temp_root(tag);
         let log_path = std::env::temp_dir().join(format!("ai-os-core-{tag}-log-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&log_path);
         let log_path_str = log_path.to_string_lossy().to_string();
+        let housekeeping = root.join("housekeeping");
+        std::fs::create_dir_all(&housekeeping).unwrap();
         let e = Engine::new(
             crate::store::Store::open_in_memory().unwrap(),
             crate::model::FakeModel::new(moves),
             root,
             Some(log_path_str),
-            Box::new(move |_ws| crate::testing::scripted_pair(&r2)),
+            crate::testing::scripted_workers(&rec),
+            housekeeping,
         );
         (e, log_path)
     }
@@ -933,6 +1031,96 @@ mod tests {
         assert!(outcomes[0].starts_with("blocked:"), "{outcomes:?}");
         assert!(outcomes[1].starts_with("ok:"), "{outcomes:?}");
         let _ = std::fs::remove_file(&log_path);
+    }
+
+    fn housekeep() -> Move {
+        Move::Housekeep {
+            goal: "prepare /data/work for all projects".into(),
+            understood: "Housekeeping: I'll create the folder and make it the projects root".into(),
+            remember: None,
+        }
+    }
+
+    #[test]
+    fn housekeeping_job_has_no_project_no_blueprint_gate_and_no_last_run() {
+        // `/data/work` rather than a temp path: `rules::classify` sends a `make_dir` outside
+        // AI_ROOTS to the approval gate, and the admin recorder never touches the disk anyway.
+        let (mut e, rec, root) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::MakeDir { path: "/data/work".into() }), act(1, write("notes.txt")), done(run("true")),
+        ], "hk");
+        let out = e.handle("prepare a folder for all my projects").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert!(!root.join("LAST_RUN.md").exists() && !e.housekeeping_dir().join("LAST_RUN.md").exists());
+        assert_eq!(rec.admin_calls.borrow().len(), 1, "make_dir went to the admin lane");
+        assert!(e.store.list_projects().unwrap().is_empty(), "no project row");
+    }
+
+    #[test]
+    fn set_setting_moves_new_projects_and_rejects_bad_values() {
+        // `temp_root_path` only names the folder; `engine_with` is what creates it.
+        let (mut e, _, root) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::SetSetting { key: "projects_root".into(), value: crate::testing::temp_root_path("setting").join("work").display().to_string() }), done(run("true")),
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "setting");
+        e.handle("move projects").unwrap();
+        e.handle("make p").unwrap();
+        assert!(root.join("work/p/BLUEPRINT.md").exists(), "new project under the new root");
+        // What Task 9 needs to put the root back: the value the setting held before.
+        let hk = e.store.last_undoable_job().unwrap().expect("the housekeeping job left something to put back");
+        let entries: Vec<UndoEntry> = e.store.unapplied_undo(&hk.id).unwrap().into_iter().map(|(_, en)| en).collect();
+        assert_eq!(entries, vec![UndoEntry::Setting { key: "projects_root".into(), previous: None }]);
+
+        let (mut e2, _, _) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::SetSetting { key: "colour".into(), value: "blue".into() }),
+            Move::GiveUp { reason: "x".into(), missing: "y".into() },
+        ], "badkey");
+        e2.handle("set colour").unwrap();
+        let prompts = e2.model.prompts.borrow();
+        // prompt[i] elicits move[i]; the failed act is move[2], so its reason reaches move[3]'s
+        // prompt (the brief's index was one turn early).
+        assert!(prompts[3].user.contains("unknown setting") && prompts[3].user.contains("projects_root"), "{}", prompts[3].user);
+    }
+
+    #[test]
+    fn done_on_a_new_project_without_a_blueprint_file_is_rejected() {
+        let (mut e, _, root) = engine_with(vec![
+            start("p", true), plan(), act(1, run("sed")), done(run("true")), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "absgate");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[4].user.contains("rejected: create BLUEPRINT.md"), "{}", prompts[4].user);
+        assert!(root.join("p/BLUEPRINT.md").exists(), "the scripted worker really wrote it");
+    }
+
+    #[test]
+    fn housekeep_out_of_turn_is_rejected_like_start() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", false), Move::Ask { questions: vec!["Which language?".into()] },
+            housekeep(),                                   // out of turn: a job is already running
+            plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "hk-out-of-turn");
+        e.handle("make it").unwrap();
+        let out = e.handle("python").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[3].user.contains("rejected: a job is running"), "{}", prompts[3].user);
+    }
+
+    #[test]
+    fn a_job_saved_before_folders_were_recorded_is_failed_not_resumed() {
+        // Pre-1c rows have no `folder`, so every action would run in the process's own
+        // directory. Fail them on sight, without asking the model.
+        let (mut e, rec, _) = engine_with(vec![], "no-folder");
+        let mut job = Job::new("p", "", "goal", true, "Starting p");
+        job.state = State::Working;
+        e.store.save_job(&job).unwrap();
+        let out = e.handle("carry on").unwrap();
+        assert!(out[0].contains("predates the folder record"), "{out:?}");
+        assert!(e.open_job().unwrap().is_none());
+        assert!(e.model.prompts.borrow().is_empty(), "no model call");
+        assert!(rec.calls.borrow().is_empty());
+        assert!(!PathBuf::from("LAST_RUN.md").exists(), "a folderless job must not drop a note in the current directory");
     }
 
     #[test]

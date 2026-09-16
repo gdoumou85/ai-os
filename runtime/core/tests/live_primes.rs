@@ -22,7 +22,8 @@ fn the_model_writes_and_proves_a_primes_script() {
         Box::new(|ws| (
             Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
             Box::new(AdminWorker) as Box<dyn Worker>,
-        )));
+        )),
+        PathBuf::from("/data/housekeeping"));
     let mut out = e.handle("Start a new project called primes: make a Python script that prints the first ten prime numbers, one per line, and prove it runs. Decide the details yourself.").unwrap();
     for line in &out { eprintln!("AI: {line}"); }
     // If it asks anyway, answer once; a second question is a failure of the creative rule.

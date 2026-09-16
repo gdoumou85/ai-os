@@ -1,4 +1,4 @@
-use aios_core::engine::Engine;
+use aios_core::engine::{Engine, HOUSEKEEPING_DIR};
 use aios_core::model::OllamaModel;
 use aios_core::store::Store;
 use executor::admin::AdminWorker;
@@ -15,7 +15,8 @@ fn main() {
         Box::new(|ws| (
             Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
             Box::new(AdminWorker) as Box<dyn Worker>,
-        )));
+        )),
+        PathBuf::from(HOUSEKEEPING_DIR));
     // Builder's front (1b spec §9): the 1d rail draws this same conversation as cards.
     let stdin = std::io::stdin();
     loop {
