@@ -145,3 +145,21 @@ fn failure_detail_carries_the_end_of_the_error_output() {
     assert!(out.detail.contains("THE-REAL-REASON"), "the reason lives at the END of the output: {}", out.detail);
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn etc_is_readable_unprivileged_but_not_shadow() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let w = SandboxWorker { user: "ai-sandbox".into(), workspace: PathBuf::from("/data/housekeeping") };
+    let fstab = w.run(&Action::ReadFile { path: "/etc/fstab".into(), from_line: None, lines: None });
+    assert!(fstab.ok, "{}", fstab.detail);
+    assert!(!w.run(&Action::ReadFile { path: "/etc/shadow".into(), from_line: None, lines: None }).ok);
+    assert!(!w.run(&Action::ReadFile { path: "/home/ai/.bashrc".into(), from_line: None, lines: None }).ok, "outside workspace and not /etc");
+}
+
+#[test]
+fn dollar_survives_argv() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let w = SandboxWorker { user: "ai-sandbox".into(), workspace: PathBuf::from("/data/housekeeping") };
+    let o = w.run(&Action::RunCommand { argv: vec!["printf".into(), "%s".into(), "${HOME}".into()] });
+    assert!(o.detail.contains("${HOME}"), "{}", o.detail);
+}

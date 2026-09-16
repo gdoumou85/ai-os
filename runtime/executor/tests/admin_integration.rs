@@ -77,3 +77,20 @@ fn restart_records_no_undo() {
     assert!(o.ok, "{}", o.detail);
     assert_eq!(o.undo, None, "a restart changes no state, so there is nothing to put back");
 }
+
+#[test]
+fn pip_fetch_reaches_registry_and_nothing_else() {
+    if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
+    let ws = std::path::PathBuf::from("/data/projects/it-fetch");
+    std::fs::create_dir_all(&ws).unwrap();
+    let _ = std::process::Command::new("chgrp").arg("ai-sandbox").arg(&ws).status();
+    let _ = std::process::Command::new("chmod").arg("2770").arg(&ws).status();
+    let w = executor::worker::SandboxWorker { user: "ai-sandbox".into(), workspace: ws.clone() };
+    let o = w.run(&Action::FetchPackages { manager: executor::action::Manager::Pip, packages: vec!["tabulate".into()] });
+    assert!(o.ok, "{}", o.detail);
+    assert!(ws.join(".venv/bin/pip").exists());
+    // The allowlist is per-call: an ordinary run_command still gets PrivateNetwork.
+    let leak = w.run(&Action::RunCommand { argv: vec!["curl".into(), "-sS".into(), "-m".into(), "5".into(), "https://example.com".into()] });
+    assert!(!leak.ok, "ordinary run_command must still have no network");
+    let _ = std::fs::remove_dir_all(&ws);
+}

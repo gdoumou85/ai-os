@@ -1,10 +1,11 @@
 //! The privileged hand. Everything it does, it does by calling the root wrapper —
 //! a fixed menu of verbs with validated arguments (`runtime/admin/ai-os-admin`), never
 //! a shell string. Every change it makes comes back with the undo entry that puts it back.
-use crate::action::{Action, ServiceDo};
+use crate::action::{Action, Manager, ServiceDo};
 use crate::undo::UndoEntry;
 use crate::worker::{head, tail, window, Outcome, Worker};
 use std::io::Write;
+use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -22,6 +23,77 @@ pub fn added(before: &[&str], after: &[&str]) -> Vec<String> {
 /// Names in `before` that are no longer in `after`.
 pub fn removed(before: &[&str], after: &[&str]) -> Vec<String> {
     added(after, before)
+}
+
+/// The `nameserver` addresses in /etc/resolv.conf. A fetch runs with `IPAddressDeny=any`,
+/// so unless the resolver itself is allowed through, nothing inside the jail can even look
+/// up the registry.
+pub fn resolver_ips() -> Vec<String> {
+    std::fs::read_to_string("/etc/resolv.conf")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            (w.next()? == "nameserver").then(|| w.next()).flatten()
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Where each package manager actually downloads from — the only hosts a fetch may reach.
+pub fn registry_hosts(m: Manager) -> &'static [&'static str] {
+    match m {
+        Manager::Pip => &["pypi.org", "files.pythonhosted.org"],
+        Manager::Npm => &["registry.npmjs.org"],
+        Manager::Cargo => &["crates.io", "index.crates.io", "static.crates.io"],
+    }
+}
+
+/// Every address those hosts resolve to right now, in order, deduped. Empty means the
+/// registry could not be resolved at all (offline, or DNS down).
+/// ponytail: these registries sit behind CDNs that hand out a rotating slice of their address
+/// pool, so the allowlist is a snapshot — a fetch whose connection lands on an address this
+/// lookup did not return is blocked and has to be retried. Widen to the published CDN ranges
+/// (or a proxy) if that ever shows up in practice.
+pub fn resolve_all(hosts: &[&str]) -> Vec<String> {
+    let mut ips: Vec<String> = vec![];
+    for h in hosts {
+        // 443: we only ever fetch over https, and `to_socket_addrs` needs a port.
+        if let Ok(addrs) = (*h, 443u16).to_socket_addrs() {
+            for a in addrs {
+                let ip = a.ip().to_string();
+                if !ips.contains(&ip) {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+    ips
+}
+
+/// The fixed command list for a fetch, in order. Every word except the package names is a
+/// constant in this file; the names were validated by `rules::classify` before the worker saw
+/// them, and go after `--` so none can be read as an option.
+///
+/// The one `sh -c` here carries a CONSTANT string written in this source file — it is never
+/// model text, and nothing is interpolated into it. That is the only shape of `sh -c` the
+/// executor ever builds itself (rule: the AI is never handed a shell).
+///
+/// Programs are named bare (`python3`, `npm`, `cargo`) so systemd finds them on PATH; the one
+/// workspace-relative program, `.venv/bin/pip`, is made absolute by the sandbox worker, which
+/// is what knows the workspace — see `SandboxWorker::run`.
+pub fn fetch_argv(m: Manager, packages: &[String]) -> Vec<Vec<String>> {
+    let with = |head: &[&str]| -> Vec<String> {
+        head.iter().map(|s| s.to_string()).chain(packages.iter().cloned()).collect()
+    };
+    match m {
+        Manager::Pip => vec![
+            vec!["sh".into(), "-c".into(), "[ -x .venv/bin/pip ] || python3 -m venv .venv".into()],
+            with(&[".venv/bin/pip", "install", "--"]),
+        ],
+        Manager::Npm => vec![with(&["npm", "install", "--"])],
+        Manager::Cargo => vec![with(&["cargo", "add", "--"]), vec!["cargo".into(), "fetch".into()]],
+    }
 }
 
 /// `service <name> state` prints one line: `<enabled-state> <active-state>`. Anything
@@ -302,6 +374,22 @@ mod tests {
     #[test]
     fn name_args_puts_the_dash_dash_first() {
         assert_eq!(name_args(&["cowsay".to_string(), "sl".to_string()]), vec!["--", "cowsay", "sl"]);
+    }
+
+    #[test]
+    fn fetch_commands_are_fixed_per_manager() {
+        let pip = fetch_argv(Manager::Pip, &["tabulate".into()]);
+        assert_eq!(pip[0], vec!["sh", "-c", "[ -x .venv/bin/pip ] || python3 -m venv .venv"]);
+        assert_eq!(pip[1], vec![".venv/bin/pip", "install", "--", "tabulate"]);
+        assert_eq!(fetch_argv(Manager::Npm, &["left-pad".into()]), vec![vec!["npm", "install", "--", "left-pad"]]);
+        assert_eq!(fetch_argv(Manager::Cargo, &["serde".into()]), vec![vec!["cargo", "add", "--", "serde"], vec!["cargo", "fetch"]]);
+    }
+
+    #[test]
+    fn registry_hosts_per_manager() {
+        assert!(registry_hosts(Manager::Pip).contains(&"files.pythonhosted.org"));
+        assert_eq!(registry_hosts(Manager::Npm), &["registry.npmjs.org"]);
+        assert!(registry_hosts(Manager::Cargo).contains(&"static.crates.io"));
     }
 
     #[test]

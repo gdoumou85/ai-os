@@ -1,5 +1,6 @@
-use crate::action::Action;
-use crate::rules::resolves_inside;
+use crate::action::{Action, Manager};
+use crate::admin;
+use crate::rules::{resolves_inside, under_any};
 use crate::undo::UndoEntry;
 use std::cell::RefCell;
 use std::fs;
@@ -67,7 +68,13 @@ impl Worker for Box<dyn Worker> {
 }
 
 /// Runs commands as an unprivileged user, scoped to one workspace, no network.
-/// ponytail: shells out to `systemd-run`; a native cgroup/namespace impl only if this proves too slow.
+///
+/// Since Task 1, user `ai` may sudo exactly one program, so every sandboxed command goes
+/// through the root wrapper's `sandbox-run` verb (`runtime/admin/ai-os-admin`). The wrapper
+/// pins `--uid=ai-sandbox` and builds the whole jail property set itself — this side only
+/// says which network the command may reach, which folder it runs in, and what to run.
+/// ponytail: shells out to the wrapper, which shells out to `systemd-run`; a native
+/// cgroup/namespace impl only if this proves too slow.
 ///
 /// Path handling for ReadFile/WriteFile: `rules::classify` gates both the same way — outside the
 /// workspace needs approval from `Executor::execute` (the only door, see executor.rs) before the
@@ -86,6 +93,8 @@ impl Worker for Box<dyn Worker> {
 /// `fs::write` would still follow it out of the workspace even with a checked parent. With both,
 /// the sandbox never touches a path outside its own workspace, full stop.
 pub struct SandboxWorker {
+    /// Always `ai-sandbox`. Documentation only: the wrapper pins the uid, so nothing this
+    /// side puts here can change who the command runs as.
     pub user: String,
     pub workspace: PathBuf,
 }
@@ -101,17 +110,95 @@ impl SandboxWorker {
     /// Resolve an existing in-workspace file to its canonical path, refusing anything that
     /// escapes (lexically or through a symlink). Same guard as ReadFile had in 1a; shared by
     /// ReadFile and EditFile since both only ever operate on a file that must already exist.
-    fn existing_inside(&self, path: &str) -> Result<PathBuf, Outcome> {
-        if !resolves_inside(path, &self.workspace) {
+    ///
+    /// `etc_ok` opens one extra door, and only for reads: `/etc`. System config is
+    /// world-readable already and `rules::classify` rates reading it Auto, so refusing it here
+    /// would only leave the AI unable to see the machine it runs on. The read runs in-process
+    /// as the executor's own user (`ai`), so the file's own permissions are the real gate —
+    /// `/etc/fstab` comes back, `/etc/shadow` does not. `EditFile` passes `false` and stays
+    /// workspace-only: nothing may rewrite system config behind the admin wrapper's back (the
+    /// wrapper has its own protected-file list for the writes it does allow).
+    ///
+    /// The door is keyed on the *asked-for* path, not just on where it lands, and the
+    /// canonical target still has to stay in whichever root was opened. So `/etc/fstab` reads,
+    /// a workspace file that is secretly a symlink into `/etc` does NOT (the request was for a
+    /// workspace path, so only the workspace is open to it), and an `/etc` path that symlinks
+    /// somewhere else does not either. Both halves have to agree or it is refused.
+    fn existing_inside(&self, path: &str, etc_ok: bool) -> Result<PathBuf, Outcome> {
+        let etc = etc_ok && under_any(path, &["/etc"]);
+        if !resolves_inside(path, &self.workspace) && !etc {
             return Err(Outcome::err("path escapes workspace"));
         }
         let ws_canon = self.canonical_workspace()?;
         let target = fs::canonicalize(self.workspace.join(path))
             .map_err(|_| Outcome::err("cannot resolve path"))?;
-        if !target.starts_with(&ws_canon) {
+        if !target.starts_with(&ws_canon) && !(etc && target.starts_with("/etc")) {
             return Err(Outcome::err("path escapes workspace"));
         }
         Ok(target)
+    }
+
+    /// Run `argv` in the jail through the wrapper. `net` is `none` (PrivateNetwork) or a
+    /// comma-separated address allowlist; `envs` are plain `K=V`.
+    ///
+    /// argv goes across RAW. systemd expands `${VAR}` in a unit's argv, and the wrapper
+    /// doubles every `$` itself right before it execs systemd-run — escaping here as well
+    /// would double it twice and leave `$$` in the command's own output.
+    fn run_in_sandbox(&self, net: &str, envs: &[String], argv: &[String]) -> Outcome {
+        let mut cmd = Command::new("sudo");
+        cmd.args(["-n", admin::WRAPPER, "sandbox-run"])
+            .arg(format!("--net={net}"))
+            .arg(format!("--cwd={}", self.workspace.display()));
+        for e in envs {
+            cmd.arg(format!("--env={e}"));
+        }
+        // The wrapper `exec`s systemd-run, so this status/stdout/stderr is the command's own.
+        // A wrapper refusal is exit 3 with a `refused: …` line on stderr, which reads the same.
+        match cmd.arg("--").args(argv).output() {
+            Ok(o) => {
+                let ok = o.status.success();
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // Success: the start of the output is what matters. Failure: the END is where the
+                // reason lives (1b spec §3), so cut from the tail.
+                let cut = |s: &str| if ok { head(s, 500) } else { tail(s, 500) };
+                let detail = format!("exit {}; stdout: {} stderr: {}", o.status.code().unwrap_or(-1), cut(&stdout), cut(&stderr));
+                if ok { Outcome::ok(detail) } else { Outcome::err(detail) }
+            }
+            Err(e) => Outcome::err(format!("spawn failed: {e}")),
+        }
+    }
+
+    /// Fetch language packages into the workspace: the same jail as any other command, plus a
+    /// network allowlist holding nothing but the resolver and the manager's own registry.
+    /// Steps run in order and stop at the first failure; the detail is that step's output.
+    fn fetch(&self, manager: Manager, packages: &[String]) -> Outcome {
+        let hosts = admin::resolve_all(admin::registry_hosts(manager));
+        if hosts.is_empty() {
+            return Outcome::err("could not resolve the package registry");
+        }
+        let net = admin::resolver_ips().into_iter().chain(hosts).collect::<Vec<_>>().join(",");
+        let ws = self.workspace.display().to_string();
+        // HOME: pip/npm/cargo all want caches and config under it, and the jail hides the real
+        // one (ProtectHome). CARGO_HOME likewise, so `cargo add`/`fetch` land inside the project.
+        let envs = [format!("HOME={ws}"), format!("CARGO_HOME={ws}/.cargo")];
+        let mut last = Outcome::err("nothing to fetch");
+        for mut argv in admin::fetch_argv(manager, packages) {
+            // systemd resolves a unit's program against `/`, not `--working-directory`, so a
+            // workspace-relative program (`.venv/bin/pip`) has to be made absolute here — and
+            // the workspace is this worker's to know, not `fetch_argv`'s. A bare name (`npm`,
+            // `cargo`, `sh`) is left alone: systemd looks those up on PATH.
+            if let Some(p) = argv.first_mut() {
+                if p.contains('/') && !p.starts_with('/') {
+                    *p = format!("{ws}/{}", p.trim_start_matches("./"));
+                }
+            }
+            last = self.run_in_sandbox(&net, &envs, &argv);
+            if !last.ok {
+                return last;
+            }
+        }
+        last
     }
 }
 
@@ -144,55 +231,14 @@ pub(crate) fn window(text: &str, from_line: Option<usize>, lines: Option<usize>)
 impl Worker for SandboxWorker {
     fn run(&self, action: &Action) -> Outcome {
         match action {
-            Action::RunCommand { argv } if !argv.is_empty() => {
-                // Transient scope: unprivileged user, locked cwd, network cut off.
-                // System `systemd-run` (not `--user`): the workshop's `systemd --user` manager
-                // rejects `--uid=` and `PrivateNetwork=` (it runs as one uid and can't grant
-                // either), so this goes through the system manager via passwordless sudo instead.
-                let ws = self.workspace.display().to_string();
-                let out = Command::new("sudo")
-                    .args(["-n", "systemd-run", "--quiet", "--pipe", "--wait", "--collect"])
-                    .arg(format!("--uid={}", self.user))
-                    .arg(format!("--working-directory={ws}"))
-                    // The jail (1b spec §7): system programs read-only, the project folder read-write,
-                    // nothing else. /data becomes an empty read-only tmpfs with only this project bound
-                    // into it, so other projects and the executor's database do not exist from inside.
-                    // Home is hidden, /tmp is private, and files the sandbox creates are group-writable
-                    // so the executor's own user can still edit them (shared group on the folder).
-                    .args(["--property=PrivateNetwork=yes", "--property=ProtectHome=yes", "--property=PrivateTmp=yes"])
-                    .args(["--property=ProtectSystem=strict", "--property=UMask=0002"])
-                    .arg("--property=TemporaryFileSystem=/data:ro")
-                    // ProtectSystem=strict/ProtectHome/TemporaryFileSystem still leave the host's
-                    // other mounts readable (on the dev workshop, /mnt is the whole Windows
-                    // profile) — spec §7 says "nothing else" is visible. Hide them outright; the
-                    // leading `-` means "ignore if this path doesn't exist" (e.g. no /media on
-                    // some hosts) rather than failing the whole unit.
-                    .arg("--property=InaccessiblePaths=-/mnt -/media -/srv")
-                    .arg(format!("--property=BindPaths={ws}"))
-                    .arg(format!("--property=ReadWritePaths={ws}"))
-                    .arg("--")
-                    .args(argv)
-                    .output();
-                match out {
-                    Ok(o) => {
-                        let ok = o.status.success();
-                        let stdout = String::from_utf8_lossy(&o.stdout);
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        // Success: the start of the output is what matters. Failure: the END is where the
-                        // reason lives (1b spec §3), so cut from the tail.
-                        let cut = |s: &str| if ok { head(s, 500) } else { tail(s, 500) };
-                        let detail = format!("exit {}; stdout: {} stderr: {}", o.status.code().unwrap_or(-1), cut(&stdout), cut(&stderr));
-                        if ok { Outcome::ok(detail) } else { Outcome::err(detail) }
-                    }
-                    Err(e) => Outcome::err(format!("spawn failed: {e}")),
-                }
-            }
+            Action::RunCommand { argv } if !argv.is_empty() => self.run_in_sandbox("none", &[], argv),
+            Action::FetchPackages { manager, packages } => self.fetch(*manager, packages),
             // ponytail: TOCTOU window between `existing_inside`'s canonicalize and the read below
             // — a swap of the (now-plain) target back into a symlink in between would slip
             // through. Acceptable for now since the interface runs one action at a time; revisit
             // if concurrent access to the same workspace is ever added.
             Action::ReadFile { path, from_line, lines } => {
-                let target = match self.existing_inside(path) { Ok(p) => p, Err(out) => return out };
+                let target = match self.existing_inside(path, true) { Ok(p) => p, Err(out) => return out };
                 let text = match fs::read_to_string(&target) {
                     Ok(s) => s,
                     Err(e) => return Outcome::err(e.to_string()),
@@ -252,7 +298,7 @@ impl Worker for SandboxWorker {
             // Rule 9: edit in place — the model never reads a whole file, holds it, and writes
             // it all back. It quotes an exact passage from a prior read_file and we swap it in.
             Action::EditFile { path, find, replace } => {
-                let target = match self.existing_inside(path) { Ok(p) => p, Err(out) => return out };
+                let target = match self.existing_inside(path, false) { Ok(p) => p, Err(out) => return out };
                 let text = match fs::read_to_string(&target) {
                     Ok(s) => s,
                     Err(e) => return Outcome::err(e.to_string()),
