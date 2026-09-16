@@ -87,6 +87,9 @@ case "$verb" in
         [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] || refuse "bad ip: $ip"; netprops+=("--property=IPAddressAllow=$ip"); done
     fi
     args=(); for a in "$@"; do args+=("${a//\$/\$\$}"); done   # systemd expands ${VAR} in argv
+    # PATH carries /usr/games, which systemd's default PATH leaves out: that is where apt puts
+    # cowsay and friends, and a program the AI just installed must be one it can then run
+    # (parent rule 7). A caller's own --env comes after, so it can still override it.
     # /mnt is an empty read-only tmpfs, not merely /mnt/c hidden: on this WSL2 workshop every
     # Windows drive mounts under /mnt, and /mnt/wsl is the host's own plumbing. The one file
     # bound back in is what /etc/resolv.conf points at, or an allowlisted fetch could never
@@ -96,6 +99,7 @@ case "$verb" in
       --property=ProtectSystem=strict --property=UMask=0002 --property=TemporaryFileSystem=/data:ro \
       --property=TemporaryFileSystem=/mnt:ro "--property=BindReadOnlyPaths=-/mnt/wsl/resolv.conf" \
       "--property=InaccessiblePaths=-/media -/srv" "--property=BindPaths=$cwd" "--property=ReadWritePaths=$cwd" \
+      --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games \
       "${envs[@]}" -- "${args[@]}" ;;
   *) refuse "unknown verb: ${verb:-<none>}" ;;
 esac

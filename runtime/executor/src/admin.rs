@@ -304,7 +304,12 @@ impl Worker for AdminWorker {
             Action::MakeDir { path } => {
                 let existed = Path::new(path).exists();
                 let out = Self::call("make-dir", &[path], None);
-                if existed || !out.ok { out } else { out.with_undo(UndoEntry::DirCreated { path: path.clone() }) }
+                if !out.ok { return out; }
+                // The wrapper prints nothing on success, and a step whose detail is empty tells
+                // the model nothing: the live 1c run showed it hunting for other proof (an `ls`
+                // the jail hides from the sandbox) and concluding the folder was never made.
+                let out = Outcome::ok(format!("{path} exists"));
+                if existed { out } else { out.with_undo(UndoEntry::DirCreated { path: path.clone() }) }
             }
             Action::ReadFile { path, from_line, lines } => match Self::read_file(path) {
                 Ok(text) => Outcome::ok(window(&text, *from_line, *lines)),

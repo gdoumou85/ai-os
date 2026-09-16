@@ -58,6 +58,30 @@ pub fn under_any(path: &str, roots: &[&str]) -> bool {
     }
 }
 
+/// A package manager asked to *change* something, sent as a free command. The sandbox has no
+/// privilege and no network, so it fails with "permission denied" or "read-only file system" —
+/// which the live 1c run showed a 9B reads as "this machine has no root", after which it plans
+/// around a machine that does not exist instead of using the hand that installs. Refused here,
+/// with the hand that does the job named in the reason. Read-only uses of the same programs
+/// (`apt list --installed`, `cargo build`, `npm test`) stay free: only the verbs that change
+/// something are caught.
+pub fn wrong_hand(argv: &[String]) -> Option<String> {
+    let program = argv.first()?.rsplit('/').next()?;
+    let verbs: Vec<&str> = argv.iter().skip(1).map(String::as_str).filter(|a| !a.starts_with('-')).collect();
+    let has = |vs: &[&str]| verbs.iter().any(|v| vs.contains(v));
+    let system = ["apt", "apt-get", "aptitude", "dpkg", "snap", "flatpak"];
+    let language = ["pip", "pip3", "npm", "yarn", "pnpm", "cargo"];
+    // `python -m pip install …` is pip by another name.
+    let program = if program.starts_with("python") && verbs.first() == Some(&"pip") { "pip" } else { program };
+    if system.contains(&program) && (has(&["install", "remove", "purge", "upgrade", "dist-upgrade", "full-upgrade", "reinstall", "update"]) || argv.iter().any(|a| a == "-i")) {
+        return Some("software is installed with the `install` action and removed with `remove`, never with run_command: the sandbox has no privileges".into());
+    }
+    if language.contains(&program) && has(&["install", "add", "ci"]) {
+        return Some("language packages come through `fetch_packages` (name the manager and the packages), never with run_command: the sandbox has no network".into());
+    }
+    None
+}
+
 fn names_ok(ns: &[String]) -> Risk {
     match ns.iter().find(|n| !valid_name(n)) {
         None if !ns.is_empty() => Risk::Auto,
@@ -125,6 +149,23 @@ mod tests {
     #[test]
     fn run_command_is_auto() {
         assert_eq!(classify(&Action::RunCommand { argv: vec!["ls".into()] }, &ws()), Risk::Auto);
+    }
+
+    #[test]
+    fn a_package_manager_asked_to_change_something_is_sent_to_the_right_hand() {
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        for line in ["apt-get install -y cowsay", "apt install cowsay", "sudo/dpkg -i x.deb", "/usr/bin/apt-get remove cowsay", "snap install foo", "apt-get update"] {
+            assert!(wrong_hand(&argv(line)).unwrap().contains("`install` action"), "{line}");
+        }
+        for line in ["pip install tabulate", "python3 -m pip install tabulate", "npm install left-pad", "cargo add serde"] {
+            assert!(wrong_hand(&argv(line)).unwrap().contains("fetch_packages"), "{line}");
+        }
+        // Reading and building with the same programs stays free — the housekeeping jobs of
+        // §7 look at the machine with exactly these.
+        for line in ["apt list --installed", "dpkg-query -W -f ${Package}", "cargo build", "npm test", "python3 primes.py", "ls -l"] {
+            assert_eq!(wrong_hand(&argv(line)), None, "{line}");
+        }
+        assert_eq!(wrong_hand(&[]), None);
     }
 
     #[test]

@@ -44,6 +44,7 @@ $A remove-dir /data/t1c-dir && [ ! -e /data/t1c-dir ] && ok "remove-dir" || bad 
 [ "$($A sandbox-run --net=none --cwd=/data/housekeeping -- id -un)" = ai-sandbox ] && ok "sandbox-run uid" || bad "sandbox-run uid"
 $A sandbox-run --net=none --cwd=/data/housekeeping -- getent hosts example.com >/dev/null 2>&1 && bad "net=none leaks" || ok "net=none blocked"
 [ "$($A sandbox-run --net=none --cwd=/data/housekeeping -- printf '%s' '${HOME}')" = '${HOME}' ] && ok "dollar survives" || bad "dollar expanded"
+case "$($A sandbox-run --net=none --cwd=/data/housekeeping -- printenv PATH)" in *:/usr/games) ok "games on PATH";; *) bad "games not on PATH: $($A sandbox-run --net=none --cwd=/data/housekeeping -- printenv PATH)";; esac
 resolver=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); pypi=$(getent ahostsv4 pypi.org | awk '{print $1}' | sort -u | paste -sd,)
 code=$($A sandbox-run --net=$resolver,$pypi --cwd=/data/housekeeping -- curl -sS -m 20 -o /dev/null -w '%{http_code}' https://pypi.org/simple/ 2>/dev/null)
 [ "$code" = 200 ] && ok "allowlist reaches pypi" || bad "allowlist pypi code=$code"

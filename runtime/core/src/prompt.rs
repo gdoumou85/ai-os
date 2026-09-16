@@ -11,10 +11,12 @@ Rules:
 - Say what you understood before you act.
 - Work from the project's BLUEPRINT.md: read it to find what to change and where. After each change, update BLUEPRINT.md in place (replace lines, never pile on; keep it as small as possible). Create it first for a new project.
 - Edit code in place with edit_file (quote the exact passage). Use write_file only for new files. Use read_file with from_line/lines to read the part you need.
-- A step that failed once will fail again. Read the reason and do something different, or replan. Only give_up as a last resort, and say what was missing.
+- A step that failed once will fail again. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
 - If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.
 - Install software with `install` (apt), never with run_command apt. Enable, disable or restart services with `service`. Language packages (pip, npm, crates) come through `fetch_packages`: the sandbox has no other network.
+- Make a folder outside the working directory with `make_dir`, never `run_command mkdir`: the sandbox can only write inside the working directory, so mkdir there reports a read-only filesystem.
+- The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`), never by an absolute path: an absolute path leaves the workspace and needs the user's yes.
 - A file outside the project needs the user's yes; say in one line why you need it.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.";
 
@@ -106,7 +108,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
     let (header, bp_block) = if job.housekeeping {
-        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint. Anything that must outlive this job is a setting: set_setting projects_root=<abs path under /data or /home/ai>.".to_string(), String::new())
+        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. Anything that must outlive this job is a setting: where projects live from now on is set_setting projects_root=<abs path under /data or /home/ai>, and the job is not done until it is set. The sandbox cannot see outside the scratch folder: ls, cat and test on a path out there answer as if it were not there, so never check anything that way — make_dir is its own proof (it succeeds if the folder is already there). Order: make the folder, set the setting, then done with make_dir as the check.".to_string(), String::new())
     } else {
         let bp = match blueprint {
             Some(b) => b.chars().take(3000).collect::<String>(),
@@ -162,6 +164,9 @@ mod tests {
     fn system_rules_mention_the_new_hands() {
         assert!(SYSTEM.contains("install"));
         assert!(SYSTEM.contains("fetch_packages"));
+        // The live run's first finding: without this the 9B tried `run_command mkdir /data/work`,
+        // read "Read-only file system" as the machine's truth and gave up on the whole job.
+        assert!(SYSTEM.contains("make_dir"));
     }
 
     #[test]
@@ -171,6 +176,13 @@ mod tests {
         let p = job_turn(&[], &j, None, None);
         assert!(p.user.contains("no project, no blueprint"), "{}", p.user);
         assert!(!p.user.contains("no blueprint yet"), "{}", p.user);
+        // The live run's second finding: told only "no blueprint", the 9B still wrote and then
+        // re-read a BLUEPRINT.md in the folder it had just made, and never reached the setting.
+        assert!(p.user.contains("never write or read a BLUEPRINT.md"), "{}", p.user);
+        assert!(p.user.contains("not done until it is set"), "{}", p.user);
+        // Third finding: with no way to look outside the scratch folder, the 9B invented a file
+        // to read as its check (`/etc/settings.conf`) and gave up when it could not be read.
+        assert!(p.user.contains("make_dir is its own proof"), "{}", p.user);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use crate::rules::{resolves_inside, under_any};
 use crate::undo::UndoEntry;
 use std::cell::RefCell;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The result of actually performing an action, plus what it takes to put it back.
@@ -210,15 +210,7 @@ impl SandboxWorker {
         ];
         let mut done: Option<Outcome> = None;
         for mut argv in admin::fetch_argv(manager, packages) {
-            // systemd resolves a unit's program against `/`, not `--working-directory`, so a
-            // workspace-relative program (`.venv/bin/pip`) has to be made absolute here — and
-            // the workspace is this worker's to know, not `fetch_argv`'s. A bare name (`npm`,
-            // `cargo`, `sh`) is left alone: systemd looks those up on PATH.
-            if let Some(p) = argv.first_mut() {
-                if p.contains('/') && !p.starts_with('/') {
-                    *p = format!("{ws}/{}", p.trim_start_matches("./"));
-                }
-            }
+            absolute_program(&ws, &mut argv);
             let step = self.run_in_sandbox(&net, &envs, &argv);
             if !step.ok {
                 return step;
@@ -227,6 +219,19 @@ impl SandboxWorker {
         }
         // `fetch_argv` yields at least one step for every manager, and `packages` is non-empty.
         done.expect("fetch_argv yields at least one step")
+    }
+}
+
+/// systemd resolves a unit's program against `/`, not `--working-directory`, so a
+/// workspace-relative program (`.venv/bin/pip`, `./run.sh`) has to be made absolute before it
+/// goes out — the live 1c run watched the model try `.venv/bin/python3` and be told there is no
+/// such file. A bare name (`python3`, `npm`, `cargo`) is left alone and looked up on PATH, which
+/// is exactly how a shell treats a name with a slash in it against one without.
+pub(crate) fn absolute_program(workspace: &str, argv: &mut [String]) {
+    if let Some(p) = argv.first_mut() {
+        if p.contains('/') && !p.starts_with('/') {
+            *p = format!("{workspace}/{}", p.trim_start_matches("./"));
+        }
     }
 }
 
@@ -271,7 +276,25 @@ pub(crate) fn window(text: &str, from_line: Option<usize>, lines: Option<usize>)
 impl Worker for SandboxWorker {
     fn run(&self, action: &Action) -> Outcome {
         match action {
-            Action::RunCommand { argv } if !argv.is_empty() => self.run_in_sandbox("none", &[], argv),
+            Action::RunCommand { argv } if !argv.is_empty() => {
+                let mut argv = argv.clone();
+                absolute_program(&self.workspace.display().to_string(), &mut argv);
+                let out = self.run_in_sandbox("none", &[], &argv);
+                if out.ok { return out; }
+                // The jail replaces /data and /mnt with empty mounts, so `ls /data/work` comes
+                // back "No such file or directory" about a folder that is really there — the
+                // live 1c run watched the model read that as proof its own `make_dir` had
+                // failed, and give up on a job it had already done. Never let the sandbox's
+                // blindness be reported as the machine's truth.
+                let hidden: Vec<&str> = argv.iter().skip(1)
+                    .filter(|a| a.starts_with('/') && !resolves_inside(a, &self.workspace) && Path::new(a).exists())
+                    .map(String::as_str).collect();
+                if hidden.is_empty() { return out; }
+                Outcome::err(format!(
+                    "{} (note: {} exists — the sandbox cannot see outside its working directory, so this command cannot check it. Use a hand that can.)",
+                    out.detail, hidden.join(", "),
+                ))
+            }
             Action::FetchPackages { manager, packages } => self.fetch(*manager, packages),
             // ponytail: TOCTOU window between `existing_inside`'s canonicalize and the read below
             // — a swap of the (now-plain) target back into a symlink in between would slip
@@ -482,6 +505,24 @@ mod tests {
         let out = w.run(&Action::ReadFile { path: "a.txt".into(), from_line: Some(2), lines: Some(2) });
         assert!(out.ok);
         assert_eq!(out.detail, "2: l2\n3: l3\n");
+    }
+
+    #[test]
+    fn a_program_with_a_slash_is_resolved_against_the_workspace_a_bare_name_is_not() {
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let mut a = argv(".venv/bin/python3 t.py");
+        absolute_program("/data/p", &mut a);
+        assert_eq!(a[0], "/data/p/.venv/bin/python3");
+        assert_eq!(a[1], "t.py", "only the program is touched");
+        let mut a = argv("./run.sh");
+        absolute_program("/data/p", &mut a);
+        assert_eq!(a[0], "/data/p/run.sh");
+        for bare in ["python3 t.py", "/usr/bin/env python3"] {
+            let mut a = argv(bare);
+            let before = a.clone();
+            absolute_program("/data/p", &mut a);
+            assert_eq!(a, before, "{bare}");
+        }
     }
 
     #[test]

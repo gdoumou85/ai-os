@@ -234,6 +234,9 @@ impl<M: Model> Engine<M> {
                 let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
                 if let Some(r) = remember { self.store.add_instruction(&r)?; }
                 std::fs::create_dir_all(&self.housekeeping_dir)?;
+                // The sandbox works in this folder too, so it needs the same group and mode a
+                // project folder gets — the engine may be the first thing ever to create it.
+                snapshot::share_with_sandbox(&self.housekeeping_dir);
                 let job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
                 self.store.save_job(&job)?;
                 let mut out = vec![understood];
@@ -311,7 +314,7 @@ impl<M: Model> Engine<M> {
                 return Ok(out);
             }
         }
-        out.push("Not covered: unsaved work in open programs; files written outside the project.".into());
+        out.push("Not covered: unsaved work in open programs; files written outside the project; a package version the archive no longer carries (a reinstall takes the current one).".into());
         // A plain project folder (it predates 1c, or the filesystem is not btrfs) never had a
         // snapshot taken, so its files were not covered. Asked of the folder itself rather than
         // of the rows: an undo run that has already put the snapshot back has no row left to

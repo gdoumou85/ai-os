@@ -27,12 +27,17 @@ pub fn create_project_dir(path: &Path) -> io::Result<bool> {
     if !subvolume {
         std::fs::create_dir_all(path)?;
     }
-    // Shared with the sandbox user (1b spec §7) — and a subvolume does not inherit the setgid
-    // group from its parent, so this matters more here than it did for a plain folder.
-    // Best effort: in tests there is no such group.
+    share_with_sandbox(path);
+    Ok(subvolume)
+}
+
+/// Hand a folder to the sandbox user: group `ai-sandbox`, mode 2770 so whatever is made inside
+/// it stays shared (1b spec §7). A subvolume does not inherit the setgid group from its parent,
+/// and the housekeeping folder is created by the engine on machines that never saw the setup
+/// script — both front doors go through here. Best effort: in tests there is no such group.
+pub fn share_with_sandbox(path: &Path) {
     let _ = Command::new("chgrp").arg("ai-sandbox").arg(path).status();
     let _ = Command::new("chmod").arg("2770").arg(path).status();
-    Ok(subvolume)
 }
 
 /// Every btrfs subvolume is inode 256 *and* carries its own anonymous device number, so it

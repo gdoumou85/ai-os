@@ -1,6 +1,6 @@
 use crate::action::Action;
 use crate::log::{ActionLog, LogError};
-use crate::rules::{classify, resolves_inside, under_any, Risk};
+use crate::rules::{classify, resolves_inside, under_any, wrong_hand, Risk};
 use crate::undo::UndoEntry;
 use crate::worker::{Outcome, Worker};
 use std::path::{Path, PathBuf};
@@ -60,6 +60,16 @@ impl<W: Worker> Executor<W> {
     /// stderr but the outcome is still returned; only the blocked path may fail on
     /// logging since nothing ran.
     pub fn execute(&self, job_id: &str, action: &Action, approved: bool) -> Result<ExecOutcome, LogError> {
+        // A free command that belongs to another hand never reaches the sandbox: its real
+        // failure there teaches the model the wrong thing about the machine (see `wrong_hand`).
+        if let Action::RunCommand { argv } = action {
+            if let Some(reason) = wrong_hand(argv) {
+                if let Err(e) = self.log.append(job_id, action, &format!("error: {reason}")) {
+                    eprintln!("executor: failed to log a wrong-hand refusal: {e}");
+                }
+                return Ok(ExecOutcome::Ran(Outcome::err(reason)));
+            }
+        }
         match classify(action, &self.workspace) {
             Risk::NeedsConfirm(reason) if !approved => {
                 self.log.append(job_id, action, &format!("blocked: {reason}"))?;
@@ -141,6 +151,18 @@ mod tests {
         assert!(matches!(out, ExecOutcome::Ran(_)));
         assert_eq!(e.sandbox.calls.borrow().len(), 1);
         assert_eq!(e.log.count_for_job("j1").unwrap(), 1);
+    }
+
+    #[test]
+    fn a_command_that_belongs_to_another_hand_never_reaches_the_sandbox() {
+        let e = exec(true);
+        let a = Action::RunCommand { argv: vec!["apt-get".into(), "install".into(), "-y".into(), "cowsay".into()] };
+        match e.execute("j1", &a, false).unwrap() {
+            ExecOutcome::Ran(o) => assert!(!o.ok && o.detail.contains("`install` action"), "{o:?}"),
+            other => panic!("a refusal is a failed step, not {other:?}"),
+        }
+        assert!(e.sandbox.calls.borrow().is_empty() && e.admin.calls.borrow().is_empty());
+        assert_eq!(e.log.count_for_job("j1").unwrap(), 1, "the refusal is logged like any outcome");
     }
 
     #[test]
