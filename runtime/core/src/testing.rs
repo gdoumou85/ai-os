@@ -2,7 +2,7 @@
 use executor::action::Action;
 use executor::undo::UndoEntry;
 use executor::worker::{Outcome, Worker};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
@@ -86,6 +86,58 @@ pub fn scripted_workers(rec: &Recorder) -> crate::engine::WorkerFactory {
     ))
 }
 
+/// The files half of undo, recorded instead of done. A temp root is never btrfs, so the real
+/// `snapshot::take` always answers `None` there and the whole ProjectSnapshot path — the row at
+/// job start, the restore on undo, the report line — had no unit coverage at all.
+///
+/// Clone-as-handle: the engine takes one, the test keeps another and reads what happened.
+#[derive(Clone, Default)]
+pub struct FakeSnapshotter(pub Rc<Snapshots>);
+
+#[derive(Default)]
+pub struct Snapshots {
+    /// (folder, snapshots_dir, job_id) per `take`.
+    pub taken: RefCell<Vec<(PathBuf, PathBuf, String)>>,
+    /// (folder, snapshot) per `restore`.
+    pub restored: RefCell<Vec<(PathBuf, PathBuf)>>,
+    /// Whether `take` answers `Some(<snapshots_dir>/<project>@<job>)` or `None` (a plain folder).
+    pub snapshots: Cell<bool>,
+    pub take_fails: Cell<bool>,
+    pub restore_fails: Cell<bool>,
+}
+
+impl FakeSnapshotter {
+    /// One that really "snapshots" — the default records but answers `None`, like a plain folder.
+    pub fn working() -> Self {
+        let f = Self::default();
+        f.0.snapshots.set(true);
+        f
+    }
+    pub fn last_snapshot(&self) -> PathBuf {
+        let taken = self.0.taken.borrow();
+        let (folder, dir, job) = taken.last().expect("nothing was snapshotted");
+        dir.join(format!("{}@{job}", folder.file_name().unwrap_or_default().to_string_lossy()))
+    }
+}
+
+fn nope(what: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, format!("the fake {what} was told to fail"))
+}
+
+impl crate::snapshot::Snapshotter for FakeSnapshotter {
+    fn take(&self, folder: &Path, snapshots_dir: &Path, job_id: &str) -> std::io::Result<Option<PathBuf>> {
+        self.0.taken.borrow_mut().push((folder.to_path_buf(), snapshots_dir.to_path_buf(), job_id.to_string()));
+        if self.0.take_fails.get() {
+            return Err(nope("snapshot"));
+        }
+        Ok(self.0.snapshots.get().then(|| self.last_snapshot()))
+    }
+    fn restore(&self, folder: &Path, snapshot: &Path) -> std::io::Result<()> {
+        self.0.restored.borrow_mut().push((folder.to_path_buf(), snapshot.to_path_buf()));
+        if self.0.restore_fails.get() { Err(nope("restore")) } else { Ok(()) }
+    }
+}
+
 /// Names a test's root without touching disk — for a move that must mention the root before
 /// `engine_with` has created it.
 pub fn temp_root_path(tag: &str) -> PathBuf {
@@ -118,4 +170,11 @@ pub fn engine_with(moves: Vec<crate::moves::Move>, tag: &str) -> (crate::engine:
         snapshots,
     );
     (e, rec, root)
+}
+
+/// Same engine, with the files half of undo faked so a temp root can exercise it.
+pub fn engine_with_snapshots(moves: Vec<crate::moves::Move>, tag: &str, snap: &FakeSnapshotter)
+    -> (crate::engine::Engine<crate::model::FakeModel>, Recorder, PathBuf) {
+    let (e, rec, root) = engine_with(moves, tag);
+    (e.with_snapshotter(Box::new(snap.clone())), rec, root)
 }

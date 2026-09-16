@@ -2,7 +2,7 @@ use crate::job::{Job, State, StepRecord};
 use crate::model::{Model, ModelError};
 use crate::moves::Move;
 use crate::prompt;
-use crate::snapshot;
+use crate::snapshot::{self, RealSnapshotter, Snapshotter};
 use crate::store::{Store, StoreError};
 use executor::action::Action;
 use executor::executor::{ExecOutcome, Executor};
@@ -36,6 +36,9 @@ pub struct Engine<M: Model> {
     housekeeping_dir: PathBuf,
     /// Where a job's read-only project snapshot goes — the files undo puts back.
     snapshots_dir: PathBuf,
+    /// The files half of undo. A seam so the job-start ordering and the undo report can be
+    /// proven without btrfs; the real one is `snapshot::RealSnapshotter`.
+    snapshotter: Box<dyn Snapshotter>,
 }
 
 pub fn sanitize_project_name(raw: &str) -> String {
@@ -97,7 +100,14 @@ fn display_name(job: &Job) -> &str {
 
 impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf, snapshots_dir: PathBuf) -> Self {
-        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir }
+        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir, snapshotter: Box::new(RealSnapshotter) }
+    }
+
+    /// Swap the files half of undo. Tests only in practice; kept off `new` so the six call
+    /// sites that want the real thing keep saying nothing about it.
+    pub fn with_snapshotter(mut self, s: Box<dyn Snapshotter>) -> Self {
+        self.snapshotter = s;
+        self
     }
 
     pub fn housekeeping_dir(&self) -> &Path { &self.housekeeping_dir }
@@ -206,7 +216,13 @@ impl<M: Model> Engine<M> {
                 };
                 // A new project folder is a btrfs subvolume where the filesystem allows one —
                 // that is what makes this project's files undoable at all.
-                if is_new { snapshot::create_project_dir(&folder)?; }
+                // A folder that is already there is not this project's: `create_project_dir`
+                // refuses it rather than hand someone else's directory to the sandbox user.
+                if is_new {
+                    if let Err(e) = snapshot::create_project_dir(&folder) {
+                        return Ok(vec![format!("I could not start *{name}*: {e}")]);
+                    }
+                }
                 let desc = existing.map(|p| p.description).unwrap_or(description);
                 let folder = folder.display().to_string();
                 self.store.upsert_project(&name, &folder, &desc)?;
@@ -219,11 +235,17 @@ impl<M: Model> Engine<M> {
                 job.new_project = is_new;
                 // The model's `goal` is its paraphrase; this is what the user actually said.
                 job.request = text.to_string();
+                // The files as they were before this job touched them — taken BEFORE the job
+                // row exists. A snapshot that fails after the job is saved leaves an open job
+                // whose files nothing can put back; this way the job never starts at all. A
+                // plain-folder project (pre-1c, or any non-btrfs machine) gets no snapshot and
+                // no row — undo says so rather than pretending the files were covered.
+                let snap = match self.snapshotter.take(Path::new(&folder), &self.snapshots_dir, &job.id) {
+                    Ok(s) => s,
+                    Err(e) => return Ok(vec![format!("I could not start *{name}*: the files could not be put safe first ({e}).")]),
+                };
                 self.store.save_job(&job)?;
-                // The files as they were before this job touched them. A plain-folder project
-                // (pre-1c, or any non-btrfs machine) gets no snapshot and no row — undo says so
-                // rather than pretending the files were covered.
-                if let Some(snap) = snapshot::take(Path::new(&folder), &self.snapshots_dir, &job.id)? {
+                if let Some(snap) = snap {
                     self.store.add_undo(&job.id, &UndoEntry::ProjectSnapshot { folder: folder.clone(), snapshot: snap.display().to_string() })?;
                 }
                 let mut out = vec![understood];
@@ -289,7 +311,7 @@ impl<M: Model> Engine<M> {
             let result = match &entry {
                 // `snap`, not `snapshot`: the module of that name is what does the work.
                 UndoEntry::ProjectSnapshot { folder, snapshot: snap } => {
-                    snapshot::restore(Path::new(folder), Path::new(snap)).map_err(|e| e.to_string())
+                    self.snapshotter.restore(Path::new(folder), Path::new(snap)).map_err(|e| e.to_string())
                 }
                 UndoEntry::Setting { key, previous } => match previous {
                     Some(value) => self.store.set_setting(key, value).map(|_| ()).map_err(|e| e.to_string()),
@@ -1370,6 +1392,86 @@ mod tests {
         assert!(out.iter().any(|l| l.contains("Cleared setting projects_root")), "{out:?}");
         assert_eq!(e.store.get_setting("projects_root").unwrap(), None, "a second undo reaches the job before that");
         assert!(e.handle("undo").unwrap()[0].contains("Nothing left to undo"));
+    }
+
+    /// I6: the ProjectSnapshot path — the row at job start, the restore on undo, the report
+    /// line — had no unit coverage at all, because a temp root is never btrfs so the real
+    /// `take` always answered `None`. These four go through `FakeSnapshotter`.
+    fn snapshot_job() -> Vec<Move> {
+        vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true"))]
+    }
+
+    #[test]
+    fn a_job_start_records_the_snapshot_it_took() {
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, root) = crate::testing::engine_with_snapshots(snapshot_job(), "snap-row", &snap);
+        e.handle("go").unwrap();
+        let taken = snap.0.taken.borrow().clone();
+        assert_eq!(taken.len(), 1, "one snapshot per job start");
+        assert_eq!(taken[0].0, root.join("p"), "the project's own folder");
+        assert_eq!(taken[0].1, root.join("snapshots"));
+        let job = e.store.last_undoable_job().unwrap().expect("the job finished");
+        let rows = e.store.unapplied_undo(&job.id).unwrap();
+        let row = rows.iter().find_map(|(_, entry)| match entry {
+            UndoEntry::ProjectSnapshot { folder, snapshot } => Some((folder.clone(), snapshot.clone())),
+            _ => None,
+        }).expect("a ProjectSnapshot row");
+        assert_eq!(row.0, root.join("p").display().to_string());
+        assert_eq!(row.1, snap.last_snapshot().display().to_string());
+    }
+
+    #[test]
+    fn undo_restores_the_files_from_that_snapshot() {
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, root) = crate::testing::engine_with_snapshots(snapshot_job(), "snap-undo", &snap);
+        e.handle("go").unwrap();
+        let expected = snap.last_snapshot();
+        let out = e.handle("undo").unwrap();
+        assert_eq!(snap.0.restored.borrow().as_slice(), &[(root.join("p"), expected)], "folder and snapshot, as recorded");
+        assert!(out.iter().any(|l| l.starts_with("Restored the files of") && l.contains("p")), "{out:?}");
+    }
+
+    #[test]
+    fn a_restore_that_fails_is_reported_and_not_retried() {
+        let snap = crate::testing::FakeSnapshotter::working();
+        let (mut e, _, _) = crate::testing::engine_with_snapshots(snapshot_job(), "snap-undo-fail", &snap);
+        e.handle("go").unwrap();
+        snap.0.restore_fails.set(true);
+        let out = e.handle("undo").unwrap();
+        assert!(out.iter().any(|l| l.starts_with("Could not undo:") && l.contains("Restored the files of")), "{out:?}");
+        // The row is marked applied all the same: a second undo reaches the job before this one
+        // (there is none), never this same failing restore again.
+        assert!(e.handle("undo").unwrap()[0].contains("Nothing left to undo"), "the row was left unapplied");
+        assert_eq!(snap.0.restored.borrow().len(), 1, "tried exactly once");
+    }
+
+    #[test]
+    fn a_job_whose_files_cannot_be_put_safe_first_never_starts() {
+        let snap = crate::testing::FakeSnapshotter::default();
+        snap.0.take_fails.set(true);
+        let (mut e, rec, _) = crate::testing::engine_with_snapshots(snapshot_job(), "snap-take-fail", &snap);
+        let out = e.handle("go").unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].contains("could not be put safe first") && out[0].contains("told to fail"), "{out:?}");
+        assert!(e.open_job().unwrap().is_none(), "no job was saved");
+        assert!(e.store.last_undoable_job().unwrap().is_none(), "no job row at all");
+        assert!(rec.calls.borrow().is_empty(), "nothing ran");
+    }
+
+    #[test]
+    fn a_project_never_adopts_a_folder_that_is_already_there() {
+        // C2: `create_project_dir` hands the folder to the sandbox group. A project name alone
+        // must not be able to do that to a folder someone else made.
+        // After `engine_with`: it wipes and recreates the temp root.
+        let (mut e, rec, root) = engine_with(vec![start("bin", true), plan()], "adopt");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin").join("keep.sh"), "mine").unwrap();
+        let out = e.handle("make bin").unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].contains("a folder already exists at") && out[0].contains("choose another project name"), "{out:?}");
+        assert!(e.open_job().unwrap().is_none(), "no job was started");
+        assert_eq!(std::fs::read_to_string(root.join("bin").join("keep.sh")).unwrap(), "mine");
+        assert!(rec.calls.borrow().is_empty());
     }
 
     #[test]

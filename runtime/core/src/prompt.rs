@@ -17,7 +17,8 @@ Rules:
 - Install software with `install` (apt), never with run_command apt. Enable, disable or restart services with `service`. Language packages (pip, npm, crates) come through `fetch_packages`: the sandbox has no other network.
 - Make a folder outside the working directory with `make_dir`, never `run_command mkdir`: the sandbox can only write inside the working directory, so mkdir there reports a read-only filesystem.
 - The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`), never by an absolute path: an absolute path leaves the workspace and needs the user's yes.
-- A file outside the project needs the user's yes; say in one line why you need it.
+- A file outside the project needs the user's yes (reading under /etc is free); say in one line why you need it.
+- Remove software with `remove` and change a setting with `set_setting`; both are hands like the rest, not run_command.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.";
 
 fn join_instructions(instructions: &[String]) -> String {
@@ -180,6 +181,11 @@ mod tests {
         // Third finding: absolute paths for the project's own files put every write one level
         // above the workspace, so each one needed an approval and nothing landed in the project.
         assert!(SYSTEM.contains("relative to the working directory"));
+        // Reading /etc is Auto (rules::classify), so the flat "needs the user's yes" sent the
+        // model asking for approvals it never needed.
+        assert!(SYSTEM.contains("reading under /etc is free"));
+        // The two hands the list left out: the model reached for run_command instead.
+        assert!(SYSTEM.contains("`remove`") && SYSTEM.contains("`set_setting`"));
     }
 
     #[test]

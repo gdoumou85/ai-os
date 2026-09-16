@@ -11,8 +11,9 @@ pub enum Risk {
 }
 
 /// Lexically resolve `..`/`.` components without touching disk. `None` if a `..`
-/// would escape past the root (e.g. `/../x`).
-fn normalize(path: &Path) -> Option<PathBuf> {
+/// would escape past the root (e.g. `/../x`). `pub`: `AdminWorker` compares it against
+/// `canonicalize` to catch a path that reaches its root through a symlink.
+pub fn normalize(path: &Path) -> Option<PathBuf> {
     let mut norm = PathBuf::new();
     for c in path.components() {
         use std::path::Component::*;
@@ -41,8 +42,16 @@ pub(crate) fn resolves_inside(path: &str, workspace: &Path) -> bool {
     }
 }
 
-/// AI-writable roots outside the per-job workspace — `make_dir` may create inside these.
-pub const AI_ROOTS: [&str; 2] = ["/data", "/home/ai"];
+/// AI-writable roots outside the per-job workspace — `make_dir` may create inside these,
+/// and `projects_root` may point into them.
+///
+/// `/home/ai` is deliberately NOT one of them, though the wrapper still accepts it for an
+/// *approved* action. It is the executor's own home: `.profile` puts `~/bin` first on PATH, so
+/// a folder the AI could create there unasked — `set_setting projects_root=/home/ai` plus a
+/// project called `bin` — would be shared with the sandbox user and put a program of the
+/// model's choosing in front of everything user `ai` runs, which is the one account that may
+/// call the root wrapper. Asking first is the whole difference.
+pub const AI_ROOTS: [&str; 1] = ["/data"];
 
 /// Whether an absolute path normalizes under one of `roots` (lexical, `..`-safe, like
 /// `resolves_inside`). Relative paths are always rejected — there is no "under" without
@@ -264,7 +273,9 @@ mod tests {
     #[test]
     fn make_dir_roots() {
         assert_eq!(classify(&Action::MakeDir { path: "/data/work".into() }, &ws()), Risk::Auto);
-        assert_eq!(classify(&Action::MakeDir { path: "/home/ai/x".into() }, &ws()), Risk::Auto);
+        // Not Auto, on purpose (spec change): /home/ai is `ai`'s own home, and `~/bin` is first
+        // on its PATH — a folder the model makes there unasked is a program it can run as `ai`.
+        assert!(matches!(classify(&Action::MakeDir { path: "/home/ai/x".into() }, &ws()), Risk::NeedsConfirm(_)));
         assert!(matches!(classify(&Action::MakeDir { path: "/opt/x".into() }, &ws()), Risk::NeedsConfirm(_)));
         assert!(matches!(classify(&Action::MakeDir { path: "/data/../etc".into() }, &ws()), Risk::NeedsConfirm(_)));
         assert!(matches!(classify(&Action::MakeDir { path: "relative".into() }, &ws()), Risk::NeedsConfirm(_)));

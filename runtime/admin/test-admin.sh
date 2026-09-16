@@ -17,6 +17,8 @@ refuses "trailing dash"           install -- g++-
 refuses "unit path as service"    service /tmp/x.service enable
 refuses "protected service"       service ollama disable
 refuses "protected unit suffix"   service ollama.service disable
+refuses "non-service unit"        service dbus.socket disable
+refuses "deb as package"          install -- cowsay.deb
 refuses "path outside roots"      write-file /usr/bin/evil
 refuses "sudoers write"           write-file /etc/sudoers.d/x
 refuses "shadow read"             read-file /etc/shadow
@@ -30,6 +32,16 @@ refuses "symlink write"           write-file /data/housekeeping/lnk-t1c
 refuses "symlink read"            read-file /data/housekeeping/lnk-t1c
 [ "$(cat /etc/hostname)" = "$host_before" ] && ok "symlink target untouched" || bad "symlink target untouched"
 rm -f /data/housekeeping/lnk-t1c
+# The caller owns the folders under /data, so it can plant a link to an allowed root INSIDE one
+# and reach through it: `realpath -m` alone would hand back a path under /etc and let it pass.
+ln -sfn /etc /data/housekeeping/dir-t1c
+refuses "symlink through a dir (write)" write-file /data/housekeeping/dir-t1c/ai-os-through
+refuses "symlink through a dir (read)"  read-file /data/housekeeping/dir-t1c/hostname
+[ ! -e /etc/ai-os-through ] && ok "nothing landed in /etc" || bad "a write reached /etc"
+rm -f /data/housekeeping/dir-t1c
+mkfifo /data/housekeeping/fifo-t1c
+refuses "fifo read"               read-file /data/housekeeping/fifo-t1c
+rm -f /data/housekeeping/fifo-t1c
 $A pkg-list | grep -qx bash && ok "pkg-list has bash" || bad "pkg-list"
 $A service ollama state | grep -q '^enabled active' && ok "service state" || bad "service state: $($A service ollama state)"
 echo hello | $A write-file /data/housekeeping/t1c.txt && [ "$($A read-file /data/housekeeping/t1c.txt)" = hello ] && ok "write/read file" || bad "write/read file"
@@ -41,6 +53,19 @@ echo hi | $A write-file /data/housekeeping/nd-t1c/f.txt && [ "$(stat -c '%U:%G %
 $A remove-file /data/housekeeping/nd-t1c/f.txt; $A remove-dir /data/housekeeping/nd-t1c
 $A make-dir /data/t1c-dir && [ "$(stat -c '%U:%G %a' /data/t1c-dir)" = "ai:ai-sandbox 2770" ] && ok "make-dir owner" || bad "make-dir owner: $(stat -c '%U:%G %a' /data/t1c-dir)"
 $A remove-dir /data/t1c-dir && [ ! -e /data/t1c-dir ] && ok "remove-dir" || bad "remove-dir"
+# make-dir on a folder that is already there changes nothing — it must never re-own or re-mode
+# a directory it did not create.
+$A make-dir /data/housekeeping/keep-t1c && chmod 700 /data/housekeeping/keep-t1c
+kept=$(stat -c '%a %U:%G' /data/housekeeping/keep-t1c); $A make-dir /data/housekeeping/keep-t1c
+[ "$(stat -c '%a %U:%G' /data/housekeeping/keep-t1c)" = "$kept" ] && ok "make-dir leaves an existing dir alone ($kept)" || bad "make-dir re-owned an existing dir: $kept -> $(stat -c '%a %U:%G' /data/housekeeping/keep-t1c)"
+$A remove-dir /data/housekeeping/keep-t1c
+# A new directory OUTSIDE the AI roots stays root's: /etc/foo created for an approved write must
+# not become a folder the sandbox user can then fill on its own.
+echo x | $A write-file /etc/ai-os-t1c/x >/dev/null 2>&1
+[ "$(stat -c %U /etc/ai-os-t1c 2>&1)" = root ] && ok "new /etc dir stays root's" || bad "new /etc dir owner: $(stat -c %U:%G /etc/ai-os-t1c 2>&1)"
+# The file goes; the empty directory stays, on purpose — nothing in the menu removes a directory
+# outside /data and /home/ai, which is the same boundary this check is about.
+$A remove-file /etc/ai-os-t1c/x
 [ "$($A sandbox-run --net=none --cwd=/data/housekeeping -- id -un)" = ai-sandbox ] && ok "sandbox-run uid" || bad "sandbox-run uid"
 $A sandbox-run --net=none --cwd=/data/housekeeping -- getent hosts example.com >/dev/null 2>&1 && bad "net=none leaks" || ok "net=none blocked"
 [ "$($A sandbox-run --net=none --cwd=/data/housekeeping -- printf '%s' '${HOME}')" = '${HOME}' ] && ok "dollar survives" || bad "dollar expanded"

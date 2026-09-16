@@ -10,15 +10,33 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Named in full, never looked up on PATH: the executor runs as `ai`, whose `~/bin` comes
+/// first on PATH, and `/data` is shared with the sandbox user — a bare `btrfs` here would be
+/// whatever the search order found. Same reason as `admin::SUDO`.
+const BTRFS: &str = "/usr/bin/btrfs";
+
 fn failed(what: &str, stderr: &[u8]) -> io::Error {
     io::Error::new(io::ErrorKind::Other, format!("{what}: {}", String::from_utf8_lossy(stderr).trim()))
 }
 
-/// Make a new project's folder. A btrfs subvolume where that works, a plain folder where it
+/// Make a *new* project's folder. A btrfs subvolume where that works, a plain folder where it
 /// does not (a non-btrfs parent — tests, and any machine that is not the workshop). Returns
 /// whether the folder really is a subvolume, i.e. whether this project can be snapshotted.
+///
+/// A folder that is already there is an error, never adopted. `share_with_sandbox` below hands
+/// the folder to group `ai-sandbox` 2770, and the caller only ever gets here for a project the
+/// store has never seen: adopting an existing folder would let a project name alone decide what
+/// the sandbox user may write into. `projects_root=/home/ai` plus a project called `bin` would
+/// have shared `~/bin` — first on user `ai`'s PATH, and `ai` is the one account that may call
+/// the root wrapper.
 pub fn create_project_dir(path: &Path) -> io::Result<bool> {
-    let subvolume = Command::new("btrfs")
+    if path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("a folder already exists at {}; choose another project name", path.display()),
+        ));
+    }
+    let subvolume = Command::new(BTRFS)
         .args(["subvolume", "create"])
         .arg(path)
         .output()
@@ -36,8 +54,8 @@ pub fn create_project_dir(path: &Path) -> io::Result<bool> {
 /// and the housekeeping folder is created by the engine on machines that never saw the setup
 /// script — both front doors go through here. Best effort: in tests there is no such group.
 pub fn share_with_sandbox(path: &Path) {
-    let _ = Command::new("chgrp").arg("ai-sandbox").arg(path).status();
-    let _ = Command::new("chmod").arg("2770").arg(path).status();
+    let _ = Command::new("/usr/bin/chgrp").arg("ai-sandbox").arg(path).status();
+    let _ = Command::new("/usr/bin/chmod").arg("2770").arg(path).status();
 }
 
 /// Every btrfs subvolume is inode 256 *and* carries its own anonymous device number, so it
@@ -70,15 +88,19 @@ pub fn take(folder: &Path, snapshots_dir: &Path, job_id: &str) -> io::Result<Opt
     std::fs::create_dir_all(snapshots_dir)?;
     let project = folder.file_name().unwrap_or_default().to_string_lossy().to_string();
     let prefix = format!("{project}@");
-    for entry in std::fs::read_dir(snapshots_dir)?.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
-            remove_snapshot(&entry.path());
-        }
-    }
+    // The new one FIRST, the old ones only once it exists. Pruning first meant a snapshot that
+    // failed to be taken had already thrown away the one the previous job could still have been
+    // undone with — a failure that destroys the thing it was protecting.
     let dest = snapshots_dir.join(format!("{prefix}{job_id}"));
-    let out = Command::new("btrfs").args(["subvolume", "snapshot", "-r"]).arg(folder).arg(&dest).output()?;
+    let out = Command::new(BTRFS).args(["subvolume", "snapshot", "-r"]).arg(folder).arg(&dest).output()?;
     if !out.status.success() {
         return Err(failed("btrfs subvolume snapshot", &out.stderr));
+    }
+    for entry in std::fs::read_dir(snapshots_dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) && entry.path() != dest {
+            remove_snapshot(&entry.path());
+        }
     }
     Ok(Some(dest))
 }
@@ -86,14 +108,14 @@ pub fn take(folder: &Path, snapshots_dir: &Path, job_id: &str) -> io::Result<Opt
 /// Drop a snapshot: read-only first has to go, then its owner may remove it like any folder.
 /// Best effort — a stale snapshot that will not budge must never stop a job from starting.
 fn remove_snapshot(path: &Path) {
-    let _ = Command::new("btrfs").args(["property", "set", "-ts"]).arg(path).args(["ro", "false"]).status();
+    let _ = Command::new(BTRFS).args(["property", "set", "-ts"]).arg(path).args(["ro", "false"]).status();
     let _ = std::fs::remove_dir_all(path);
 }
 
 /// Put a project's files back to the snapshot taken when the job started: the snapshot *becomes*
 /// the project folder, and only the copy the job worked in is removed.
 pub fn restore(folder: &Path, snapshot: &Path) -> io::Result<()> {
-    let out = Command::new("btrfs").args(["property", "set", "-ts"]).arg(snapshot).args(["ro", "false"]).output()?;
+    let out = Command::new(BTRFS).args(["property", "set", "-ts"]).arg(snapshot).args(["ro", "false"]).output()?;
     if !out.status.success() {
         return Err(failed("btrfs property set ro false", &out.stderr));
     }
@@ -131,9 +153,42 @@ fn swap_in(folder: &Path, snapshot: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The files half of undo, as a seam. The engine holds one of these rather than calling the
+/// functions above directly, so the job-start ordering and the undo report can be proven
+/// without a btrfs filesystem — see `testing::FakeSnapshotter`.
+pub trait Snapshotter {
+    fn take(&self, folder: &Path, snapshots_dir: &Path, job_id: &str) -> io::Result<Option<PathBuf>>;
+    fn restore(&self, folder: &Path, snapshot: &Path) -> io::Result<()>;
+}
+
+/// The real one: the two functions above, nothing else.
+pub struct RealSnapshotter;
+
+impl Snapshotter for RealSnapshotter {
+    fn take(&self, folder: &Path, snapshots_dir: &Path, job_id: &str) -> io::Result<Option<PathBuf>> {
+        take(folder, snapshots_dir, job_id)
+    }
+    fn restore(&self, folder: &Path, snapshot: &Path) -> io::Result<()> {
+        restore(folder, snapshot)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_that_is_already_there_is_never_adopted_as_a_new_project() {
+        let root = temp("exists");
+        let folder = root.join("bin");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("keep.sh"), "mine").unwrap();
+        let err = create_project_dir(&folder).expect_err("an existing folder is not a new project");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(err.to_string().contains("choose another project name"), "{err}");
+        assert_eq!(std::fs::read_to_string(folder.join("keep.sh")).unwrap(), "mine", "nothing was touched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn temp(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("ai-os-snapshot-{tag}-{}", std::process::id()));

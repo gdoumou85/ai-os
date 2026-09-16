@@ -12,6 +12,12 @@ use std::process::{Command, Stdio};
 /// The one program user `ai` may run as root (installed by Task 1).
 pub const WRAPPER: &str = "/usr/local/libexec/ai-os-admin";
 
+/// `sudo` by absolute path, never by PATH lookup. The executor runs as `ai`, whose `.profile`
+/// puts `~/bin` first on PATH, and `/data` is shared with the sandbox user — a bare `sudo`
+/// would be whatever the search order found first. The one thing that reaches root is named
+/// in full, here and in `worker::SandboxWorker`.
+pub const SUDO: &str = "/usr/bin/sudo";
+
 pub struct AdminWorker;
 
 /// Names in `after` that were not in `before`. Both come from `pkg-list`, already sorted.
@@ -157,7 +163,7 @@ impl AdminWorker {
 
     /// The untruncated call: (exit-0?, stdout, stderr).
     fn raw(verb: &str, args: &[&str], stdin: Option<&str>) -> (bool, String, String) {
-        let mut child = match Command::new("sudo")
+        let mut child = match Command::new(SUDO)
             .args(["-n", WRAPPER, verb])
             .args(args)
             .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
@@ -280,6 +286,21 @@ impl Worker for AdminWorker {
         if action_path(action).is_some_and(|p| !Path::new(p).is_absolute()) {
             return Outcome::err("admin paths must be absolute");
         }
+        // The caller owns the folders under /data, so it can plant `p -> /etc/cron.d` inside one:
+        // `/data/.../p/x` then RESOLVES under /etc, an allowed root, and an approved "/data/…"
+        // write would land in /etc as root. What a path means lexically and where it actually
+        // goes must be the same thing. The wrapper refuses this too; this half means no
+        // privileged call is made at all. (An absent parent is the wrapper's business: it
+        // refuses a missing parent directory outright.)
+        if let Some(parent) = action_path(action).map(Path::new).and_then(Path::parent) {
+            if parent.exists() {
+                match (std::fs::canonicalize(parent), crate::rules::normalize(parent)) {
+                    (Ok(real), Some(lexical)) if real == lexical => {}
+                    (Err(e), _) => return Outcome::err(format!("cannot resolve path: {e}")),
+                    _ => return Outcome::err("path goes through a symlink"),
+                }
+            }
+        }
         match action {
             Action::Install { packages } => Self::packages("install", packages),
             Action::Remove { packages } => Self::packages("remove", packages),
@@ -370,6 +391,28 @@ mod tests {
             assert_eq!(out.detail, "admin paths must be absolute", "{a:?}");
             assert!(out.undo.is_none(), "a refusal changed nothing: {a:?}");
         }
+    }
+
+    /// C1: an intermediate symlink is caught before anything privileged is spawned.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_reaches_its_root_through_a_symlink_is_refused_before_the_wrapper_is_called() {
+        let root = std::env::temp_dir().join(format!("ai-os-admin-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let through = root.join("link").join("x").display().to_string();
+        for a in [
+            Action::WriteFile { path: through.clone(), contents: "x".into() },
+            Action::ReadFile { path: through.clone(), from_line: None, lines: None },
+            Action::MakeDir { path: through.clone() },
+        ] {
+            let out = AdminWorker.run(&a);
+            assert!(!out.ok, "{a:?}");
+            assert_eq!(out.detail, "path goes through a symlink", "{a:?}");
+            assert!(out.undo.is_none());
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

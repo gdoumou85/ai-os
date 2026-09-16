@@ -32,6 +32,12 @@ fn a_project_subvolume_snapshots_and_restores_as_the_ai_user() {
     assert!(snap.exists(), "{snap:?}");
     assert_eq!(snap, snapshots.join("it-snap@job-1"), "the name is <project>@<job>");
 
+    // A second job in the same project: the NEW snapshot exists before the old one is pruned,
+    // so a `take` that fails can never have thrown away the only snapshot there was.
+    let snap2 = snapshot::take(&folder, &snapshots, "job-2").unwrap().expect("a second snapshot");
+    assert!(snap2.exists() && !snap.exists(), "the newest is kept, the older pruned");
+    let snap = snap2;
+
     std::fs::remove_file(folder.join("a.txt")).unwrap();
     assert!(!folder.join("a.txt").exists());
 
@@ -40,9 +46,10 @@ fn a_project_subvolume_snapshots_and_restores_as_the_ai_user() {
     assert!(!snap.exists(), "the snapshot became the project folder");
     assert!(!folder.with_file_name("it-snap.old").exists(), "the folder the job worked in is gone");
 
-    // The group-shared setgid mode survives the snapshot/swap — the sandbox user still gets in.
-    let mode = std::process::Command::new("stat").args(["-c", "%a"]).arg(&folder).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&mode.stdout).trim(), "2770");
+    // The group-shared setgid mode AND the group itself survive the snapshot/swap — a restored
+    // project the sandbox user cannot get into is a project the next job cannot work on.
+    let mode = std::process::Command::new("stat").args(["-c", "%G %a"]).arg(&folder).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&mode.stdout).trim(), "ai-sandbox 2770");
 
     scrub(&folder);
     assert!(!folder.exists());

@@ -165,7 +165,7 @@ impl SandboxWorker {
         let args = sandbox_args(&self.workspace.display().to_string(), net, envs, argv);
         // The wrapper `exec`s systemd-run, so this status/stdout/stderr is the command's own.
         // A wrapper refusal is exit 3 with a `refused: …` line on stderr, which reads the same.
-        match Command::new("sudo").args(["-n", admin::WRAPPER]).args(&args).output() {
+        match Command::new(admin::SUDO).args(["-n", admin::WRAPPER]).args(&args).output() {
             Ok(o) => {
                 let ok = o.status.success();
                 let stdout = String::from_utf8_lossy(&o.stdout);
