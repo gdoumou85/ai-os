@@ -420,6 +420,8 @@ impl<M: Model> Engine<M> {
     const MAX_STEPS: usize = 25;
     const MAX_FAILS_PER_STEP: usize = 3;
     const MAX_REJECTIONS: u32 = 2;
+    /// `done` moves the blueprint gate may hold back before the job gives up (see `Job::done_gated`).
+    const MAX_DONE_GATED: u32 = 4;
     const MAX_REPLANS: u32 = 5;
 
     /// Mark a job finished (done/failed/cancelled) and say in one line what it came to.
@@ -608,6 +610,18 @@ impl<M: Model> Engine<M> {
         if job.declined_actions.contains(&key) {
             return self.reject(job, "the user declined that action; do not repeat it");
         }
+        // A yes already given holds for the rest of the job: the same action, word for word, is
+        // never put to the user twice. Checked after the decline, so a later no still wins.
+        let approved = approved || job.approved_actions.contains(&key);
+        // The very same action twice in a row, and it worked the first time: nothing changed in
+        // between, so the second is the model not reading its own step list — the system prompt's
+        // "a step that already succeeded is done". The live 1d run wrote the same `/etc` file nine
+        // times this way and then had no steps left for the rest of the job. Only an *immediate*
+        // repeat is caught, so re-running a command after something else has changed stays
+        // legitimate, and a `done` check is exempt entirely: re-running one verbatim is its point.
+        if !is_check && job.steps.last().is_some_and(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key) {
+            return self.reject(job, "that exact action just succeeded — its result is in the steps above; move on to the next step");
+        }
         if !is_check && !approved && job.failed_actions.contains(&key) {
             let earlier = job.steps.iter().rev().find(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).map(|s| s.detail.clone()).unwrap_or_default();
             return self.reject(job, &format!("that exact action already failed with: {earlier} — work around it or replan"));
@@ -700,6 +714,7 @@ impl<M: Model> Engine<M> {
             return self.finish(job, State::Failed, text);
         }
         if approved {
+            job.approved_actions.push(serde_json::to_string(&action).unwrap_or_default());
             if self.perform(&mut job, plan_step, action, true, false)? { return Ok(()); }
         } else {
             job.note_to_model = Some(format!("the user declined that action ({}): \"{text}\". Do not repeat it; find another way or finish without it.", job.pending_reason));
@@ -785,7 +800,20 @@ impl<M: Model> Engine<M> {
                         None
                     };
                     if let Some(why) = gate {
-                        Some(why)
+                        // A `done` the gate holds back is a legal move refused by policy — like
+                        // an act that needs the user's OK, not an answer the system could not
+                        // read — and what it asks for is one concrete extra step. The grammar
+                        // budget of two leaves room for a single retry, and the live 1d run lost
+                        // two jobs to a second `done` arriving before the blueprint write. Its
+                        // own bound, so a model that only ever says done still ends.
+                        job.done_gated += 1;
+                        if job.done_gated >= Self::MAX_DONE_GATED {
+                            let text = format!("I gave up on {}: {why}.", display_name(&job));
+                            return self.finish(job, State::Failed, text);
+                        }
+                        job.note_to_model = Some(format!("your last move was rejected: {why}. Do that with an act now, then say done again with a check."));
+                        self.store.save_job(&job)?;
+                        None
                     } else {
                         let key_step = job.plan.len().max(1);
                         if self.perform(&mut job, key_step, check, false, true)? { return Ok(()); }
@@ -1125,6 +1153,59 @@ mod tests {
         let out = e.handle("yes, send it").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         assert!(rec.calls.borrow().contains(&post));
+    }
+
+    #[test]
+    fn a_yes_holds_for_the_rest_of_the_job_and_the_same_action_is_not_asked_twice() {
+        // The live 1d run: the 9B re-issued its approved `/etc` write after that write had
+        // already succeeded, and the job sat on a second Needs-your-OK nobody was there to
+        // answer. One yes, one question.
+        let post = Action::HttpPost { url: "https://x".into(), body: "b".into() };
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(2, post.clone()),
+            act(3, run("true")), act(2, post.clone()), done(run("true")),
+        ], "approve-once");
+        e.handle("go").unwrap();
+        assert_eq!(e.open_job().unwrap().unwrap().state, State::WaitingApproval);
+        let out = e.handle("yes").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "asked for the same yes twice: {out:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == post).count(), 2, "both ran");
+    }
+
+    #[test]
+    fn a_done_held_back_by_the_blueprint_gate_has_room_for_more_than_one_retry() {
+        // The live 1d run lost two jobs here: the model said done twice before writing the
+        // blueprint and the grammar budget of two ended the job. A gated done is a legal move
+        // refused by policy, so it has its own, larger bound.
+        let (mut e, _, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("main.py")),
+            done(run("true")), done(run("true")),
+            act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "gate-retry");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        // And it still ends on a model that never writes the blueprint at all.
+        let (mut e, _, _) = engine_with(vec![
+            start("q", true), plan(), act(1, write("main.py")),
+            done(run("true")), done(run("true")), done(run("true")), done(run("true")), done(run("true")),
+        ], "gate-bound");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("gave up") && out.last().unwrap().contains("BLUEPRINT.md"), "{out:?}");
+    }
+
+    #[test]
+    fn the_same_action_twice_in_a_row_after_it_worked_is_rejected_not_run_again() {
+        // The live 1d run's waste: the 9B re-issued a write that had just succeeded, nine times
+        // over, and the job ran out of steps before it was finished.
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(1, write("BLUEPRINT.md")),
+            act(2, run("true")), done(run("true")),
+        ], "repeat");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == write("BLUEPRINT.md")).count(), 1, "{:?}", rec.calls.borrow());
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[4].user.contains("just succeeded"), "the model is told why: {}", prompts[4].user);
     }
 
     #[test]

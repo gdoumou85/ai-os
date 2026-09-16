@@ -7,6 +7,7 @@ use executor::action::Action;
 pub const SYSTEM: &str = "You are the AI that runs this computer for its user. You answer with exactly one JSON move.
 Rules:
 - You act only through moves; the executor runs them and reports back. Never claim something ran unless the report says so.
+- Where a move needs the user's yes, the machine stops it and asks them for you. Take the step and let it be asked: never wait for permission before acting, and never give up for the want of a yes you cannot ask for yourself.
 - You cannot know the full scope of what the user imagines. When starting work, ask what you need to know (1-3 questions) unless the job is in creative mode; then decide yourself.
 - Say what you understood before you act.
 - Work from the project's BLUEPRINT.md: read it to find what to change and where. After each change, update BLUEPRINT.md in place (replace lines, never pile on; keep it as small as possible). Create it first for a new project.
@@ -15,9 +16,9 @@ Rules:
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
 - If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.
 - Install software with `install` (apt), never with run_command apt. Enable, disable or restart services with `service`. Language packages (pip, npm, crates) come through `fetch_packages`: the sandbox has no other network.
-- Make a folder outside the working directory with `make_dir`, never `run_command mkdir`: the sandbox can only write inside the working directory, so mkdir there reports a read-only filesystem.
+- Make a folder outside the working directory with `make_dir` and an absolute path, never `run_command mkdir`: the sandbox can only write inside the working directory, so mkdir there reports a read-only filesystem. A folder inside the working directory is the sandbox's own: make it with `run_command mkdir -p src`. `make_dir` is never used with a relative path.
 - The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`), never by an absolute path: an absolute path leaves the workspace and needs the user's yes.
-- A file outside the project needs the user's yes (reading under /etc is free); say in one line why you need it.
+- A file outside the project is written with `write_file` and its absolute path, never with run_command (`echo`, `tee`, `cp`): the sandbox cannot reach out there, so such a command reports success and writes nothing. It needs the user's yes (reading under /etc is free); say in one line why you need it.
 - Remove software with `remove` and change a setting with `set_setting`; both are hands like the rest, not run_command.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.";
 
@@ -179,6 +180,18 @@ mod tests {
     fn front_door_allows_housekeep() {
         let p = front_door(&[], &[], &[], "hi");
         assert_eq!(p.allowed, vec!["reply", "start", "housekeep"]);
+    }
+
+    #[test]
+    fn system_rules_say_who_asks_the_user_and_which_hand_reaches_outside() {
+        // The 1d live run's findings, one line each. Without the first, the 9B planned the
+        // write_file it needed and then gave up on the job "because the user did not provide
+        // confirmation" — a yes it has no way to ask for. Without the second it wrote /etc with
+        // `echo`, which the sealed sandbox reports as a success that wrote nothing. Without the
+        // third it used `make_dir` for a folder in its own project.
+        assert!(SYSTEM.contains("never wait for permission before acting"));
+        assert!(SYSTEM.contains("A file outside the project is written with `write_file`"));
+        assert!(SYSTEM.contains("`make_dir` is never used with a relative path"));
     }
 
     #[test]

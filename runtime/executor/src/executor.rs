@@ -60,15 +60,24 @@ impl<W: Worker> Executor<W> {
     /// stderr but the outcome is still returned; only the blocked path may fail on
     /// logging since nothing ran.
     pub fn execute(&self, job_id: &str, action: &Action, approved: bool) -> Result<ExecOutcome, LogError> {
-        // A free command that belongs to another hand never reaches the sandbox: its real
-        // failure there teaches the model the wrong thing about the machine (see `wrong_hand`).
-        if let Action::RunCommand { argv } = action {
-            if let Some(reason) = wrong_hand(argv) {
-                if let Err(e) = self.log.append(job_id, action, &format!("error: {reason}")) {
-                    eprintln!("executor: failed to log a wrong-hand refusal: {e}");
-                }
-                return Ok(ExecOutcome::Ran(Outcome::err(reason)));
+        // The wrong hand is refused with the right one named, never run and never put to the
+        // user. A free command that belongs to another hand would fail in the sandbox in a way
+        // that teaches the model the wrong thing about the machine (see `wrong_hand`); a
+        // `make_dir` inside the working directory would go to the approval gate and, once the
+        // user said yes, be refused by the wrapper anyway — it takes absolute paths outside the
+        // workspace only. A yes that buys a failure is worse than a refusal that names the hand.
+        let wrong = match action {
+            Action::RunCommand { argv } => wrong_hand(argv),
+            Action::MakeDir { path } if resolves_inside(path, &self.workspace) => Some(format!(
+                "a folder inside the working directory is made with `run_command mkdir -p {path}`: make_dir is the hand for folders outside it and takes an absolute path"
+            )),
+            _ => None,
+        };
+        if let Some(reason) = wrong {
+            if let Err(e) = self.log.append(job_id, action, &format!("error: {reason}")) {
+                eprintln!("executor: failed to log a wrong-hand refusal: {e}");
             }
+            return Ok(ExecOutcome::Ran(Outcome::err(reason)));
         }
         match classify(action, &self.workspace) {
             Risk::NeedsConfirm(reason) if !approved => {
@@ -192,6 +201,23 @@ mod tests {
         e.execute("j", &Action::MakeDir { path: "/data/x".into() }, false).unwrap();
         assert_eq!(e.admin.calls.borrow().len(), 3);
         assert!(e.sandbox.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_make_dir_inside_the_working_directory_is_refused_with_the_right_hand_named() {
+        // The live 1d run had the 9B plan `make_dir src` for a folder in its own project. The
+        // wrapper takes absolute paths outside the workspace only, so the approval gate would
+        // have spent the user's yes on an action that then fails.
+        let e = exec(true);
+        for path in ["src", "/data/jobs/j1/src", "./a/b"] {
+            let out = e.execute("j", &Action::MakeDir { path: path.into() }, false).unwrap();
+            let ExecOutcome::Ran(o) = out else { panic!("{path} was not refused outright") };
+            assert!(!o.ok && o.detail.contains("mkdir -p"), "{path}: {}", o.detail);
+        }
+        assert!(e.admin.calls.borrow().is_empty() && e.sandbox.calls.borrow().is_empty());
+        // Outside it, `make_dir` is still the hand, and one that escapes still needs a yes.
+        assert!(matches!(e.execute("j", &Action::MakeDir { path: "/data/x".into() }, false).unwrap(), ExecOutcome::Ran(_)));
+        assert!(matches!(e.execute("j", &Action::MakeDir { path: "../../../opt/x".into() }, false).unwrap(), ExecOutcome::Blocked(_)));
     }
 
     #[test]

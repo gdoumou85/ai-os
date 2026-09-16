@@ -109,6 +109,17 @@ pub fn wrong_hand(argv: &[String]) -> Option<String> {
     if language.contains(&program) && has(&["install", "add", "ci"]) {
         return Some("language packages come through `fetch_packages` (name the manager and the packages), never with run_command: the sandbox has no network".into());
     }
+    // A file outside the AI's own areas written by a free command. The live 1d run showed the
+    // 9B answer "write hello into /etc/…" with `echo hello /etc/…`: in the jail that command
+    // succeeds — echo printed two words — and the model then read back a file that was never
+    // written and gave up. Named here so it reaches the hand that can do it, and the user's yes
+    // with it. Only the programs that write are caught: `ls /etc`, `cat /etc/os-release`,
+    // `python3 /usr/bin/x` and every other read of the machine stay free, as does anything
+    // under /data, where the workspace lives.
+    let writers = ["echo", "printf", "tee", "cp", "mv", "touch", "dd", "truncate", "chmod", "chown"];
+    if writers.contains(&program) && verbs.iter().any(|v| v.starts_with('/') && !under_any(v, &AI_ROOTS)) {
+        return Some("a file outside the AI's own folders is written with the `write_file` action (and the user's yes), never with run_command: the sandbox is sealed off from the rest of the machine, so a command like this reports success without writing anything".into());
+    }
     None
 }
 
@@ -179,6 +190,20 @@ mod tests {
     #[test]
     fn run_command_is_auto() {
         assert_eq!(classify(&Action::RunCommand { argv: vec!["ls".into()] }, &ws()), Risk::Auto);
+    }
+
+    #[test]
+    fn a_free_command_writing_outside_the_ai_areas_is_sent_to_write_file() {
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        for line in ["echo hello /etc/x.txt", "printf hi /etc/x", "tee /etc/x", "cp a.txt /etc/x",
+                     "mv a.txt /opt/x", "touch /etc/x", "sudo tee /etc/x", "chmod 600 /etc/x"] {
+            assert!(wrong_hand(&argv(line)).unwrap().contains("`write_file` action"), "{line}");
+        }
+        // Reading the machine, and anything under /data (where the workspace is), stay free.
+        for line in ["cat /etc/os-release", "ls /etc", "python3 /usr/bin/x", "grep x /etc/hosts",
+                     "echo hello", "cp a.txt b.txt", "tee /data/projects/p/out.txt", "touch notes.md"] {
+            assert_eq!(wrong_hand(&argv(line)), None, "{line}");
+        }
     }
 
     #[test]

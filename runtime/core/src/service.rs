@@ -157,8 +157,16 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                             continue;
                         }
                         // Busy only while a JOB is being worked (§3.3): a chat reply in progress
-                        // just queues the next message behind it.
-                        let job = sh.mirror.lock().unwrap().as_ref().map(|j| (j.id.clone(), j.name.clone()));
+                        // just queues the next message behind it, and so does a job that is
+                        // waiting for an answer or an OK. `running` alone is not enough for
+                        // that second one: it only falls once `handle_events` returns, which is
+                        // after the `needs_ok` has already reached the client, so a question
+                        // typed the instant the Needs-your-OK card appears would race it and
+                        // come back "busy" — which is the one thing §2.1 promises it is not.
+                        // The mirror does not race: the sink updates it before it broadcasts.
+                        let job = sh.mirror.lock().unwrap().as_ref()
+                            .filter(|j| j.waiting == Waiting::None)
+                            .map(|j| (j.id.clone(), j.name.clone()));
                         match job {
                             Some((job_id, name)) if sh.running.load(Ordering::SeqCst) => {
                                 sh.send_to(id, &Event::Busy { job_id, text: format!("I'm working on {name}. Say stop if you want me to change course.") });
