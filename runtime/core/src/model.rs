@@ -78,6 +78,43 @@ mod tests {
 
     fn p() -> Prompt { Prompt { system: "sys".into(), user: "hello".into() } }
 
+    /// Binds an ephemeral local socket, accepts one connection, reads up to the end of the
+    /// request headers (the body is irrelevant to these tests), then writes back `response`
+    /// verbatim. Returns the address before the client connects, since the listener is already
+    /// bound and listening.
+    fn respond_once(response: &'static str) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !received.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => received.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = stream.write_all(response.as_bytes());
+        });
+        addr
+    }
+
+    #[test]
+    fn ollama_http_error_status_is_model_error_http() {
+        let addr = respond_once("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let m = OllamaModel { url: format!("http://{addr}"), model: "x".into() };
+        assert!(matches!(m.next_move(&p()), Err(ModelError::Http(_))));
+    }
+
+    #[test]
+    fn ollama_non_json_body_is_model_error_http() {
+        let addr = respond_once("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json");
+        let m = OllamaModel { url: format!("http://{addr}"), model: "x".into() };
+        assert!(matches!(m.next_move(&p()), Err(ModelError::Http(_))));
+    }
+
     #[test]
     fn fake_returns_moves_in_order_then_errors() {
         let m = FakeModel::new(vec![
