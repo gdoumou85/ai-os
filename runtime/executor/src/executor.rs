@@ -94,6 +94,14 @@ impl<W: Worker> Executor<W> {
         Ok(())
     }
 
+    /// Record a line no action and no worker stands behind — the engine's own reversals (a
+    /// setting, a project snapshot). `reverse` cannot log those: they never reach a worker,
+    /// and a snapshot has no `Action` to log against at all.
+    pub fn log_text(&self, job_id: &str, text: &str) -> Result<(), LogError> {
+        self.log.append_text(job_id, text)?;
+        Ok(())
+    }
+
     /// Put one recorded change back. Only the privileged hand can undo.
     ///
     /// Same invariant as `execute`: a logging failure never loses the outcome.
@@ -214,5 +222,15 @@ mod tests {
         assert_eq!(e.admin.reversed.borrow().len(), 1);
         assert!(e.sandbox.reversed.borrow().is_empty());
         assert_eq!(e.log.count_for_job("j").unwrap(), 1);
+    }
+
+    #[test]
+    fn log_text_records_a_reversal_no_worker_performed() {
+        // The engine puts settings and project snapshots back itself, so nothing else would
+        // leave a trace of them in the action log.
+        let e = exec(true);
+        e.log_text("j", "undo: Setting { .. }: ok: put back").unwrap();
+        assert_eq!(e.log.count_for_job("j").unwrap(), 1);
+        assert!(e.admin.reversed.borrow().is_empty() && e.sandbox.calls.borrow().is_empty());
     }
 }

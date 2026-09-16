@@ -129,11 +129,16 @@ impl Store {
 
     /// The job "undo that" means: the most recently touched finished job that still has
     /// something left to put back. A job still running is excluded — stop it first.
+    ///
+    /// `rowid DESC` breaks a tie on `updated_at`: two jobs can finish inside the same
+    /// millisecond, and "the last job" must not then be whichever row SQLite happens to reach
+    /// first. Rows are inserted in the order jobs are created and the upsert keeps that rowid,
+    /// so the later job wins.
     pub fn last_undoable_job(&self) -> Result<Option<Job>, StoreError> {
         let json: Option<String> = self.conn.query_row(
             "SELECT json FROM core_jobs WHERE state IN ('done','failed','cancelled')
                AND EXISTS (SELECT 1 FROM undo WHERE undo.job_id = core_jobs.id AND undo.applied = 0)
-             ORDER BY updated_at DESC LIMIT 1",
+             ORDER BY updated_at DESC, rowid DESC LIMIT 1",
             [], |r| r.get(0),
         ).optional()?;
         Ok(match json { Some(j) => Some(serde_json::from_str(&j)?), None => None })

@@ -28,8 +28,9 @@ fn a_project_subvolume_snapshots_and_restores_as_the_ai_user() {
     assert!(snapshot::is_subvolume(&folder), "inode 256 is what tells a subvolume from a plain folder");
     std::fs::write(folder.join("a.txt"), "the work").unwrap();
 
-    let snap = snapshot::take(&folder, &snapshots, "it-snap@job-1").unwrap().expect("a subvolume project is snapshotted");
+    let snap = snapshot::take(&folder, &snapshots, "job-1").unwrap().expect("a subvolume project is snapshotted");
     assert!(snap.exists(), "{snap:?}");
+    assert_eq!(snap, snapshots.join("it-snap@job-1"), "the name is <project>@<job>");
 
     std::fs::remove_file(folder.join("a.txt")).unwrap();
     assert!(!folder.join("a.txt").exists());

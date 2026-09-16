@@ -81,9 +81,10 @@ pub fn is_stop(text: &str) -> bool {
 /// negation ("don't undo") and a sentence that merely contains the word ("undo is a word"):
 /// neither is on the list, and undoing a job by accident is not a mistake we can offer back.
 pub fn is_undo(text: &str) -> bool {
-    const UNDO_PHRASES: [&str; 9] = [
+    const UNDO_PHRASES: [&str; 13] = [
         "undo", "undo that", "undo it", "undo the last job", "undo last job",
         "roll back", "rollback", "put it back", "revert",
+        "please undo", "undo please", "undo it please", "undo that please",
     ];
     UNDO_PHRASES.contains(&normalize(text).as_str())
 }
@@ -220,7 +221,7 @@ impl<M: Model> Engine<M> {
                 // The files as they were before this job touched them. A plain-folder project
                 // (pre-1c, or any non-btrfs machine) gets no snapshot and no row — undo says so
                 // rather than pretending the files were covered.
-                if let Some(snap) = snapshot::take(Path::new(&folder), &self.snapshots_dir, &format!("{name}@{}", job.id))? {
+                if let Some(snap) = snapshot::take(Path::new(&folder), &self.snapshots_dir, &job.id)? {
                     self.store.add_undo(&job.id, &UndoEntry::ProjectSnapshot { folder: folder.clone(), snapshot: snap.display().to_string() })?;
                 }
                 let mut out = vec![understood];
@@ -269,11 +270,14 @@ impl<M: Model> Engine<M> {
             None => return Ok(vec!["Nothing left to undo.".into()]),
         };
         let rows = self.store.unapplied_undo(&job.id)?;
-        let covered_files = rows.iter().any(|(_, e)| matches!(e, UndoEntry::ProjectSnapshot { .. }));
-        let mut out = vec![format!("Undoing the last job ({}): …", display_name(&job))];
+        // One executor for the whole reversal, like one job's worth of work: `executor_for`
+        // opens the action log, which is not something to do once per row.
+        let exec = self.executor_for(&job)?;
+        let mut out = vec![format!("Undoing the last job ({}):", display_name(&job))];
         for (row_id, entry) in rows {
             // Settings and snapshots are the engine's own: no worker holds either. Everything
             // else was done by the privileged hand, so the privileged hand puts it back.
+            let engine_lane = matches!(entry, UndoEntry::ProjectSnapshot { .. } | UndoEntry::Setting { .. });
             let result = match &entry {
                 // `snap`, not `snapshot`: the module of that name is what does the work.
                 UndoEntry::ProjectSnapshot { folder, snapshot: snap } => {
@@ -283,23 +287,37 @@ impl<M: Model> Engine<M> {
                     Some(value) => self.store.set_setting(key, value).map(|_| ()).map_err(|e| e.to_string()),
                     None => self.store.delete_setting(key).map_err(|e| e.to_string()),
                 },
-                other => match self.executor_for(&job)?.reverse(&job.id, other)? {
+                other => match exec.reverse(&job.id, other)? {
                     o if o.ok => Ok(()),
                     o => Err(o.detail),
                 },
             };
-            self.store.mark_undo_applied(row_id)?;
+            // `Executor::reverse` logs the admin lane itself; the engine's own two kinds would
+            // otherwise leave no trace at all of having been put back.
+            if engine_lane {
+                let (tag, detail) = match &result { Ok(()) => ("ok", "put back".to_string()), Err(d) => ("error", d.clone()) };
+                if let Err(e) = exec.log_text(&job.id, &format!("undo: {entry:?}: {tag}: {detail}")) {
+                    eprintln!("core: failed to log an undo: {e}");
+                }
+            }
             out.push(match result {
                 Ok(()) => entry.describe(),
                 Err(detail) => format!("Could not undo: {} — left as is ({detail})", entry.describe()),
             });
+            // The change is already put back, so a store that cannot record it is the end of the
+            // run — but the user still gets every line earned so far rather than an error page.
+            if let Err(e) = self.store.mark_undo_applied(row_id) {
+                out.push(format!("Undo stopped early: {e}"));
+                return Ok(out);
+            }
         }
         out.push("Not covered: unsaved work in open programs; files written outside the project.".into());
-        // No snapshot row means the project folder is a plain folder (it predates 1c, or the
-        // filesystem is not btrfs): its files were never covered, and saying so beats implying
-        // the job was fully put back.
-        if !job.housekeeping && !covered_files {
-            out.push(format!("Files in {} were not covered: the project predates undo.", job.project));
+        // A plain project folder (it predates 1c, or the filesystem is not btrfs) never had a
+        // snapshot taken, so its files were not covered. Asked of the folder itself rather than
+        // of the rows: an undo run that has already put the snapshot back has no row left to
+        // read, and would otherwise start claiming the files were never covered.
+        if !job.housekeeping && !snapshot::is_subvolume(Path::new(&job.folder)) {
+            out.push(format!("Files in *{}* were not covered: the project predates undo.", job.project));
         }
         Ok(out)
     }
@@ -637,6 +655,7 @@ mod tests {
         assert!(is_undo("undo"));
         assert!(is_undo("Undo that."));
         assert!(is_undo("roll back"));
+        assert!(is_undo("Please undo!")); assert!(is_undo("undo that please"));
         assert!(!is_undo("don't undo"));
         assert!(!is_undo("undo is a word"));
     }
@@ -1256,7 +1275,7 @@ mod tests {
         let setting_at = out.iter().position(|l| l.contains("projects_root")).unwrap();
         let folder_at = out.iter().position(|l| l.contains("Removed the folder")).unwrap();
         assert!(setting_at < folder_at, "{out:?}");
-        assert!(out[0].contains("Undoing the last job (housekeeping)"), "{out:?}");
+        assert_eq!(out[0], "Undoing the last job (housekeeping):", "{out:?}");
         assert!(out.iter().any(|l| l.contains("Not covered: unsaved work in open programs")), "{out:?}");
         assert!(!out.iter().any(|l| l.contains("predates undo")), "housekeeping has no project files: {out:?}");
         assert!(e.handle("undo").unwrap()[0].contains("Nothing left to undo"));
@@ -1326,6 +1345,26 @@ mod tests {
     }
 
     #[test]
+    fn second_undo_reaches_the_previous_job() {
+        fn set_root(value: &str) -> Move { act(1, Action::SetSetting { key: "projects_root".into(), value: value.into() }) }
+        let (mut e, _, _) = engine_with(vec![
+            housekeep(), plan(), set_root("/data/work"), done(run("true")),
+            housekeep(), plan(), set_root("/data/other"), done(run("true")),
+        ], "undo-twice");
+        e.handle("put the projects in /data/work").unwrap();
+        e.handle("no, /data/other").unwrap();
+        assert_eq!(e.store.get_setting("projects_root").unwrap().as_deref(), Some("/data/other"));
+
+        let out = e.handle("undo").unwrap();
+        assert!(out.iter().any(|l| l.contains("Setting projects_root back to /data/work")), "{out:?}");
+        assert_eq!(e.store.get_setting("projects_root").unwrap().as_deref(), Some("/data/work"), "the newest job goes back first");
+        let out = e.handle("undo").unwrap();
+        assert!(out.iter().any(|l| l.contains("Cleared setting projects_root")), "{out:?}");
+        assert_eq!(e.store.get_setting("projects_root").unwrap(), None, "a second undo reaches the job before that");
+        assert!(e.handle("undo").unwrap()[0].contains("Nothing left to undo"));
+    }
+
+    #[test]
     fn undoing_a_project_job_says_the_files_were_not_covered() {
         // A temp root is never btrfs, so the job got no snapshot row — exactly the pre-1c
         // plain-folder case the user must be told about.
@@ -1337,8 +1376,8 @@ mod tests {
         rec.admin_outcomes.borrow_mut().push_back(Outcome::ok("installed").with_undo(UndoEntry::PackagesAdded { packages: vec!["cowsay".into()] }));
         e.handle("go").unwrap();
         let out = e.handle("undo").unwrap();
-        assert!(out[0].contains("Undoing the last job (p)"), "{out:?}");
-        assert!(out.iter().any(|l| l == "Files in p were not covered: the project predates undo."), "{out:?}");
+        assert_eq!(out[0], "Undoing the last job (p):", "{out:?}");
+        assert!(out.iter().any(|l| l == "Files in *p* were not covered: the project predates undo."), "{out:?}");
     }
 
     #[test]
