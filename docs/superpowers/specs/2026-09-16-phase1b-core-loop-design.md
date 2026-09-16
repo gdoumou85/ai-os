@@ -80,7 +80,8 @@ Every model answer is forced into one JSON shape (grammar-forced, decision 13), 
 | `plan` | 2–8 numbered steps in plain words | saves the plan; job → *working* |
 | `act` | one executor `Action` (run_command / read_file / write_file / http_post), plus which plan step it serves | runs it through `Executor::execute`; saves the outcome; a blocked action → *waiting_for_user* with the reason |
 | `done` | summary for the user **plus a check action** | runs the check; ok → *done*; not ok → the model is told the check's output and the job stays *working* |
-| `give_up` | reason | job → *failed* |
+| `replan` | the revised remaining steps + why | replaces the rest of the plan; job stays *working*. This is how "I can't do it this way" turns into "then this way". |
+| `give_up` | reason **and what was missing** (a tool, a package, a permission, information) | job → *failed*; the missing thing is recorded so the next phase can act on it (1c installs it; Phase 3 learns the workaround) |
 
 **Rules enforced by the loop, never left to the model:**
 - `done` without a check is rejected and the model is told to include one.
@@ -131,6 +132,13 @@ The running job's plan, answers and steps (§3). Working memory for *this* job o
 A project is a row: name, folder (`/data/projects/<name>` in the workshop), description, last touched. Each has its own folder, so the sandbox jail (§7) holds per project and "the project I mean" is the model reading a short list, not guessing at paths. A job's workspace is its project's folder.
 
 ---
+
+### 6.5 Self-improvement — what 1b lays down for Phase 3
+"I can't do that" is where the AI must get better, not stop (parent rule 3). The loop stays fixed code — the model never rewrites the executor, its rules, or the loop; what it improves is its **knowledge**. In 1b:
+- A failure forces a **different** attempt or a `replan` (§3, §4); the model is told to find another way (another tool, another approach) before it may give up.
+- Every failure and the workaround that followed it are already in the action log and the job record, **as the steps that actually ran** (parent §4.5: skills are built from the log, never from the model's own account).
+- `give_up` must name what was missing.
+Phase 3 turns these into saved skills — a workaround that passed its check is kept and re-found the next time the same failure appears — and Phase 1c gives the model the install hand so "missing tool" becomes "install it" instead of giving up.
 
 ## 7. The safety carry-forward — first task of the phase
 
