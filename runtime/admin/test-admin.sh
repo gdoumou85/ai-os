@@ -33,6 +33,9 @@ $A pkg-list | grep -qx bash && ok "pkg-list has bash" || bad "pkg-list"
 $A service ollama state | grep -q '^enabled active' && ok "service state" || bad "service state: $($A service ollama state)"
 echo hello | $A write-file /data/housekeeping/t1c.txt && [ "$($A read-file /data/housekeeping/t1c.txt)" = hello ] && ok "write/read file" || bad "write/read file"
 $A remove-file /data/housekeeping/t1c.txt && [ ! -e /data/housekeeping/t1c.txt ] && ok "remove-file" || bad "remove-file"
+echo one | $A write-file /data/housekeeping/m600-t1c && chmod 600 /data/housekeeping/m600-t1c && echo two | $A write-file /data/housekeeping/m600-t1c
+[ "$(stat -c '%a %U:%G' /data/housekeeping/m600-t1c 2>&1)" = "600 ai:ai-sandbox" ] && ok "existing mode kept" || bad "existing mode kept: $(stat -c '%a %U:%G' /data/housekeeping/m600-t1c 2>&1)"
+$A remove-file /data/housekeeping/m600-t1c
 echo hi | $A write-file /data/housekeeping/nd-t1c/f.txt && [ "$(stat -c '%U:%G %a' /data/housekeeping/nd-t1c)" = "ai:ai-sandbox 2770" ] && ok "new parent dir owner" || bad "new parent dir owner: $(stat -c '%U:%G %a' /data/housekeeping/nd-t1c 2>&1)"
 $A remove-file /data/housekeeping/nd-t1c/f.txt; $A remove-dir /data/housekeeping/nd-t1c
 $A make-dir /data/t1c-dir && [ "$(stat -c '%U:%G %a' /data/t1c-dir)" = "ai:ai-sandbox 2770" ] && ok "make-dir owner" || bad "make-dir owner: $(stat -c '%U:%G %a' /data/t1c-dir)"

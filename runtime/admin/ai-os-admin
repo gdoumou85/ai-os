@@ -44,6 +44,9 @@ case "$verb" in
   write-file) [ $# -eq 1 ] || refuse "write-file <path>"; nonempty "${1:-}"; nolink "$1"
     p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"
     if [ -d "$p" ]; then refuse "is a directory: $p"; fi
+    # An existing file keeps its own mode and owner: rewriting a 0600 /etc file must not leave
+    # it world-readable. Only a file this call creates gets the defaults further down.
+    keep=""; if [ -f "$p" ] && ! [ -L "$p" ]; then keep=$(stat -c '%a %U:%G' -- "$p"); fi
     d=$(dirname -- "$p"); newdir=""
     if [ ! -d "$d" ]; then
       nolink "$d"; [ -d "$(dirname -- "$d")" ] || refuse "parent directory missing: $d"
@@ -55,11 +58,12 @@ case "$verb" in
     umask 0077; set -C; cat > "$t"; set +C
     nolink "$p"; mv -f -- "$t" "$p"
     if [ -f "$p" ] && ! [ -L "$p" ]; then
-      case "$p" in
+      if [ -n "$keep" ]; then chmod "${keep%% *}" -- "$p"; chown "${keep#* }" -- "$p"
+      else case "$p" in
         /data/*)    chown ai:ai-sandbox -- "$p"; chmod 0660 -- "$p" ;;
         /home/ai/*) chown ai:ai -- "$p"; chmod 0644 -- "$p" ;;
         *)          chmod 0644 -- "$p" ;;
-      esac
+      esac; fi
     else refuse "not a regular file after write: $p"; fi
     [ -z "$newdir" ] || own_dir "$newdir" ;;
   remove-file) [ $# -eq 1 ] || refuse "remove-file <path>"; nonempty "${1:-}"; nolink "$1"

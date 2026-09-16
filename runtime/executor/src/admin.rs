@@ -39,6 +39,36 @@ fn name_args(packages: &[String]) -> Vec<&str> {
 
 fn as_str(v: &[String]) -> Vec<&str> { v.iter().map(String::as_str).collect() }
 
+/// What was in a file before a write: its contents, nothing at all, or a read we could not
+/// trust (with the reason) — the last one records no undo.
+enum Before {
+    Contents(String),
+    Missing,
+    Unknown(String),
+}
+
+/// Put a unit back to the state it was in. Free function taking the wrapper call so the two
+/// verbs it issues can be checked without a machine.
+/// ponytail: the wrapper's enable is `enable --now`, so a unit that was enabled but stopped
+/// comes back running. Split the verbs in the wrapper if a case ever needs that exact pair.
+fn reverse_service(name: &str, was_enabled: bool, was_active: bool, call: impl Fn(&str, &[&str]) -> Outcome) -> Outcome {
+    let first = call("service", &[name, if was_enabled { "enable" } else { "disable" }]);
+    if !was_active {
+        return first;
+    }
+    // `disable --now` stopped a unit that was running, and `enable --now` may have been a no-op
+    // on one already enabled: restart is what actually gets it running again either way.
+    let second = call("service", &[name, "restart"]);
+    let mut detail = first.detail.trim().to_string();
+    if !second.detail.trim().is_empty() {
+        if !detail.is_empty() {
+            detail.push_str("; ");
+        }
+        detail.push_str(second.detail.trim());
+    }
+    if first.ok && second.ok { Outcome::ok(detail) } else { Outcome::err(detail) }
+}
+
 impl AdminWorker {
     /// Run one wrapper verb. `ok` = exit 0; on failure the detail carries the wrapper's
     /// `refused: …` line (or the tool's own stderr, whose reason lives at the end).
@@ -64,10 +94,10 @@ impl AdminWorker {
         };
         if let Some(s) = stdin {
             // Take the pipe so it is closed here: the child waits on EOF before it can exit.
+            // A write error is almost always the wrapper having refused and closed the pipe, so
+            // fall through to the wait and let its own `refused:` line be the reason (and reap it).
             let mut pipe = child.stdin.take().expect("stdin was piped");
-            if let Err(e) = pipe.write_all(s.as_bytes()) {
-                return (false, String::new(), format!("write failed: {e}"));
-            }
+            let _ = pipe.write_all(s.as_bytes());
         }
         match child.wait_with_output() {
             Ok(o) => (
@@ -102,14 +132,32 @@ impl AdminWorker {
         if ok { Ok(stdout) } else { Err(Outcome::err(Self::why(&stdout, &stderr))) }
     }
 
-    /// Write `contents`, recording whatever was there before (`None` = nothing was).
-    fn write_file(path: &str, contents: &str, before: Option<String>) -> Outcome {
-        let out = Self::call("write-file", &[path], Some(contents));
-        if out.ok {
-            out.with_undo(UndoEntry::FileBefore { path: path.to_string(), contents: before })
-        } else {
-            out
+    /// What a write is about to replace. A read that failed for any reason other than the file
+    /// not being there is `Unknown`, never `Missing`: an undo built on a guess would turn a
+    /// transient failure into a `remove-file`.
+    fn before_write(path: &str) -> Before {
+        match Self::read_file(path) {
+            Ok(text) => Before::Contents(text),
+            Err(out) if Path::new(path).exists() => Before::Unknown(out.detail),
+            Err(_) => Before::Missing,
         }
+    }
+
+    /// Write `contents`, recording whatever was there before.
+    fn write_file(path: &str, contents: &str, before: Before) -> Outcome {
+        let mut out = Self::call("write-file", &[path], Some(contents));
+        if !out.ok {
+            return out;
+        }
+        let contents = match before {
+            Before::Contents(c) => Some(c),
+            Before::Missing => None,
+            Before::Unknown(why) => {
+                out.detail.push_str(&format!("; no undo recorded: {why}"));
+                return out;
+            }
+        };
+        out.with_undo(UndoEntry::FileBefore { path: path.to_string(), contents })
     }
 
     /// Install/remove, with the undo taken from what the package list actually gained or lost —
@@ -169,10 +217,8 @@ impl Worker for AdminWorker {
                 Ok(text) => Outcome::ok(window(&text, *from_line, *lines)),
                 Err(out) => out,
             },
-            // A file that cannot be read back (missing, or the wrapper refuses it) is one
-            // that did not exist as far as undo is concerned: put back = remove.
             Action::WriteFile { path, contents } => {
-                Self::write_file(path, contents, Self::read_file(path).ok())
+                Self::write_file(path, contents, Self::before_write(path))
             }
             // Rule 9: edit in place, the same once-only `find` as the sandbox.
             Action::EditFile { path, find, replace } => {
@@ -183,7 +229,7 @@ impl Worker for AdminWorker {
                     n => return Outcome::err(format!("find text occurs in {n} places — include more surrounding lines so it is unique")),
                 }
                 let edited = text.replacen(find.as_str(), replace, 1);
-                Self::write_file(path, &edited, Some(text))
+                Self::write_file(path, &edited, Before::Contents(text))
             }
             _ => Outcome::err("not an admin action"),
         }
@@ -193,13 +239,8 @@ impl Worker for AdminWorker {
         match entry {
             UndoEntry::PackagesAdded { packages } => Self::call("remove", &name_args(packages), None),
             UndoEntry::PackagesRemoved { packages } => Self::call("install", &name_args(packages), None),
-            // ponytail: the wrapper's enable is `enable --now` and its disable is `disable --now`,
-            // so putting `enabled` back also starts the unit and putting `disabled` back also stops
-            // it. That is right for the common pair (enabled+running / disabled+stopped) and
-            // approximate for the odd one (a unit that was enabled but not running comes back
-            // running). Split the verbs in the wrapper if a case ever needs the exact pair.
-            UndoEntry::ServiceState { name, was_enabled, .. } => {
-                Self::call("service", &[name, if *was_enabled { "enable" } else { "disable" }], None)
+            UndoEntry::ServiceState { name, was_enabled, was_active } => {
+                reverse_service(name, *was_enabled, *was_active, |verb, args| Self::call(verb, args, None))
             }
             UndoEntry::FileBefore { path, contents } => match contents {
                 Some(c) => Self::call("write-file", &[path], Some(c)),
@@ -230,6 +271,32 @@ mod tests {
         assert_eq!(parse_state("disabled inactive"), (false, false));
         assert_eq!(parse_state("static active"), (false, true));
         assert_eq!(parse_state("garbage"), (false, false));
+    }
+
+    #[test]
+    fn reverse_service_puts_back_running_as_well_as_enabled() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let call = |_verb: &str, args: &[&str]| {
+            seen.borrow_mut().push(args.join(" "));
+            Outcome::ok("")
+        };
+        // Was running but disabled: disabling again stops it, so it has to be restarted.
+        assert!(reverse_service("cron", false, true, &call).ok);
+        assert_eq!(seen.borrow().as_slice(), &["cron disable".to_string(), "cron restart".to_string()]);
+        seen.borrow_mut().clear();
+        // Was stopped: enable alone (the wrapper's enable --now starts it — see the ponytail note).
+        assert!(reverse_service("cron", true, false, &call).ok);
+        assert_eq!(seen.borrow().as_slice(), &["cron enable".to_string()]);
+    }
+
+    #[test]
+    fn reverse_service_fails_if_either_half_fails() {
+        let call = |_verb: &str, args: &[&str]| {
+            if args.contains(&"restart") { Outcome::err("Job for cron.service failed") } else { Outcome::ok("") }
+        };
+        let out = reverse_service("cron", true, true, &call);
+        assert!(!out.ok);
+        assert_eq!(out.detail, "Job for cron.service failed");
     }
 
     #[test]

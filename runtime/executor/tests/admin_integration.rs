@@ -18,9 +18,7 @@ fn install_records_added_and_reverse_removes() {
     assert!(matches!(&undo, UndoEntry::PackagesAdded { packages } if packages.contains(&"cowsay".to_string())), "{undo:?}");
     let back = w.reverse(&undo);
     assert!(back.ok, "{}", back.detail);
-    assert!(!AdminWorker::call("pkg-list", &[], None).detail.lines().any(|l| l == "cowsay"));
-    // `call` caps the detail at 500 chars, so the line above can only ever pass; check the
-    // untruncated list too, which is what the undo diff itself is computed from.
+    // The untruncated list — the same one the undo diff is computed from.
     assert!(!AdminWorker::pkg_list().unwrap().iter().any(|p| p == "cowsay"), "cowsay must be gone");
 }
 
@@ -70,7 +68,7 @@ fn make_dir_then_reverse() {
 }
 
 #[test]
-fn service_state_is_recorded_and_put_back() {
+fn restart_records_no_undo() {
     if !gated() { eprintln!("skipped: set AI_OS_SANDBOX_IT=1 inside the distro"); return; }
     // `state` on a unit that isn't installed still answers (unknown unknown) — use a real one.
     let before = AdminWorker::call("service", &["cron", "state"], None);
