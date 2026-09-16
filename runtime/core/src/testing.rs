@@ -22,6 +22,12 @@ impl Worker for ScriptedWorker {
     }
 }
 
+/// Both lanes over one recorder: a test asserting on calls sees them whichever hand ran.
+/// ponytail: Task 8 splits the admin lane onto its own recorder — until it needs to, one is enough.
+pub fn scripted_pair(rec: &Recorder) -> (Box<dyn Worker>, Box<dyn Worker>) {
+    (Box::new(ScriptedWorker(rec.clone())), Box::new(ScriptedWorker(rec.clone())))
+}
+
 pub fn temp_root(tag: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("ai-os-core-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -38,7 +44,7 @@ pub fn engine_with(moves: Vec<crate::moves::Move>, tag: &str) -> (crate::engine:
         crate::model::FakeModel::new(moves),
         root.clone(),
         None,
-        Box::new(move |_ws| Box::new(ScriptedWorker(r2.clone())) as Box<dyn Worker>),
+        Box::new(move |_ws| scripted_pair(&r2)),
     );
     (e, rec, root)
 }

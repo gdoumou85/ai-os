@@ -6,6 +6,7 @@ use aios_core::job::{Job, State};
 use aios_core::model::OllamaModel;
 use aios_core::store::Store;
 use executor::action::Action;
+use executor::admin::AdminWorker;
 use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 
@@ -18,7 +19,10 @@ fn the_model_writes_and_proves_a_primes_script() {
     let _ = std::fs::remove_dir_all(root.join("primes"));
     let store = Store::open(db).unwrap();
     let mut e = Engine::new(store, OllamaModel::local("qwen3.5:9b"), root.clone(), Some(db.into()),
-        Box::new(|ws| Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>));
+        Box::new(|ws| (
+            Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
+            Box::new(AdminWorker) as Box<dyn Worker>,
+        )));
     let mut out = e.handle("Start a new project called primes: make a Python script that prints the first ten prime numbers, one per line, and prove it runs. Decide the details yourself.").unwrap();
     for line in &out { eprintln!("AI: {line}"); }
     // If it asks anyway, answer once; a second question is a failure of the creative rule.

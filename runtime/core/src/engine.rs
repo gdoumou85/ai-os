@@ -9,7 +9,8 @@ use executor::log::{ActionLog, LogError};
 use executor::worker::Worker;
 use std::path::{Path, PathBuf};
 
-pub type WorkerFactory = Box<dyn Fn(&Path) -> Box<dyn Worker>>;
+/// One project folder in, the two hands that serve it out: (sandbox, admin).
+pub type WorkerFactory = Box<dyn Fn(&Path) -> (Box<dyn Worker>, Box<dyn Worker>)>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -83,7 +84,8 @@ impl<M: Model> Engine<M> {
     pub(crate) fn executor_for(&self, project: &str) -> Result<Executor<Box<dyn Worker>>, EngineError> {
         let ws = self.workspace(project);
         let log = match &self.log_path { Some(p) => ActionLog::open(p)?, None => ActionLog::open_in_memory()? };
-        Ok(Executor::new((self.workers)(&ws), log, ws))
+        let (sandbox, admin) = (self.workers)(&ws);
+        Ok(Executor::new(sandbox, admin, log, ws))
     }
 
     fn create_project_folder(&self, project: &str) -> Result<(), EngineError> {
@@ -710,7 +712,7 @@ mod tests {
         let rec = crate::testing::Recorder::default();
         let r2 = rec.clone();
         let mut e2 = Engine::new(store, crate::model::FakeModel::new(vec![plan(), act(1, write("BLUEPRINT.md")), done(run("true"))]), root, None,
-            Box::new(move |_| Box::new(crate::testing::ScriptedWorker(r2.clone())) as Box<dyn Worker>));
+            Box::new(move |_| crate::testing::scripted_pair(&r2)));
         let out = e2.handle("python").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         assert!(e2.open_job().unwrap().is_none());
@@ -865,7 +867,7 @@ mod tests {
             crate::model::FakeModel::new(moves),
             root,
             Some(log_path_str),
-            Box::new(move |_ws| Box::new(crate::testing::ScriptedWorker(r2.clone())) as Box<dyn Worker>),
+            Box::new(move |_ws| crate::testing::scripted_pair(&r2)),
         );
         (e, log_path)
     }

@@ -49,11 +49,20 @@ impl ActionLog {
     }
 
     pub fn append(&self, job_id: &str, action: &Action, outcome: &str) -> Result<i64, LogError> {
+        self.insert(job_id, &serde_json::to_string(action)?, outcome)
+    }
+
+    /// A line with no action behind it (an undo, say). `action_json` is JSON `null` so a
+    /// reader parsing the column still gets valid JSON, and no real action can collide with it.
+    pub fn append_text(&self, job_id: &str, text: &str) -> Result<i64, LogError> {
+        self.insert(job_id, "null", text)
+    }
+
+    fn insert(&self, job_id: &str, action_json: &str, outcome: &str) -> Result<i64, LogError> {
         self.ensure_job(job_id)?;
-        let json = serde_json::to_string(action)?;
         self.conn.execute(
             "INSERT INTO actions(job_id, action_json, outcome, at) VALUES (?1, ?2, ?3, ?4)",
-            (job_id, json, outcome, Self::now()),
+            (job_id, action_json, outcome, Self::now()),
         )?;
         Ok(self.conn.last_insert_rowid())
     }
