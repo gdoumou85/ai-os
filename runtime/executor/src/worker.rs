@@ -71,11 +71,13 @@ impl SandboxWorker {
 }
 
 /// Last `n` chars of `s` — for failures the reason is at the end of the output, not the start.
-fn tail(s: &str, n: usize) -> String {
+/// `pub(crate)`: exercised directly by unit tests below (matches `rules::resolves_inside`'s
+/// convention for a helper that's more than a private implementation detail).
+pub(crate) fn tail(s: &str, n: usize) -> String {
     let count = s.chars().count();
     s.chars().skip(count.saturating_sub(n)).collect()
 }
-fn head(s: &str, n: usize) -> String { s.chars().take(n).collect() }
+pub(crate) fn head(s: &str, n: usize) -> String { s.chars().take(n).collect() }
 
 impl Worker for SandboxWorker {
     fn run(&self, action: &Action) -> Outcome {
@@ -203,6 +205,49 @@ impl Worker for SandboxWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_shorter_than_n_returns_the_whole_string() {
+        assert_eq!(tail("hi", 500), "hi");
+    }
+
+    #[test]
+    fn tail_exactly_n_returns_the_whole_string() {
+        assert_eq!(tail("hello", 5), "hello");
+    }
+
+    #[test]
+    fn tail_cuts_from_the_end_not_the_start() {
+        assert_eq!(tail("abcdef", 3), "def");
+    }
+
+    #[test]
+    fn tail_never_splits_a_multibyte_char() {
+        // 5 chars, each multi-byte in UTF-8; a byte-based cut would panic or corrupt.
+        assert_eq!(tail("héllo", 3), "llo");
+        assert_eq!(tail("😀🎉✨", 2), "🎉✨");
+    }
+
+    #[test]
+    fn head_shorter_than_n_returns_the_whole_string() {
+        assert_eq!(head("hi", 500), "hi");
+    }
+
+    #[test]
+    fn head_exactly_n_returns_the_whole_string() {
+        assert_eq!(head("hello", 5), "hello");
+    }
+
+    #[test]
+    fn head_cuts_from_the_start_not_the_end() {
+        assert_eq!(head("abcdef", 3), "abc");
+    }
+
+    #[test]
+    fn head_never_splits_a_multibyte_char() {
+        assert_eq!(head("héllo", 3), "hél");
+        assert_eq!(head("😀🎉✨", 2), "😀🎉");
+    }
 
     #[test]
     fn fake_records_calls() {
