@@ -1,0 +1,13 @@
+[Unit]
+Description=AI OS engine (workshop)
+
+[Service]
+ExecStart=/usr/local/bin/ai-os-engine
+Environment=AI_OS_DB=/data/ai-os.db
+Environment=AI_OS_MODEL=qwen3.5:9b
+Environment=AI_OS_PROJECTS=/data/projects
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
