@@ -88,8 +88,14 @@ pub fn wrong_hand(argv: &[String]) -> Option<String> {
     // Same lesson, the other hand: `mkdir /data/work` in the jail answers "Read-only file
     // system", which the live run showed a 9B reads as "this machine cannot make folders at
     // all". An absolute path means outside the workspace — inside it, paths are relative.
+    // Removing one is not the mirror image: there is no hand for it, and saying `make_dir`
+    // here would send the model looking for an action that does the opposite of what it wants.
     if matches!(program, "mkdir" | "rmdir") && verbs.iter().any(|v| v.starts_with('/')) {
-        return Some("a folder outside the working directory is made with the `make_dir` action, never with run_command: the sandbox can only write inside its own folder".into());
+        return Some(if program == "mkdir" {
+            "a folder outside the working directory is made with the `make_dir` action, never with run_command: the sandbox can only write inside its own folder"
+        } else {
+            "there is no hand that removes a folder outside the project; if it was created by a job, say undo"
+        }.to_string());
     }
     if language.contains(&program) && has(&["install", "add", "ci"]) {
         return Some("language packages come through `fetch_packages` (name the manager and the packages), never with run_command: the sandbox has no network".into());
@@ -181,9 +187,12 @@ mod tests {
         for line in ["pip install tabulate", "python3 -m pip install tabulate", "npm install left-pad", "cargo add serde"] {
             assert!(wrong_hand(&argv(line)).unwrap().contains("fetch_packages"), "{line}");
         }
-        for line in ["mkdir -p /data/work", "sudo mkdir /data/work", "rmdir /home/ai/x"] {
+        for line in ["mkdir -p /data/work", "sudo mkdir /data/work"] {
             assert!(wrong_hand(&argv(line)).unwrap().contains("`make_dir` action"), "{line}");
         }
+        // Removing is not the mirror image: no hand does it, so the reason must not name one.
+        let rm = wrong_hand(&argv("rmdir /home/ai/x")).unwrap();
+        assert!(rm.contains("no hand that removes a folder") && rm.contains("say undo") && !rm.contains("make_dir"), "{rm}");
         // Reading and building with the same programs stays free — the housekeeping jobs of
         // §7 look at the machine with exactly these.
         for line in ["apt list --installed", "dpkg-query -W -f ${Package}", "cargo build", "npm test", "python3 primes.py", "ls -l", "sudo ls", "env ls -l", "mkdir build", "mkdir -p src/gen"] {

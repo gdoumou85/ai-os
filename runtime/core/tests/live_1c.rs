@@ -141,7 +141,9 @@ fn the_machine_moves_its_projects_installs_undoes_and_fetches() {
         *undos += 1;
         let out = say(e, &format!("script 3: undo #{undos}"), "undo");
         assert!(!out.iter().any(|l| l.contains("Nothing left to undo")), "ran out of jobs to undo: {out:?}");
-        if out.iter().any(|l| l.contains("Restored the files of")) && !*restored {
+        // "Could not undo: Restored the files of …" is the failure of exactly this, so the
+        // line has to be the report of a restore that happened, not of one that did not.
+        if out.iter().any(|l| l.contains("Restored the files of") && !l.starts_with("Could not undo")) && !*restored {
             let now = listing(&project.display().to_string());
             println!("[script 3] {} after the restore: {now:?}", project.display());
             assert_ne!(now, before_undo, "the files were reported restored but nothing on disk moved");
