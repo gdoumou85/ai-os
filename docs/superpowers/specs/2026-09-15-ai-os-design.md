@@ -196,6 +196,7 @@ The runtime is **system software that ships to machines we do not control**, so 
 - **User step needed:** installing WSL needs admin rights and a reboot.
 
 ### 5.2 The product
+- **Two editions, both kept (his call, 2026-09-16):** first the WSL install file for Windows PCs, then the full Ubuntu image (USB/ISO) with the AI OS on top, built from the same base and the same setup script. On WSL the rail and any app the user asks to see appear as Windows windows through WSLg; on the full image they sit on the real GNOME desktop.
 - The same setup script builds the WSL install file, and later the USB installer.
 - The minimum hardware for other computers is set from the evaluation results, not guessed.
 
@@ -230,7 +231,7 @@ Each phase gets its own plan and its own approval.
 | 4. Watch | Background jobs, desktop and Telegram notifications | It can monitor and inform |
 | 5. Create | Local image generation and other creative tools | It can make graphics and assets |
 | 6. Fine-tune | Train the open model on logged OS jobs | Our own model |
-| 7. Package | WSL install file, then USB installer | Installable on other computers |
+| 7. Package | WSL install file, then the full Ubuntu image (USB/ISO) — both editions ship (5.2) | Installable on other computers |
 
 ---
 
