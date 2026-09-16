@@ -1,9 +1,10 @@
-use crate::job::{Job, State};
+use crate::job::{Job, State, StepRecord};
 use crate::model::{Model, ModelError};
 use crate::moves::Move;
 use crate::prompt;
 use crate::store::{Store, StoreError};
-use executor::executor::Executor;
+use executor::action::Action;
+use executor::executor::{ExecOutcome, Executor};
 use executor::log::{ActionLog, LogError};
 use executor::worker::Worker;
 use std::path::{Path, PathBuf};
@@ -155,17 +156,186 @@ impl<M: Model> Engine<M> {
         }
     }
 
+    const MAX_STEPS: usize = 25;
+    const MAX_FAILS_PER_STEP: usize = 3;
+    const MAX_REJECTIONS: u32 = 2;
+
     /// Mark a job finished (done/failed/cancelled) and report the one line that explains it.
-    fn finish(&mut self, mut job: Job, state: State, message: String) -> Result<Vec<String>, EngineError> {
+    fn finish(&self, mut job: Job, state: State, text: String) -> Result<Vec<String>, EngineError> {
         job.state = state;
-        job.outcome_text = message.clone();
+        job.outcome_text = text.clone();
         self.store.save_job(&job)?;
-        Ok(vec![message])
+        self.write_or_wipe_last_run(&job);
+        Ok(vec![text])
     }
 
-    /// Task 8 fills this in.
-    fn run_turns(&mut self, _job: Job) -> Result<Vec<String>, EngineError> { Ok(vec![]) }
-    fn resume_after_approval(&mut self, _job: Job, _approved: bool, _text: &str) -> Result<Vec<String>, EngineError> { Ok(vec![]) }
+    /// The bounded last-run note (1b spec §6.6): written from the record when a job ends
+    /// badly, wiped when a job in the project is proven done. Never more than one file.
+    fn write_or_wipe_last_run(&self, job: &Job) {
+        let path = self.workspace(&job.project).join("LAST_RUN.md");
+        match job.state {
+            State::Done => { let _ = std::fs::remove_file(&path); }
+            State::Failed | State::Cancelled => {
+                let last_fail = job.steps.iter().rev().find(|s| !s.ok);
+                let note = format!(
+                    "goal: {}\nended: {}\nfailed at plan step: {}\nlast error: {}\n",
+                    job.goal,
+                    job.outcome_text,
+                    last_fail.map(|s| s.plan_step.to_string()).unwrap_or_else(|| "-".into()),
+                    last_fail.map(|s| s.detail.clone()).unwrap_or_else(|| "-".into()),
+                );
+                if let Err(e) = std::fs::write(&path, note) { eprintln!("core: could not write LAST_RUN.md: {e}"); }
+            }
+            _ => {}
+        }
+    }
+
+    fn reject(&self, job: &mut Job, why: &str) -> Result<Option<Vec<String>>, EngineError> {
+        job.rejections += 1;
+        job.note_to_model = Some(format!("your last move was rejected: {why}"));
+        if job.rejections >= Self::MAX_REJECTIONS {
+            let text = format!("I gave up on {}: I kept answering in a way the system could not accept ({why}).", job.project);
+            return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
+        }
+        self.store.save_job(job)?;
+        Ok(None)
+    }
+
+    fn is_blueprint(action: &Action) -> Option<bool> {
+        match action {
+            Action::WriteFile { path, .. } | Action::EditFile { path, .. } => Some(Path::new(path).file_name().map(|n| n == "BLUEPRINT.md").unwrap_or(false)),
+            _ => None,
+        }
+    }
+
+    /// Run one action through the executor's door and record what happened on the job.
+    /// Returns the lines to show the user if the job must stop here (waiting for OK / gave up).
+    ///
+    /// `is_check`: a `done` move's proof action is exempt from the identical-action dedup
+    /// below — a check is meant to be re-run verbatim after a fix elsewhere (that's the whole
+    /// point of a check), unlike an `act` step repeating the same failed command with nothing
+    /// changed. Both still count toward MAX_FAILS_PER_STEP, which caps a stuck check the same
+    /// way it caps a stuck act.
+    fn perform(&self, job: &mut Job, plan_step: usize, action: Action, approved: bool, is_check: bool) -> Result<Option<Vec<String>>, EngineError> {
+        let key = serde_json::to_string(&action).unwrap_or_default();
+        if !is_check && !approved && job.failed_actions.contains(&key) {
+            let earlier = job.steps.iter().rev().find(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).map(|s| s.detail.clone()).unwrap_or_default();
+            return self.reject(job, &format!("that exact action already failed with: {earlier} — work around it or replan"));
+        }
+        let exec = self.executor_for(&job.project)?;
+        match exec.execute(&job.id, &action, approved)? {
+            ExecOutcome::Blocked(reason) => {
+                job.pending_action = Some((plan_step, action));
+                job.pending_reason = reason.clone();
+                job.state = State::WaitingApproval;
+                self.store.save_job(job)?;
+                Ok(Some(vec![format!("Needs your OK: {reason}. Say yes to allow it, or anything else to refuse.")]))
+            }
+            ExecOutcome::Ran(outcome) => {
+                job.rejections = 0;
+                job.note_to_model = None;
+                job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
+                if outcome.ok {
+                    match Self::is_blueprint(&action) {
+                        Some(true) => job.last_blueprint_update = job.steps.len(),
+                        Some(false) => job.last_code_change = job.steps.len(),
+                        None => {}
+                    }
+                    // Something changed on disk, so an earlier failure may now succeed:
+                    // re-running the same command after a fix is legitimate (spike finding).
+                    if Self::is_blueprint(&action).is_some() { job.failed_actions.clear(); }
+                } else {
+                    if !is_check { job.failed_actions.push(key); }
+                    let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
+                    if fails >= Self::MAX_FAILS_PER_STEP {
+                        let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", job.project, outcome.detail);
+                        return Ok(Some(self.finish(job.clone(), State::Failed, text)?));
+                    }
+                }
+                self.store.save_job(job)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn resume_after_approval(&mut self, mut job: Job, approved: bool, text: &str) -> Result<Vec<String>, EngineError> {
+        let (plan_step, action) = match job.pending_action.take() { Some(p) => p, None => { job.state = State::Working; return self.run_turns(job); } };
+        job.state = State::Working;
+        if approved {
+            if let Some(stop) = self.perform(&mut job, plan_step, action, true, false)? { return Ok(stop); }
+        } else {
+            job.note_to_model = Some(format!("the user declined that action ({}): \"{text}\". Do not repeat it; find another way or finish without it.", job.pending_reason));
+            job.failed_actions.push(serde_json::to_string(&action).unwrap_or_default());
+            self.store.save_job(&job)?;
+        }
+        self.run_turns(job)
+    }
+
+    /// Turn after turn until the job is done, failed, or needs the user (1b spec §3–§4).
+    fn run_turns(&mut self, mut job: Job) -> Result<Vec<String>, EngineError> {
+        loop {
+            if job.steps.len() >= Self::MAX_STEPS {
+                let text = format!("I gave up on {}: {} steps without finishing.", job.project, Self::MAX_STEPS);
+                return self.finish(job, State::Failed, text);
+            }
+            let last_run = std::fs::read_to_string(self.workspace(&job.project).join("LAST_RUN.md")).ok();
+            let p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job.project).as_deref(), last_run.as_deref());
+            let mv = self.model.next_move(&p)?;
+            let rejected = match (job.state, mv) {
+                (State::Asking, Move::Ask { questions }) | (State::Working, Move::Ask { questions }) | (State::Planning, Move::Ask { questions }) if !job.creative => {
+                    job.pending_questions = questions.clone();
+                    job.state = State::WaitingAnswer;
+                    job.rejections = 0;
+                    job.note_to_model = None;
+                    self.store.save_job(&job)?;
+                    return Ok(questions.iter().map(|q| format!("Question: {q}")).collect());
+                }
+                (_, Move::Ask { .. }) if job.creative => Some("this job is in creative mode: decide yourself instead of asking".to_string()),
+                (_, Move::Ask { .. }) => Some("ask only before planning or while working".to_string()),
+                (State::Asking, Move::Plan { steps }) | (State::Planning, Move::Plan { steps }) => {
+                    job.plan = steps; job.state = State::Working; job.rejections = 0; job.note_to_model = None;
+                    self.store.save_job(&job)?; None
+                }
+                (State::Working, Move::Plan { .. }) => Some("you already have a plan; use replan to change it".to_string()),
+                (State::Working, Move::Replan { steps, why }) => {
+                    job.plan = steps; job.rejections = 0;
+                    job.note_to_model = Some(format!("plan revised because: {why}"));
+                    self.store.save_job(&job)?; None
+                }
+                (State::Working, Move::Act { step, action }) => {
+                    if let Some(stop) = self.perform(&mut job, step, action, false, false)? { return Ok(stop); }
+                    None
+                }
+                (State::Working, Move::Done { summary, check }) => {
+                    if job.last_code_change > job.last_blueprint_update {
+                        Some("update BLUEPRINT.md for what you changed before saying done".to_string())
+                    } else {
+                        let key_step = job.plan.len().max(1);
+                        match self.perform(&mut job, key_step, check, false, true)? {
+                            Some(stop) => return Ok(stop),
+                            None => {
+                                if job.steps.last().map(|s| s.ok).unwrap_or(false) {
+                                    return self.finish(job, State::Done, summary);
+                                }
+                                job.note_to_model = Some("your check failed — read its output above, fix the work, then say done again with a check".to_string());
+                                self.store.save_job(&job)?;
+                                None
+                            }
+                        }
+                    }
+                }
+                (State::Working, Move::GiveUp { reason, missing }) => {
+                    return self.finish(job.clone(), State::Failed, format!("I gave up on {}: {reason}. Missing: {missing}.", job.project));
+                }
+                (_, Move::Act { .. }) | (_, Move::Done { .. }) | (_, Move::Replan { .. }) | (_, Move::GiveUp { .. }) => Some("give a plan first".to_string()),
+                (_, Move::Plan { .. }) => Some("not now".to_string()),
+                (_, Move::Reply { .. }) | (_, Move::Start { .. }) => Some("a job is running: use ask, plan, act, replan, done or give_up".to_string()),
+            };
+            if let Some(why) = rejected {
+                if let Some(stop) = self.reject(&mut job, &why)? { return Ok(stop); }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -230,6 +400,279 @@ mod tests {
         let out = e.handle("Stop.").unwrap();
         assert!(out.iter().any(|l| l.contains("Stopped")), "{out:?}");
         assert!(e.open_job().is_none());
-        assert_eq!(e.model.prompts.borrow().len(), 1);
+        // The trailing Ask is now consumed by the real loop (job pauses waiting_answer),
+        // so "Stop." cancels on a second handle() call — one model call per handle().
+        assert_eq!(e.model.prompts.borrow().len(), 2);
+    }
+
+    use executor::action::Action;
+    use executor::worker::Outcome;
+
+    fn write(path: &str) -> Action { Action::WriteFile { path: path.into(), contents: "x".into() } }
+    fn run(cmd: &str) -> Action { Action::RunCommand { argv: vec![cmd.into()] } }
+    fn plan() -> Move { Move::Plan { steps: vec!["write it".into(), "run it".into()] } }
+    fn act(step: usize, a: Action) -> Move { Move::Act { step, action: a } }
+    fn done(check: Action) -> Move { Move::Done { summary: "finished".into(), check } }
+
+    /// A creative job that writes the blueprint, writes code, updates the blueprint, and proves it.
+    fn happy_path() -> Vec<Move> {
+        vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(1, write("primes.py")), act(1, write("BLUEPRINT.md")), done(run("python3"))]
+    }
+
+    #[test]
+    fn full_job_runs_through_the_executor_and_ends_done() {
+        let (mut e, rec, _) = engine_with(happy_path(), "happy");
+        let out = e.handle("make it, decide yourself").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert!(e.open_job().is_none());
+        assert_eq!(rec.calls.borrow().len(), 4, "3 acts + the check all went through the executor");
+    }
+
+    #[test]
+    fn creative_start_goes_straight_to_planning() {
+        let (mut e, _, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "creative");
+        e.handle("just make it, decide yourself").unwrap();
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[1].user.contains("Legal moves now: plan"), "no asking stage in creative mode: {}", prompts[1].user);
+    }
+
+    #[test]
+    fn existing_project_is_reused_not_recreated() {
+        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add menu".into(), creative: true, understood: "Continuing p".into(), remember: None };
+        let (mut e, _, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+            again, plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "reuse");
+        e.handle("make p").unwrap();
+        assert!(e.open_job().is_none());
+        e.handle("add a menu to p").unwrap();
+        assert_eq!(e.store.list_projects().unwrap().len(), 1, "same project row, not a second one");
+        assert_eq!(e.store.list_projects().unwrap()[0].description, "prime printer", "the original description is kept");
+    }
+
+    #[test]
+    fn stop_cancels_the_open_job_without_asking_the_model() {
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()] }], "stop");
+        e.handle("make p").unwrap();
+        assert_eq!(e.open_job().unwrap().state, State::WaitingAnswer);
+        let out = e.handle("stop").unwrap();
+        assert!(out[0].contains("Stopped"));
+        assert!(e.open_job().is_none());
+        assert_eq!(e.model.prompts.borrow().len(), 2, "cancel is deterministic, no model call");
+    }
+
+    #[test]
+    fn asks_then_answer_resumes_and_answer_is_in_the_prompt() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", false),
+            Move::Ask { questions: vec!["Which language?".into()] },
+            plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "ask");
+        let out = e.handle("make it").unwrap();
+        assert!(out.iter().any(|l| l.contains("Which language?")), "{out:?}");
+        assert_eq!(e.open_job().unwrap().state, State::WaitingAnswer);
+        let out = e.handle("python").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[2].user.contains("Which language? -> python"));
+    }
+
+    #[test]
+    fn ask_in_creative_mode_is_rejected_then_model_complies() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", true), Move::Ask { questions: vec!["?".into()] }, plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "creative-ask");
+        let out = e.handle("decide yourself").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[2].user.contains("rejected: this job is in creative mode"), "rejection note reaches the model: {}", prompts[2].user);
+    }
+
+    #[test]
+    fn act_before_plan_and_done_without_blueprint_update_are_rejected() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", true),
+            act(1, write("a.py")),                 // rejected: no plan yet
+            plan(),
+            act(1, write("BLUEPRINT.md")),
+            act(1, write("a.py")),
+            done(run("true")),                     // rejected: blueprint older than the code change
+            act(1, write("BLUEPRINT.md")),
+            done(run("true")),
+        ], "order");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[2].user.contains("rejected: give a plan first"), "act-before-plan note: {}", prompts[2].user);
+        assert!(prompts[6].user.contains("rejected: update BLUEPRINT.md"), "blueprint note: {}", prompts[6].user);
+    }
+
+    #[test]
+    fn failing_check_sends_the_model_back_to_work() {
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("python3")), done(run("python3")),
+        ], "check");
+        rec.outcomes.borrow_mut().extend([
+            Outcome { ok: true, detail: "ok".into() },                 // blueprint write
+            Outcome { ok: false, detail: "Traceback… NameError".into() }, // first check fails
+            Outcome { ok: true, detail: "2 3 5 7".into() },             // second check passes
+        ]);
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[4].user.contains("NameError"), "the check's failure reason is fed back: {}", prompts[4].user);
+    }
+
+    #[test]
+    fn identical_retry_of_a_failed_action_is_refused_with_the_reason() {
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")),
+            act(1, run("gcc")), act(1, run("gcc")),   // second one is identical → refused, not run
+            act(1, run("cc")), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "retry");
+        rec.outcomes.borrow_mut().extend([
+            Outcome { ok: true, detail: "ok".into() },
+            Outcome { ok: false, detail: "gcc: not found".into() },
+        ]);
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let calls = rec.calls.borrow();
+        assert_eq!(calls.iter().filter(|a| **a == run("gcc")).count(), 1, "the identical retry never reached the executor");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[5].user.contains("gcc: not found"), "{}", prompts[5].user);
+    }
+
+    #[test]
+    fn same_command_is_allowed_again_after_a_file_was_fixed() {
+        // Spike finding: run fails → edit the file → the same run is the right move, not a repeat.
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")),
+            act(2, run("python3")),
+            act(2, Action::EditFile { path: "primes.py".into(), find: "prnt".into(), replace: "print".into() }),
+            act(2, run("python3")),
+            act(2, write("BLUEPRINT.md")), done(run("python3")),
+        ], "retry-after-fix");
+        rec.outcomes.borrow_mut().extend([
+            Outcome { ok: true, detail: "ok".into() },
+            Outcome { ok: false, detail: "NameError: prnt".into() },
+            Outcome { ok: true, detail: "edited".into() },
+        ]);
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == run("python3")).count(), 3, "failed run, re-run after the fix, and the check");
+    }
+
+    #[test]
+    fn three_different_failures_on_one_step_give_up() {
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, run("a")), act(1, run("b")), act(1, run("c")), act(1, run("d")),
+        ], "three");
+        for _ in 0..4 { rec.outcomes.borrow_mut().push_back(Outcome { ok: false, detail: "boom".into() }); }
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
+        assert_eq!(rec.calls.borrow().len(), 3);
+        assert!(e.open_job().is_none());
+    }
+
+    #[test]
+    fn two_rejected_moves_in_a_row_fail_the_job() {
+        let (mut e, _, _) = engine_with(vec![start("p", true), act(1, run("x")), act(1, run("x"))], "reject");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
+    }
+
+    #[test]
+    fn step_cap_fails_the_job() {
+        let mut moves = vec![start("p", true), plan()];
+        for i in 0..30 { moves.push(act(1, write(&format!("f{i}")))); }
+        let (mut e, rec, _) = engine_with(moves, "cap");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
+        assert_eq!(rec.calls.borrow().len(), 25);
+    }
+
+    #[test]
+    fn replan_replaces_the_plan() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", true), plan(), Move::Replan { steps: vec!["other way".into()], why: "first way failed".into() },
+            act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "replan");
+        e.handle("go").unwrap();
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[3].user.contains("1. other way"));
+        assert!(!prompts[3].user.contains("write it"));
+    }
+
+    #[test]
+    fn give_up_reports_reason_and_missing() {
+        let (mut e, _, _) = engine_with(vec![start("p", true), plan(), Move::GiveUp { reason: "no compiler".into(), missing: "gcc".into() }], "giveup");
+        let out = e.handle("go").unwrap();
+        let last = out.last().unwrap();
+        assert!(last.contains("no compiler") && last.contains("gcc"), "{last}");
+    }
+
+    #[test]
+    fn risky_action_waits_for_ok_and_runs_after_yes() {
+        let post = Action::HttpPost { url: "https://x".into(), body: "b".into() };
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(2, post.clone()), done(run("true")),
+        ], "approve");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("Needs your OK"), "{out:?}");
+        assert_eq!(e.open_job().unwrap().state, State::WaitingApproval);
+        assert_eq!(rec.calls.borrow().len(), 1, "the risky action did not run");
+        let out = e.handle("yes, send it").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert!(rec.calls.borrow().contains(&post));
+    }
+
+    #[test]
+    fn declined_risky_action_is_told_to_the_model() {
+        let post = Action::HttpPost { url: "https://x".into(), body: "b".into() };
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(2, post.clone()), done(run("true")),
+        ], "decline");
+        e.handle("go").unwrap();
+        let out = e.handle("no, don't").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert!(!rec.calls.borrow().contains(&post));
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[4].user.to_lowercase().contains("declined"), "{}", prompts[4].user);
+    }
+
+    #[test]
+    fn failed_job_leaves_a_last_run_note_and_the_next_job_reads_it_first() {
+        let (mut e, rec, root) = engine_with(vec![
+            start("p", true), plan(), act(1, run("python3")),
+            Move::GiveUp { reason: "the script crashes".into(), missing: "a working loop".into() },
+            // next job in the same project
+            Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "make it work".into(), creative: true, understood: "Continuing p".into(), remember: None },
+            plan(), act(1, write("BLUEPRINT.md")), done(run("python3")),
+        ], "lastrun");
+        rec.outcomes.borrow_mut().push_back(Outcome { ok: false, detail: "exit 1; stderr: NameError: prmes".into() });
+        e.handle("make p").unwrap();
+        let note = std::fs::read_to_string(root.join("p").join("LAST_RUN.md")).expect("LAST_RUN.md written by the loop");
+        assert!(note.contains("NameError: prmes") && note.contains("the script crashes") && note.contains("a working loop"), "{note}");
+        let out = e.handle("make it work").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[5].user.contains("LAST RUN") && prompts[5].user.contains("NameError: prmes"), "{}", prompts[5].user);
+        assert!(!root.join("p").join("LAST_RUN.md").exists(), "wiped once a job in the project is proven done");
+    }
+
+    #[test]
+    fn a_waiting_job_resumes_from_the_store_after_a_restart() {
+        let (mut e, _, root) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Language?".into()] }], "restart");
+        e.handle("make it").unwrap();
+        let store = std::mem::replace(&mut e.store, crate::store::Store::open_in_memory().unwrap());
+        drop(e);
+        // New engine, same store: the answer must land on the saved job.
+        let rec = crate::testing::Recorder::default();
+        let r2 = rec.clone();
+        let mut e2 = Engine::new(store, crate::model::FakeModel::new(vec![plan(), act(1, write("BLUEPRINT.md")), done(run("true"))]), root, None,
+            Box::new(move |_| Box::new(crate::testing::ScriptedWorker(r2.clone())) as Box<dyn Worker>));
+        let out = e2.handle("python").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert!(e2.open_job().is_none());
     }
 }
