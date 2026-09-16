@@ -42,7 +42,7 @@ Not in 1d: pause and take-over controls, the Watch card (Phase 4), replaying ear
 ### 2.1 How the engine emits
 
 - `Engine` gains an event sink: `Box<dyn FnMut(Event) + Send>`, set at construction (`Engine::new(...)` grows one argument; `testing.rs` gets a collecting sink). `handle(&mut self, text)` returns `Result<(), EngineError>` and emits as it goes. Every emitted event is also appended to `messages` (role `assistant`, the rendered line) so `recent_messages` and the front-door prompt keep working unchanged.
-- `render::lines(&Event) -> Vec<String>` produces exactly the sentences the engine emits today, one function, used by the terminal client and by the existing tests through a helper `handle_lines` in `testing.rs`. Existing test assertions are not changed; a test that fails is a finding.
+- `event::lines(&Event) -> Vec<String>` produces exactly the sentences the engine emits today, one function, used by the terminal client. `handle` keeps its signature and returns those lines, so the existing tests are not changed at all; `handle_events` is the typed twin. A test that fails is a finding.
 - **Stop flag**: `Arc<AtomicBool>`, checked at the top of every `run_turns` iteration and before each `perform`. When set, the engine finishes the job as `Cancelled` with the existing "Stopped the job in …" text, emits `stopped`, clears the flag. Cost: one step of latency (one model call plus one action), never more. Stop typed while the engine is *waiting* (answer or OK) goes through `handle` as today.
 - **Changed files**: computed at `finish` for `done`/`failed`/`stopped` by walking the job's folder for entries whose mtime is at or after the job's start time (a new `Job.started_at` field, `serde(default)`), skipping directories named `.git`, `.venv`, `node_modules`, `target`, and any hidden entry, capped at 20 and sorted by path. A housekeeping job walks the housekeeping folder. Ceiling (ponytail): mtime, not content; a file touched but unchanged is listed. Files written outside the folder by the admin hand are not listed; the undo report covers them.
 - **The question at a Needs-your-OK**: `handle_inner` in `WaitingApproval` becomes three-way: `is_yes` → approve; `is_refusal` (new list: `no`, `n`, `don't`, `dont`, `no thanks`, `refuse`, `not that`, `cancel that`, plus every `is_stop` phrase stays a stop) → decline as today; anything else → the model answers it with a `Reply`-only grammar over a new `prompt::approval_question(job, pending_reason, action, text)` prompt, the engine emits `said` with the answer and then `needs_ok` again with the same what/why; the job stays `WaitingApproval` with `pending_action` untouched. The answer is not a move that changes the job. Bounded: after 3 questions without a yes or no on the same action the engine says so and declines the action (the 1b rejection bound pattern), so a model that never satisfies the user cannot loop forever.
@@ -59,7 +59,7 @@ Built from `store.open_job()`; `waiting` mirrors `Job.state`. A job left mid-wor
 
 ### 3.1 Process and socket
 
-`ai-os-engine`, a binary in the `aios-core` crate (next to the existing `main.rs`, which becomes the thin client `ai-os-chat`). Runs as user `ai`. Listens on `$XDG_RUNTIME_DIR/ai-os.sock` (workshop: `/run/user/1000/ai-os.sock`, the directory is 0700 `ai`); the socket file is created 0600 and any stale file is removed at start. One `std::os::unix::net::UnixListener`, one thread per client, one engine thread. No async runtime, no new dependency beyond what is already in the workspace (`serde_json`).
+`ai-os-engine`, a binary in the `aios-core` crate (next to the existing `main.rs`, which becomes the thin client `ai-os-chat`). Runs as user `ai`. Listens on `$XDG_RUNTIME_DIR/ai-os.sock` (workshop: `/run/user/1000/ai-os.sock`, the directory is 0700 `ai`); the socket file is created 0600 and any stale file is removed at start. One `std::os::unix::net::UnixListener`, one thread per client, one engine thread. No async runtime, no new dependency beyond what is already in the workspace (`serde_json`). If something already answers on the socket the service refuses to start (two engines on one database is the failure that must not happen); only a stale, unanswered socket file is removed.
 
 ### 3.2 Protocol
 
@@ -69,12 +69,12 @@ Client → service:
 - `{"say": "<text>"}` — exactly what the user typed or a button sent (`yes`, `no`, `stop`, `undo`).
 - `{"hello": {}}` — request a `state` event (answered to that client only).
 
-Service → clients: the events of §2, every event to every connected client, in emission order, each with a monotonically increasing `seq` added by the service so a client can detect a gap. A `say` is also echoed to every client as `{"kind":"you","text":…}` so a second rail shows what the first typed. A line the service cannot parse gets `{"kind":"error","text":"could not read that message"}` on that connection and nothing else happens.
+Service → clients: the events of §2, every event to every connected client, in emission order, each broadcast carrying a monotonically increasing `seq` added by the service so a client can detect a gap (answers to one client alone — `state`, `busy`, `error` — carry no `seq`, so every client's run of numbers is contiguous). A `say` is also echoed to every client as `{"kind":"you","text":…}` so a second rail shows what the first typed. A line the service cannot parse gets `{"kind":"error","text":"could not read that message"}` on that connection and nothing else happens.
 
 ### 3.3 Inside
 
 - The engine lives on one thread with an `mpsc` receiver of commands `Say(text)` / `Hello(client_id)`. Client threads push commands and hold a broadcast sender (a `Vec<Sender<String>>` behind a mutex; a send error drops that client).
-- **Busy**: the service keeps `running: AtomicBool`, set by the engine thread around `handle` when the engine reports a job is working (not waiting). A `say` that arrives while `running` is true and is not `is_stop` is answered by the service itself with `busy` (text: "I'm working on <name>. Say stop if you want me to change course.") and is *not* queued. `stop` sets the engine's stop flag and is also queued, so a stop arriving in the gap between steps is not lost. While the engine is *waiting* (answer/OK) `running` is false and text is queued normally.
+- **Busy**: the service keeps `running: AtomicBool`, true while the engine thread is inside `handle`, and a mirror of the open job built from the events. A `say` that arrives while `running` is true AND the mirror holds a job is answered by the service itself with `busy` (text: "I'm working on <name>. Say stop if you want me to change course.") and is *not* queued; while only a chat reply is in progress (no job) the message is queued behind it. `stop` always sets the engine's stop flag AND is queued, so a stop typed before the engine has picked the request up cannot sit behind the whole job, and an idle engine answers it as today. While the engine is *waiting* (answer/OK) `running` is false and text is queued normally.
 - **Start-up**: if `store.open_job()` returns a job in `Working`/`Planning`/`Asking`, the service emits `state` to new clients as-is and resumes the job by calling `handle("")`-equivalent `Engine::resume()` (a new public method wrapping the existing "carry on with it" arm, which today needs a user line to trigger). A job in a waiting state is left waiting.
 - **Shutdown**: SIGTERM closes the listener; a running job is left in the database exactly as the 1b crash path expects; the service does not try to finish it.
 
@@ -130,7 +130,7 @@ Parent-spec §5.1 addition at close-out: the rail and apps opened from it use th
 ## 6. Changes to existing code (the ripples)
 
 - `engine.rs`: every `Ok(vec![…])` becomes an emit; `handle` signature; stop flag; `is_refusal`; the approval-question arm; `resume()`; `started_at` on `Job::new`/`new_housekeeping`; changed-files at `finish` and at the stop path.
-- `job.rs`: `started_at: i64` (unix seconds, `serde(default)`).
+- `job.rs`: `started_at: u64` (unix seconds, `serde(default)`).
 - `prompt.rs`: `approval_question`. `schema.rs`: a `Reply`-only grammar (the per-state narrowing rule from 1b).
 - `store.rs`: unchanged tables; `push_message` now called from the emit path.
 - `testing.rs`: collecting sink, `handle_lines`, `FakeModel` scripted reply for the approval question.
