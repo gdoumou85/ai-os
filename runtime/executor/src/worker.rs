@@ -1,32 +1,51 @@
 use crate::action::Action;
 use crate::rules::resolves_inside;
+use crate::undo::UndoEntry;
 use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// The result of actually performing an action.
+/// The result of actually performing an action, plus what it takes to put it back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
     pub ok: bool,
     pub detail: String,
+    /// `Some` only when the action actually changed something reversible.
+    pub undo: Option<UndoEntry>,
 }
 
-/// A thing that can perform actions. The spine ships one real impl (SandboxWorker,
-/// Task 7); tests use FakeWorker.
+impl Outcome {
+    pub fn ok(detail: impl Into<String>) -> Self { Self { ok: true, detail: detail.into(), undo: None } }
+    pub fn err(detail: impl Into<String>) -> Self { Self { ok: false, detail: detail.into(), undo: None } }
+    pub fn with_undo(mut self, entry: UndoEntry) -> Self {
+        self.undo = Some(entry);
+        self
+    }
+}
+
+/// A thing that can perform actions. The spine ships two real impls (SandboxWorker,
+/// AdminWorker); tests use FakeWorker.
 pub trait Worker {
     fn run(&self, action: &Action) -> Outcome;
+    /// Put back what an earlier `run` recorded. Only workers with a privileged hand can.
+    fn reverse(&self, _entry: &UndoEntry) -> Outcome { Outcome::err("this worker cannot undo") }
 }
 
 /// Records every action it was asked to run; returns a preset outcome.
 pub struct FakeWorker {
     pub calls: RefCell<Vec<Action>>,
+    pub reversed: RefCell<Vec<UndoEntry>>,
     pub outcome: Outcome,
 }
 
 impl FakeWorker {
     pub fn new(ok: bool) -> Self {
-        Self { calls: RefCell::new(vec![]), outcome: Outcome { ok, detail: "fake".into() } }
+        Self {
+            calls: RefCell::new(vec![]),
+            reversed: RefCell::new(vec![]),
+            outcome: if ok { Outcome::ok("fake") } else { Outcome::err("fake") },
+        }
     }
 }
 
@@ -35,11 +54,16 @@ impl Worker for FakeWorker {
         self.calls.borrow_mut().push(action.clone());
         self.outcome.clone()
     }
+    fn reverse(&self, entry: &UndoEntry) -> Outcome {
+        self.reversed.borrow_mut().push(entry.clone());
+        self.outcome.clone()
+    }
 }
 
 /// Lets the engine hold a `Executor<Box<dyn Worker>>` without knowing the concrete impl.
 impl Worker for Box<dyn Worker> {
     fn run(&self, action: &Action) -> Outcome { (**self).run(action) }
+    fn reverse(&self, entry: &UndoEntry) -> Outcome { (**self).reverse(entry) }
 }
 
 /// Runs commands as an unprivileged user, scoped to one workspace, no network.
@@ -71,7 +95,7 @@ impl SandboxWorker {
     /// sites can just `?`-style propagate it with `match ... { Err(out) => return out }`.
     fn canonical_workspace(&self) -> Result<PathBuf, Outcome> {
         fs::canonicalize(&self.workspace)
-            .map_err(|e| Outcome { ok: false, detail: format!("cannot resolve workspace: {e}") })
+            .map_err(|e| Outcome::err(format!("cannot resolve workspace: {e}")))
     }
 
     /// Resolve an existing in-workspace file to its canonical path, refusing anything that
@@ -79,13 +103,13 @@ impl SandboxWorker {
     /// ReadFile and EditFile since both only ever operate on a file that must already exist.
     fn existing_inside(&self, path: &str) -> Result<PathBuf, Outcome> {
         if !resolves_inside(path, &self.workspace) {
-            return Err(Outcome { ok: false, detail: "path escapes workspace".into() });
+            return Err(Outcome::err("path escapes workspace"));
         }
         let ws_canon = self.canonical_workspace()?;
         let target = fs::canonicalize(self.workspace.join(path))
-            .map_err(|_| Outcome { ok: false, detail: "cannot resolve path".into() })?;
+            .map_err(|_| Outcome::err("cannot resolve path"))?;
         if !target.starts_with(&ws_canon) {
-            return Err(Outcome { ok: false, detail: "path escapes workspace".into() });
+            return Err(Outcome::err("path escapes workspace"));
         }
         Ok(target)
     }
@@ -99,6 +123,23 @@ pub(crate) fn tail(s: &str, n: usize) -> String {
     s.chars().skip(count.saturating_sub(n)).collect()
 }
 pub(crate) fn head(s: &str, n: usize) -> String { s.chars().take(n).collect() }
+
+/// What a `read_file` gives back: the whole file (capped), or the asked-for window with
+/// numbered lines so the model can quote exact passages back in `edit_file`. Shared by
+/// `SandboxWorker` and `AdminWorker` — a file reads the same whichever hand fetched it.
+pub(crate) fn window(text: &str, from_line: Option<usize>, lines: Option<usize>) -> String {
+    match (from_line, lines) {
+        (None, None) => head(text, 2000),
+        _ => {
+            let start = from_line.unwrap_or(1).max(1);
+            let n = lines.unwrap_or(200).min(200);
+            text.lines().enumerate()
+                .skip(start - 1).take(n)
+                .map(|(i, l)| format!("{}: {l}\n", i + 1))
+                .collect()
+        }
+    }
+}
 
 impl Worker for SandboxWorker {
     fn run(&self, action: &Action) -> Outcome {
@@ -140,12 +181,10 @@ impl Worker for SandboxWorker {
                         // Success: the start of the output is what matters. Failure: the END is where the
                         // reason lives (1b spec §3), so cut from the tail.
                         let cut = |s: &str| if ok { head(s, 500) } else { tail(s, 500) };
-                        Outcome {
-                            ok,
-                            detail: format!("exit {}; stdout: {} stderr: {}", o.status.code().unwrap_or(-1), cut(&stdout), cut(&stderr)),
-                        }
+                        let detail = format!("exit {}; stdout: {} stderr: {}", o.status.code().unwrap_or(-1), cut(&stdout), cut(&stderr));
+                        if ok { Outcome::ok(detail) } else { Outcome::err(detail) }
                     }
-                    Err(e) => Outcome { ok: false, detail: format!("spawn failed: {e}") },
+                    Err(e) => Outcome::err(format!("spawn failed: {e}")),
                 }
             }
             // ponytail: TOCTOU window between `existing_inside`'s canonicalize and the read below
@@ -156,25 +195,13 @@ impl Worker for SandboxWorker {
                 let target = match self.existing_inside(path) { Ok(p) => p, Err(out) => return out };
                 let text = match fs::read_to_string(&target) {
                     Ok(s) => s,
-                    Err(e) => return Outcome { ok: false, detail: e.to_string() },
+                    Err(e) => return Outcome::err(e.to_string()),
                 };
-                match (from_line, lines) {
-                    (None, None) => Outcome { ok: true, detail: head(&text, 2000) },
-                    _ => {
-                        // Numbered lines so the model can quote exact passages back in edit_file.
-                        let start = from_line.unwrap_or(1).max(1);
-                        let n = lines.unwrap_or(200).min(200);
-                        let detail: String = text.lines().enumerate()
-                            .skip(start - 1).take(n)
-                            .map(|(i, l)| format!("{}: {l}\n", i + 1))
-                            .collect();
-                        Outcome { ok: true, detail }
-                    }
-                }
+                Outcome::ok(window(&text, *from_line, *lines))
             }
             Action::WriteFile { path, contents } => {
                 if !resolves_inside(path, &self.workspace) {
-                    return Outcome { ok: false, detail: "path escapes workspace".into() };
+                    return Outcome::err("path escapes workspace");
                 }
                 let ws_canon = match self.canonical_workspace() {
                     Ok(p) => p,
@@ -187,18 +214,18 @@ impl Worker for SandboxWorker {
                 // "." and anything that isn't a single normal component.
                 let file_name = match target.file_name() {
                     Some(n) => n,
-                    None => return Outcome { ok: false, detail: "invalid file name".into() },
+                    None => return Outcome::err("invalid file name"),
                 };
                 let parent = match target.parent() {
                     Some(p) => p,
-                    None => return Outcome { ok: false, detail: "invalid file name".into() },
+                    None => return Outcome::err("invalid file name"),
                 };
                 let parent_canon = match fs::canonicalize(parent) {
                     Ok(p) => p,
-                    Err(_) => return Outcome { ok: false, detail: "cannot resolve path".into() },
+                    Err(_) => return Outcome::err("cannot resolve path"),
                 };
                 if !parent_canon.starts_with(&ws_canon) {
-                    return Outcome { ok: false, detail: "path escapes workspace".into() };
+                    return Outcome::err("path escapes workspace");
                 }
                 // The parent check alone isn't enough: if the leaf itself already exists as a
                 // symlink, `fs::write` opens without O_NOFOLLOW and happily follows it out of the
@@ -211,15 +238,15 @@ impl Worker for SandboxWorker {
                 let leaf = parent_canon.join(file_name);
                 match fs::symlink_metadata(&leaf) {
                     Ok(meta) if meta.file_type().is_symlink() => {
-                        return Outcome { ok: false, detail: "refusing to write through a symlink".into() };
+                        return Outcome::err("refusing to write through a symlink");
                     }
                     Ok(_) => {}                                    // exists, plain file: fine to overwrite
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // doesn't exist yet: fine to create
-                    Err(e) => return Outcome { ok: false, detail: e.to_string() },
+                    Err(e) => return Outcome::err(e.to_string()),
                 }
                 match fs::write(&leaf, contents) {
-                    Ok(_) => Outcome { ok: true, detail: "written".into() },
-                    Err(e) => Outcome { ok: false, detail: e.to_string() },
+                    Ok(_) => Outcome::ok("written"),
+                    Err(e) => Outcome::err(e.to_string()),
                 }
             }
             // Rule 9: edit in place — the model never reads a whole file, holds it, and writes
@@ -228,20 +255,20 @@ impl Worker for SandboxWorker {
                 let target = match self.existing_inside(path) { Ok(p) => p, Err(out) => return out };
                 let text = match fs::read_to_string(&target) {
                     Ok(s) => s,
-                    Err(e) => return Outcome { ok: false, detail: e.to_string() },
+                    Err(e) => return Outcome::err(e.to_string()),
                 };
                 match text.matches(find.as_str()).count() {
-                    0 => return Outcome { ok: false, detail: "find text not found — re-read the file and quote it exactly".into() },
+                    0 => return Outcome::err("find text not found — re-read the file and quote it exactly"),
                     1 => {}
-                    n => return Outcome { ok: false, detail: format!("find text occurs in {n} places — include more surrounding lines so it is unique") },
+                    n => return Outcome::err(format!("find text occurs in {n} places — include more surrounding lines so it is unique")),
                 }
                 // `target` is canonical (no symlink left in it), so this cannot write outside the workspace.
                 match fs::write(&target, text.replacen(find.as_str(), replace, 1)) {
-                    Ok(_) => Outcome { ok: true, detail: "edited".into() },
-                    Err(e) => Outcome { ok: false, detail: e.to_string() },
+                    Ok(_) => Outcome::ok("edited"),
+                    Err(e) => Outcome::err(e.to_string()),
                 }
             }
-            _ => Outcome { ok: false, detail: "sandbox has no hand for this action".into() },
+            _ => Outcome::err("sandbox has no hand for this action"),
         }
     }
 }
@@ -300,6 +327,16 @@ mod tests {
         let out = w.run(&a);
         assert!(out.ok);
         assert_eq!(w.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn fake_records_reversals_and_the_default_worker_cannot_undo() {
+        let e = UndoEntry::DirCreated { path: "/data/x".into() };
+        let w = FakeWorker::new(true);
+        assert!(w.reverse(&e).ok);
+        assert_eq!(w.reversed.borrow().as_slice(), &[e.clone()]);
+        // SandboxWorker never records undo, so it gets the trait's default refusal.
+        assert_eq!(sandbox().reverse(&e).detail, "this worker cannot undo");
     }
 
     fn sandbox() -> SandboxWorker {

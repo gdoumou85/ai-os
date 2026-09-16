@@ -553,9 +553,9 @@ mod tests {
             start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("python3")), done(run("python3")),
         ], "check");
         rec.outcomes.borrow_mut().extend([
-            Outcome { ok: true, detail: "ok".into() },                 // blueprint write
-            Outcome { ok: false, detail: "Traceback… NameError".into() }, // first check fails
-            Outcome { ok: true, detail: "2 3 5 7".into() },             // second check passes
+            Outcome::ok("ok"),                    // blueprint write
+            Outcome::err("Traceback… NameError"), // first check fails
+            Outcome::ok("2 3 5 7"),               // second check passes
         ]);
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -571,8 +571,8 @@ mod tests {
             act(1, run("cc")), act(1, write("BLUEPRINT.md")), done(run("true")),
         ], "retry");
         rec.outcomes.borrow_mut().extend([
-            Outcome { ok: true, detail: "ok".into() },
-            Outcome { ok: false, detail: "gcc: not found".into() },
+            Outcome::ok("ok"),
+            Outcome::err("gcc: not found"),
         ]);
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -593,9 +593,9 @@ mod tests {
             act(2, write("BLUEPRINT.md")), done(run("python3")),
         ], "retry-after-fix");
         rec.outcomes.borrow_mut().extend([
-            Outcome { ok: true, detail: "ok".into() },
-            Outcome { ok: false, detail: "NameError: prnt".into() },
-            Outcome { ok: true, detail: "edited".into() },
+            Outcome::ok("ok"),
+            Outcome::err("NameError: prnt"),
+            Outcome::ok("edited"),
         ]);
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -607,7 +607,7 @@ mod tests {
         let (mut e, rec, _) = engine_with(vec![
             start("p", true), plan(), act(1, run("a")), act(1, run("b")), act(1, run("c")), act(1, run("d")),
         ], "three");
-        for _ in 0..4 { rec.outcomes.borrow_mut().push_back(Outcome { ok: false, detail: "boom".into() }); }
+        for _ in 0..4 { rec.outcomes.borrow_mut().push_back(Outcome::err("boom")); }
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
         assert_eq!(rec.calls.borrow().len(), 3);
@@ -689,7 +689,7 @@ mod tests {
             Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "make it work".into(), creative: true, understood: "Continuing p".into(), remember: None },
             plan(), act(1, write("BLUEPRINT.md")), done(run("python3")),
         ], "lastrun");
-        rec.outcomes.borrow_mut().push_back(Outcome { ok: false, detail: "exit 1; stderr: NameError: prmes".into() });
+        rec.outcomes.borrow_mut().push_back(Outcome::err("exit 1; stderr: NameError: prmes"));
         e.handle("make p").unwrap();
         let note = std::fs::read_to_string(root.join("p").join("LAST_RUN.md")).expect("LAST_RUN.md written by the loop");
         assert!(note.contains("NameError: prmes") && note.contains("the script crashes") && note.contains("a working loop"), "{note}");
@@ -750,10 +750,10 @@ mod tests {
             done(run("python3")),                        // now passes
         ], "check-then-act");
         rec.outcomes.borrow_mut().extend([
-            Outcome { ok: true, detail: "ok".into() },                    // blueprint write
-            Outcome { ok: false, detail: "NameError: prnt".into() },      // check fails
-            Outcome { ok: true, detail: "edited".into() },                // edit succeeds
-            Outcome { ok: true, detail: "2 3 5 7".into() },                // check passes
+            Outcome::ok("ok"),               // blueprint write
+            Outcome::err("NameError: prnt"), // check fails
+            Outcome::ok("edited"),           // edit succeeds
+            Outcome::ok("2 3 5 7"),          // check passes
         ]);
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");

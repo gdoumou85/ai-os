@@ -18,7 +18,7 @@ pub struct ScriptedWorker(pub Recorder);
 impl Worker for ScriptedWorker {
     fn run(&self, action: &Action) -> Outcome {
         self.0.calls.borrow_mut().push(action.clone());
-        self.0.outcomes.borrow_mut().pop_front().unwrap_or(Outcome { ok: true, detail: "ok".into() })
+        self.0.outcomes.borrow_mut().pop_front().unwrap_or(Outcome::ok("ok"))
     }
 }
 

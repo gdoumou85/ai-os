@@ -5,4 +5,6 @@ pub mod action;
 pub mod rules;
 pub mod log;
 pub mod worker;
+pub mod undo;
+pub mod admin;
 pub mod executor;
