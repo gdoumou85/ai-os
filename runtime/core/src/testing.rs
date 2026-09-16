@@ -172,6 +172,12 @@ pub fn engine_with(moves: Vec<crate::moves::Move>, tag: &str) -> (crate::engine:
     (e, rec, root)
 }
 
+/// The events of one user message — `handle`'s typed twin, for a test that reads the cards
+/// rather than the prose.
+pub fn events_of(e: &mut crate::engine::Engine<crate::model::FakeModel>, text: &str) -> Vec<aios_proto::Event> {
+    e.handle_events(text).unwrap()
+}
+
 /// Same engine, with the files half of undo faked so a temp root can exercise it.
 pub fn engine_with_snapshots(moves: Vec<crate::moves::Move>, tag: &str, snap: &FakeSnapshotter)
     -> (crate::engine::Engine<crate::model::FakeModel>, Recorder, PathBuf) {

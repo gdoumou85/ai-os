@@ -47,6 +47,14 @@ pub struct Job {
     /// standing convention from now on — every field added to `Job` gets this).
     #[serde(default)]
     pub declined_actions: Vec<String>,
+    /// A human's "yes", and it holds for the rest of the job: the same action asked for again,
+    /// word for word, is not put to them a second time. The live 1d run had the 9B re-issue its
+    /// approved `/etc` write after that write had already succeeded, and the job sat on a second
+    /// Needs-your-OK for a question the user had answered a moment earlier. Per job and per
+    /// exact action, like `declined_actions`, which is checked first: a later no overrides an
+    /// earlier yes. `serde(default)`: see `declined_actions` (I3).
+    #[serde(default)]
+    pub approved_actions: Vec<String>,
     pub rejections: u32,
     /// Bounded like `rejections`/MAX_FAILS_PER_STEP: a model that only ever replans never
     /// produces output otherwise (engine::MAX_REPLANS).
@@ -77,6 +85,24 @@ pub struct Job {
     /// what it never saw. `#[serde(default)]`: see `declined_actions` (I3).
     #[serde(default)]
     pub request: String,
+    /// When the job began (unix seconds): the Done card lists what changed since then.
+    /// `#[serde(default)]`: a job saved before 1d has no such key.
+    #[serde(default)]
+    pub started_at: u64,
+    /// How many times, while an action waited for the user's OK, they asked something instead
+    /// of yes/no. Reset to 0 in `resume_after_approval` once the OK is settled either way; three
+    /// unanswered questions in a row count as a no (engine::is_refusal, engine's WaitingApproval
+    /// arm). `#[serde(default)]`: see `declined_actions` (I3).
+    #[serde(default)]
+    pub ok_questions: u32,
+    /// How many `done` moves the blueprint gate has held back on this job. Its own counter, not
+    /// the grammar `rejections` budget of two: a gated `done` is a legal move refused by policy
+    /// and the fix is one concrete extra step, so two tries is not enough room — the live 1d run
+    /// lost two jobs to a second `done` arriving before the blueprint write. Bounded all the
+    /// same (engine::MAX_DONE_GATED), so a model that only ever says done still ends.
+    /// `#[serde(default)]`: see `declined_actions` (I3).
+    #[serde(default)]
+    pub done_gated: u32,
 }
 
 impl Job {
@@ -89,10 +115,12 @@ impl Job {
             state: if creative { State::Planning } else { State::Asking },
             answers: vec![], pending_questions: vec![], plan: vec![], steps: vec![],
             pending_action: None, pending_reason: String::new(), failed_actions: vec![],
-            declined_actions: vec![], rejections: 0, replans: 0,
+            declined_actions: vec![], approved_actions: vec![], rejections: 0, replans: 0,
             note_to_model: None, last_code_change: 0, last_blueprint_update: 0,
             outcome_text: String::new(), housekeeping: false,
             folder: folder.into(), new_project: false, request: String::new(),
+            started_at: (millis / 1000) as u64,
+            ok_questions: 0, done_gated: 0,
         }
     }
 
@@ -147,5 +175,15 @@ mod tests {
         assert!(back.folder.is_empty());
         assert!(!back.housekeeping);
         assert!(!back.new_project);
+    }
+
+    #[test]
+    fn started_at_is_set_and_optional_on_the_wire() {
+        let job = Job::new("p", "/data/projects/p", "g", true, "u");
+        assert!(job.started_at > 1_700_000_000);
+        let mut value = serde_json::to_value(&job).unwrap();
+        value.as_object_mut().unwrap().remove("started_at");
+        let back: Job = serde_json::from_value(value).unwrap();
+        assert_eq!(back.started_at, 0);
     }
 }

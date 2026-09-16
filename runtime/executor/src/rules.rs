@@ -109,6 +109,39 @@ pub fn wrong_hand(argv: &[String]) -> Option<String> {
     if language.contains(&program) && has(&["install", "add", "ci"]) {
         return Some("language packages come through `fetch_packages` (name the manager and the packages), never with run_command: the sandbox has no network".into());
     }
+    // A file outside the AI's own areas written by a free command. The live 1d run showed the
+    // 9B answer "write hello into /etc/…" with `echo hello /etc/…`: in the jail that command
+    // succeeds — echo printed two words — and the model then read back a file that was never
+    // written and gave up. Named here so it reaches the hand that can do it, and the user's yes
+    // with it. Only the programs that write are caught: `ls /etc`, `cat /etc/os-release`,
+    // `python3 /usr/bin/x` and every other read of the machine stay free, as does anything
+    // under /data, where the workspace lives.
+    //
+    // `cp` and `mv` are judged on their LAST path alone, which is where they write. Every other
+    // path they are given they only read, so `cp /etc/hosts notes.txt` and
+    // `cp /usr/share/doc/x/template.py .` copy the machine *into* the project and are as free as
+    // `cat` is. The rest of the list writes wherever it is pointed, so any path outside counts.
+    let writers = ["echo", "printf", "tee", "touch", "dd", "truncate", "chmod", "chown"];
+    // `/tmp` and `/var/tmp` are scratch, not the machine: `tee /tmp/build.log` and `touch
+    // /var/tmp/x` are ordinary, and sending them to `write_file` would spend the user's yes and
+    // then be refused anyway — the root wrapper's roots do not include them. Exempt from this
+    // rule's "outside" test only, never added to AI_ROOTS; the jail gives each action its own
+    // PrivateTmp anyway, so nothing written there is even shared between steps.
+    let outside = |v: &&str| v.starts_with('/') && !under_any(v, &AI_ROOTS) && !under_any(v, &["/tmp", "/var/tmp"]);
+    let writes_outside = if matches!(program, "cp" | "mv") {
+        verbs.last().is_some_and(outside)
+    } else {
+        writers.contains(&program) && verbs.iter().any(outside)
+    };
+    if writes_outside {
+        // `chmod`/`chown` change a mode or an owner, which `write_file` cannot do at all — naming
+        // it here sent the model after a hand that does not do what it wants (the `rmdir` lesson).
+        return Some(if matches!(program, "chmod" | "chown") {
+            "there is no hand that changes a file's mode or owner outside the project; the sandbox is sealed off from the rest of the machine and `write_file` only writes contents"
+        } else {
+            "a file outside the AI's own folders is written with the `write_file` action (and the user's yes), never with run_command: the sandbox is sealed off from the rest of the machine, so a command like this reports success without writing anything"
+        }.to_string());
+    }
     None
 }
 
@@ -179,6 +212,44 @@ mod tests {
     #[test]
     fn run_command_is_auto() {
         assert_eq!(classify(&Action::RunCommand { argv: vec!["ls".into()] }, &ws()), Risk::Auto);
+    }
+
+    #[test]
+    fn a_free_command_writing_outside_the_ai_areas_is_sent_to_write_file() {
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        for line in ["echo hello /etc/x.txt", "printf hi /etc/x", "tee /etc/x", "cp a.txt /etc/x",
+                     "mv a.txt /opt/x", "mv a.txt /usr/local/x", "touch /etc/x", "sudo tee /etc/x"] {
+            assert!(wrong_hand(&argv(line)).unwrap().contains("`write_file` action"), "{line}");
+        }
+        // Reading the machine, and anything under /data (where the workspace is), stay free —
+        // including `cp`/`mv` copying the machine INTO the project, which only ever write to
+        // their last path.
+        for line in ["cat /etc/os-release", "ls /etc", "python3 /usr/bin/x", "grep x /etc/hosts",
+                     "echo hello", "cp a.txt b.txt", "tee /data/projects/p/out.txt", "touch notes.md",
+                     "cp /etc/hosts notes.txt", "cp /usr/share/doc/x/template.py .",
+                     "mv /etc/hosts notes.txt", "cp /etc/hosts /data/projects/p/hosts"] {
+            assert_eq!(wrong_hand(&argv(line)), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn scratch_dirs_stay_free_and_a_mode_outside_the_project_has_no_hand() {
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        // Scratch is not the machine, and `write_file` cannot reach /tmp either — the yes it
+        // would cost is refused by the wrapper's roots straight after.
+        for line in ["tee /tmp/build.log", "touch /var/tmp/x", "echo hi /tmp/out", "cp a.txt /tmp/a"] {
+            assert_eq!(wrong_hand(&argv(line)), None, "{line}");
+        }
+        // The rest of the machine is unchanged, and a name that merely starts with the same
+        // letters is not under it.
+        assert!(wrong_hand(&argv("tee /etc/x")).unwrap().contains("`write_file` action"));
+        assert!(wrong_hand(&argv("tee /tmpfoo/x")).unwrap().contains("`write_file` action"));
+        // A mode or an owner is not contents: naming `write_file` sent the model after a hand
+        // that cannot do it (the `rmdir` lesson).
+        for line in ["chmod 600 /etc/x", "chown ai /etc/x"] {
+            let why = wrong_hand(&argv(line)).unwrap();
+            assert!(why.contains("mode or owner") && !why.contains("is written with"), "{line}: {why}");
+        }
     }
 
     #[test]

@@ -11,8 +11,13 @@ path = "src/lib.rs"
 name = "ai-os-chat"
 path = "src/main.rs"
 
+[[bin]]
+name = "ai-os-engine"
+path = "src/bin/ai-os-engine.rs"
+
 [dependencies]
 executor = { path = "../executor" }
+aios-proto = { path = "../proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

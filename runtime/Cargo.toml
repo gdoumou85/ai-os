@@ -1,3 +1,10 @@
 [workspace]
-members = ["executor", "core"]  # core dir holds package aios-core
+members = ["executor", "proto", "core", "rail"]  # core dir holds package aios-core
 resolver = "2"
+
+# A panic in the engine thread must take the process with it, not leave `ai-os-engine` alive and
+# dead: the accept loop would keep taking clients and dropping them, systemd's
+# `Restart=on-failure` would never fire, and `bind` would refuse a manual restart because the
+# socket still answers. Aborting makes the failure visible and restartable.
+[profile.release]
+panic = "abort"
