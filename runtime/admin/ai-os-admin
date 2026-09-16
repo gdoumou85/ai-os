@@ -4,8 +4,10 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 refuse(){ echo "refused: $*" >&2; exit 3; }
-# Must also END in [a-z0-9]: apt reads a trailing - or + as "remove"/"install this instead".
-NAME_RE='^[a-z0-9]([a-z0-9+.@_-]*[a-z0-9])?$'
+# A trailing - is apt's "remove this instead" suffix, so a name may never end in one.
+# A trailing + is apt's "install this instead" suffix, which is what install already does,
+# and real packages end in it: g++, libstdc++6.
+NAME_RE='^[a-z0-9]([a-z0-9+.@_-]*[a-z0-9+])?$'
 names(){ [ $# -gt 0 ] || refuse "no names"; for n in "$@"; do [[ "$n" =~ $NAME_RE ]] || refuse "bad name: $n"; done; }
 nonempty(){ [ -n "${1:-}" ] || refuse "empty path"; }
 # The caller owns the directories under /data, so it can plant symlinks there. Never follow one.

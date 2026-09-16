@@ -13,6 +13,7 @@ refuses "runtime remove"          remove -- systemd
 refuses "option as package"       install -- -o APT::Update::Pre-Invoke::=/bin/echo
 refuses "bad package name"        install -- 'cowsay;id'
 refuses "apt suffix as package"   install -- sudo-
+refuses "trailing dash"           install -- g++-
 refuses "unit path as service"    service /tmp/x.service enable
 refuses "protected service"       service ollama disable
 refuses "protected unit suffix"   service ollama.service disable
