@@ -1,5 +1,12 @@
 /// JSON schema for one `Move`, sent to the runner as `format` (decision 13). Mirrors moves.rs
 /// and executor::action::Action; a new move or action kind must be added in both places.
+///
+/// Key order below is load-bearing: the runner's grammar makes the model commit to an object by
+/// its *first* key, so the discriminator (`move` here, `kind` in `$defs.action`) must be written
+/// first in every `properties` object. `serde_json`'s `preserve_order` feature (see core's
+/// Cargo.toml) is what keeps `value()` honouring this order instead of alphabetising it — without
+/// it, `start`'s `creative` would sort before `move` and lock a small model into `reply` (the only
+/// variant whose alphabetical-first key happens to be `move`).
 pub const MOVE_SCHEMA: &str = r##"{
   "$defs": {
     "action": { "oneOf": [
@@ -24,4 +31,29 @@ pub const MOVE_SCHEMA: &str = r##"{
 
 pub fn value() -> serde_json::Value {
     serde_json::from_str(MOVE_SCHEMA).expect("MOVE_SCHEMA is valid JSON")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The runner's grammar commits to an object by its first key (decision 13, round 2): without
+    /// `serde_json`'s `preserve_order` feature, `Value::Object` would alphabetise `properties`
+    /// and `start`'s `creative` would sort ahead of `move`, locking a small model into `reply`
+    /// (the only variant whose alphabetically-first key is `move`). This test fails on plain
+    /// `serde_json` and passes with `preserve_order`.
+    #[test]
+    fn move_is_always_the_first_key() {
+        let schema = value();
+        for entry in schema["oneOf"].as_array().unwrap() {
+            let props = entry["properties"].as_object().unwrap();
+            let first = props.keys().next().unwrap();
+            assert_eq!(first, "move", "discriminator must be written first: {entry}");
+        }
+        for entry in schema["$defs"]["action"]["oneOf"].as_array().unwrap() {
+            let props = entry["properties"].as_object().unwrap();
+            let first = props.keys().next().unwrap();
+            assert_eq!(first, "kind", "discriminator must be written first: {entry}");
+        }
+    }
 }
