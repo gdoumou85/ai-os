@@ -68,4 +68,14 @@ mod tests {
             .map(|o| o["properties"]["move"]["enum"][0].as_str().unwrap().to_string()).collect();
         assert_eq!(names, ["reply", "start", "ask", "plan", "act", "replan", "done", "give_up"]);
     }
+
+    #[test]
+    fn integer_fields_are_1_based_in_schema() {
+        // step/from_line/lines back `usize` fields; a grammar-valid negative would fail
+        // serde_json parsing, breaking "grammar-forced means always parses" (decision 13).
+        let v = crate::schema::value();
+        assert_eq!(v["oneOf"][4]["properties"]["step"]["minimum"], 1);
+        assert_eq!(v["$defs"]["action"]["oneOf"][1]["properties"]["from_line"]["minimum"], 1);
+        assert_eq!(v["$defs"]["action"]["oneOf"][1]["properties"]["lines"]["minimum"], 1);
+    }
 }
