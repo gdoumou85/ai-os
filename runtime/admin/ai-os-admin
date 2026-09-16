@@ -4,11 +4,17 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 refuse(){ echo "refused: $*" >&2; exit 3; }
-NAME_RE='^[a-z0-9][a-z0-9+.@_-]*$'
+# Must also END in [a-z0-9]: apt reads a trailing - or + as "remove"/"install this instead".
+NAME_RE='^[a-z0-9]([a-z0-9+.@_-]*[a-z0-9])?$'
 names(){ [ $# -gt 0 ] || refuse "no names"; for n in "$@"; do [[ "$n" =~ $NAME_RE ]] || refuse "bad name: $n"; done; }
+nonempty(){ [ -n "${1:-}" ] || refuse "empty path"; }
+# The caller owns the directories under /data, so it can plant symlinks there. Never follow one.
+nolink(){ if [ -L "$1" ]; then refuse "symlink not allowed: $1"; fi; }
 # realpath -m: resolves symlinks in the existing prefix, no need for the leaf to exist
 under(){ local p; p=$(realpath -m -- "$1"); for r in "${@:2}"; do [[ "$p" == "$r" || "$p" == "$r/"* ]] && { echo "$p"; return; }; done; refuse "path outside allowed roots: $1"; }
 not_refused_file(){ case "$1" in /etc/sudoers|/etc/sudoers.d|/etc/sudoers.d/*|/etc/passwd|/etc/shadow|/etc/group|/etc/gshadow) refuse "protected file: $1";; esac; }
+# A new directory under /data belongs to the sandbox, not to root.
+own_dir(){ case "$1" in /data/*) chown ai:ai-sandbox -- "$1"; chmod 2770 -- "$1";; *) chown ai:ai -- "$1";; esac; }
 verb=${1:-}; shift || true
 case "$verb" in
   install) [ "${1:-}" = -- ] || refuse "expected --"; shift; names "$@"
@@ -21,23 +27,46 @@ case "$verb" in
     apt-get remove -y -o DPkg::Lock::Timeout=60 -- "$@" ;;
   pkg-list) dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' | awk '$1=="ii"{print $2}' | sort ;;
   service) [ $# -eq 2 ] || refuse "service <name> <enable|disable|restart|state>"; names "$1"
+    u=${1%.service}   # ollama and ollama.service are the same unit
     case "$2" in
       enable)  systemctl enable --now -- "$1" ;;
-      disable) case "$1" in ollama|dbus|gdm*|systemd-*|ssh*|NetworkManager|ai-os*) refuse "protected service: $1";; esac
+      disable) case "$u" in ollama|dbus|gdm*|systemd-*|ssh*|NetworkManager|ai-os*) refuse "protected service: $1";; esac
                systemctl disable --now -- "$1" ;;
       restart) systemctl restart -- "$1" ;;
       state)   e=$(systemctl is-enabled -- "$1" 2>/dev/null || true); a=$(systemctl is-active -- "$1" 2>/dev/null || true); echo "${e:-unknown} ${a:-unknown}" ;;
       *) refuse "unknown service action: $2" ;;
     esac ;;
-  read-file)  [ $# -eq 1 ] || refuse "read-file <path>"; not_refused_file "$(realpath -m -- "$1")"; cat -- "$1" ;;
-  # mkdir -p, never install -d: install -d resets an existing directory's mode (2770 -> 755).
-  write-file) [ $# -eq 1 ] || refuse "write-file <path>"; p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"
-    mkdir -p -- "$(dirname "$p")"; cat > "$p.ai-os-tmp"; mv -f -- "$p.ai-os-tmp" "$p"
-    case "$p" in /data/*) chown ai:ai-sandbox -- "$p"; chmod 0660 -- "$p";; /home/ai/*) chown ai:ai -- "$p";; esac ;;
-  remove-file) [ $# -eq 1 ] || refuse "remove-file <path>"; p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; rm -f -- "$p" ;;
-  make-dir)   [ $# -eq 1 ] || refuse "make-dir <path>"; p=$(under "$1" /data /home/ai); mkdir -p -- "$p"
-    case "$p" in /data/*) chown ai:ai-sandbox -- "$p"; chmod 2770 -- "$p";; *) chown ai:ai -- "$p";; esac ;;
-  remove-dir) [ $# -eq 1 ] || refuse "remove-dir <path>"; p=$(under "$1" /data /home/ai); rmdir -- "$p" ;;
+  read-file)  [ $# -eq 1 ] || refuse "read-file <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"; cat -- "$p" ;;
+  # mkdir, never install -d: install -d resets an existing directory's mode (2770 -> 755).
+  write-file) [ $# -eq 1 ] || refuse "write-file <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"
+    if [ -d "$p" ]; then refuse "is a directory: $p"; fi
+    d=$(dirname -- "$p"); newdir=""
+    if [ ! -d "$d" ]; then
+      nolink "$d"; [ -d "$(dirname -- "$d")" ] || refuse "parent directory missing: $d"
+      mkdir -- "$d"; newdir=$d
+    fi
+    # mktemp -u picks the name; set -C makes the create O_EXCL, so a planted file or symlink
+    # at that name fails the redirect instead of being written through.
+    t=$(mktemp -u -- "$p.ai-os.XXXXXX"); trap 'rm -f -- "$t"' EXIT
+    umask 0077; set -C; cat > "$t"; set +C
+    nolink "$p"; mv -f -- "$t" "$p"
+    if [ -f "$p" ] && ! [ -L "$p" ]; then
+      case "$p" in
+        /data/*)    chown ai:ai-sandbox -- "$p"; chmod 0660 -- "$p" ;;
+        /home/ai/*) chown ai:ai -- "$p"; chmod 0644 -- "$p" ;;
+        *)          chmod 0644 -- "$p" ;;
+      esac
+    else refuse "not a regular file after write: $p"; fi
+    [ -z "$newdir" ] || own_dir "$newdir" ;;
+  remove-file) [ $# -eq 1 ] || refuse "remove-file <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"; rm -f -- "$p" ;;
+  make-dir)   [ $# -eq 1 ] || refuse "make-dir <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /data /home/ai); [ -d "$(dirname -- "$p")" ] || refuse "parent directory missing: $p"
+    mkdir -p -- "$p"; own_dir "$p" ;;
+  remove-dir) [ $# -eq 1 ] || refuse "remove-dir <path>"; nonempty "${1:-}"; nolink "$1"
+    p=$(under "$1" /data /home/ai); rmdir -- "$p" ;;
   sandbox-run)
     net=none; cwd=""; envs=()
     while [ $# -gt 0 ]; do case "$1" in

@@ -13,6 +13,8 @@ echo 'ai ALL=(root) NOPASSWD: /usr/local/libexec/ai-os-admin' > /etc/sudoers.d/a
 chmod 0440 /etc/sudoers.d/ai-os-admin.tmp
 visudo -cf /etc/sudoers.d/ai-os-admin.tmp
 mv -f /etc/sudoers.d/ai-os-admin.tmp /etc/sudoers.d/ai-os-admin
+# The one grant is the whole grant: drop ai from the sudo group so nothing else can be reached.
+deluser ai sudo 2>/dev/null || gpasswd -d ai sudo 2>/dev/null || true
 install -d -o ai -g ai-sandbox -m 2770 /data/snapshots /data/housekeeping
 # Leftovers from a script that once ran with CRLF endings.
 rmdir "/data/jobs"$'\r' "/data/projects"$'\r' 2>/dev/null || true
