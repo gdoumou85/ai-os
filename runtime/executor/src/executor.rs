@@ -63,14 +63,21 @@ impl<W: Worker> Executor<W> {
         // The wrong hand is refused with the right one named, never run and never put to the
         // user. A free command that belongs to another hand would fail in the sandbox in a way
         // that teaches the model the wrong thing about the machine (see `wrong_hand`); a
-        // `make_dir` inside the working directory would go to the approval gate and, once the
-        // user said yes, be refused by the wrapper anyway — it takes absolute paths outside the
-        // workspace only. A yes that buys a failure is worse than a refusal that names the hand.
+        // `make_dir` the privileged hand cannot carry out would go to the approval gate and, once
+        // the user said yes, be refused by the wrapper anyway — it takes absolute paths outside
+        // the workspace only, so a relative one means nothing to it whether it points into the
+        // project or out of it. A yes that buys a failure is worse than a refusal that names the
+        // hand, and the rule the prompt states ("make_dir is never used with a relative path") is
+        // enforced here rather than merely asked for.
         let wrong = match action {
             Action::RunCommand { argv } => wrong_hand(argv),
-            Action::MakeDir { path } if resolves_inside(path, &self.workspace) => Some(format!(
-                "a folder inside the working directory is made with `run_command mkdir -p {path}`: make_dir is the hand for folders outside it and takes an absolute path"
-            )),
+            Action::MakeDir { path } if !Path::new(path).is_absolute() || resolves_inside(path, &self.workspace) => {
+                Some(if resolves_inside(path, &self.workspace) {
+                    format!("a folder inside the working directory is made with `run_command mkdir -p {path}`: make_dir is the hand for folders outside it and takes an absolute path")
+                } else {
+                    format!("make_dir takes an absolute path: `{path}` is relative, and the hand that would make it works from no working directory of yours")
+                })
+            }
             _ => None,
         };
         if let Some(reason) = wrong {
@@ -214,10 +221,19 @@ mod tests {
             let ExecOutcome::Ran(o) = out else { panic!("{path} was not refused outright") };
             assert!(!o.ok && o.detail.contains("mkdir -p"), "{path}: {}", o.detail);
         }
+        // A relative path that points *out* of the workspace is no better: the hand works from
+        // no working directory at all, so it is refused for being relative rather than put to
+        // the user as a yes the wrapper would then throw away.
+        for path in ["../x", "../../../opt/x"] {
+            let out = e.execute("j", &Action::MakeDir { path: path.into() }, false).unwrap();
+            let ExecOutcome::Ran(o) = out else { panic!("{path} was not refused outright") };
+            assert!(!o.ok && o.detail.contains("absolute path"), "{path}: {}", o.detail);
+        }
         assert!(e.admin.calls.borrow().is_empty() && e.sandbox.calls.borrow().is_empty());
-        // Outside it, `make_dir` is still the hand, and one that escapes still needs a yes.
+        // Absolute and outside, `make_dir` is still the hand; absolute and outside the AI's own
+        // areas still needs a yes.
         assert!(matches!(e.execute("j", &Action::MakeDir { path: "/data/x".into() }, false).unwrap(), ExecOutcome::Ran(_)));
-        assert!(matches!(e.execute("j", &Action::MakeDir { path: "../../../opt/x".into() }, false).unwrap(), ExecOutcome::Blocked(_)));
+        assert!(matches!(e.execute("j", &Action::MakeDir { path: "/opt/x".into() }, false).unwrap(), ExecOutcome::Blocked(_)));
     }
 
     #[test]

@@ -638,6 +638,7 @@ impl<M: Model> Engine<M> {
                 eprintln!("core: failed to log a setting change: {e}");
             }
             job.rejections = 0;
+            job.done_gated = 0;
             job.note_to_model = None;
             job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
             self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
@@ -668,6 +669,11 @@ impl<M: Model> Engine<M> {
             }
             ExecOutcome::Ran(outcome) => {
                 job.rejections = 0;
+                // Like `rejections`: the counter bounds a model that is getting nowhere, so an
+                // action that actually ran clears it. Without this it is a lifetime count, and a
+                // long job that trips the blueprint gate once after each of four code changes —
+                // answering it correctly every time — would fail on the fourth.
+                job.done_gated = 0;
                 job.note_to_model = None;
                 job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
                 self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
@@ -1184,6 +1190,20 @@ mod tests {
         ], "gate-retry");
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        // And the counter is not a lifetime one: a gate hit, a step that really ran, another gate
+        // hit, and so on does not accumulate — otherwise a long job that answers the gate
+        // correctly every time still fails on the fourth code change.
+        let (mut e, _, _) = engine_with(vec![
+            start("r", true), plan(), act(1, write("main.py")),
+            done(run("true")), done(run("true")), act(1, write("BLUEPRINT.md")),
+            act(2, write("other.py")),
+            done(run("true")), done(run("true")), act(2, write("BLUEPRINT.md")),
+            act(3, write("third.py")),
+            done(run("true")), done(run("true")), act(3, write("BLUEPRINT.md")),
+            done(run("true")),
+        ], "gate-resets");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "the gate counter accumulated across progress: {out:?}");
         // And it still ends on a model that never writes the blueprint at all.
         let (mut e, _, _) = engine_with(vec![
             start("q", true), plan(), act(1, write("main.py")),
