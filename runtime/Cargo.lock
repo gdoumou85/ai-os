@@ -33,6 +33,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aios-proto"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
