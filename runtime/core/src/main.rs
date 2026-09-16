@@ -16,7 +16,8 @@ fn main() {
             Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
             Box::new(AdminWorker) as Box<dyn Worker>,
         )),
-        PathBuf::from(HOUSEKEEPING_DIR));
+        PathBuf::from(HOUSEKEEPING_DIR),
+        PathBuf::from("/data/snapshots"));
     // Builder's front (1b spec §9): the 1d rail draws this same conversation as cards.
     let stdin = std::io::stdin();
     loop {

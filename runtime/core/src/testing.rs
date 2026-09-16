@@ -16,6 +16,9 @@ pub struct Recorder {
     pub admin_calls: Rc<RefCell<Vec<Action>>>,
     pub admin_outcomes: Rc<RefCell<VecDeque<Outcome>>>,
     pub reversed: Rc<RefCell<Vec<UndoEntry>>>,
+    /// Outcomes for `reverse`, in order; when empty every reversal succeeds. A failing
+    /// reversal is the only way to test that undo reports it and still runs the rest.
+    pub reverse_outcomes: Rc<RefCell<VecDeque<Outcome>>>,
 }
 
 /// The sandbox hand. It really writes: the blueprint gate now asks the filesystem whether
@@ -70,7 +73,7 @@ impl Worker for AdminRecorder {
     }
     fn reverse(&self, entry: &UndoEntry) -> Outcome {
         self.0.reversed.borrow_mut().push(entry.clone());
-        Outcome::ok("reversed")
+        self.0.reverse_outcomes.borrow_mut().pop_front().unwrap_or(Outcome::ok("reversed"))
     }
 }
 
@@ -101,6 +104,10 @@ pub fn engine_with(moves: Vec<crate::moves::Move>, tag: &str) -> (crate::engine:
     let root = temp_root(tag);
     let housekeeping = root.join("housekeeping");
     std::fs::create_dir_all(&housekeeping).unwrap();
+    // A temp root is never btrfs, so `snapshot::take` returns None here and no test job
+    // ever gets a ProjectSnapshot row — the folder still has to exist for the engine.
+    let snapshots = root.join("snapshots");
+    std::fs::create_dir_all(&snapshots).unwrap();
     let e = crate::engine::Engine::new(
         crate::store::Store::open_in_memory().unwrap(),
         crate::model::FakeModel::new(moves),
@@ -108,6 +115,7 @@ pub fn engine_with(moves: Vec<crate::moves::Move>, tag: &str) -> (crate::engine:
         None,
         scripted_workers(&rec),
         housekeeping,
+        snapshots,
     );
     (e, rec, root)
 }
