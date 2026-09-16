@@ -23,7 +23,8 @@ pub enum EngineError {
 pub struct Engine<M: Model> {
     pub store: Store,
     pub model: M,
-    projects_root: PathBuf,
+    /// Where a *new* project lands when the `projects_root` setting says nothing.
+    default_root: PathBuf,
     log_path: Option<String>,
     workers: WorkerFactory,
 }
@@ -68,8 +69,8 @@ pub fn is_stop(text: &str) -> bool {
 }
 
 impl<M: Model> Engine<M> {
-    pub fn new(store: Store, model: M, projects_root: PathBuf, log_path: Option<String>, workers: WorkerFactory) -> Self {
-        Self { store, model, projects_root, log_path, workers }
+    pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory) -> Self {
+        Self { store, model, default_root, log_path, workers }
     }
 
     /// I3: a store error here used to be swallowed (`.ok().flatten()`) — a job left unreadable
@@ -77,29 +78,39 @@ impl<M: Model> Engine<M> {
     /// silently start a fresh one over it. Propagate instead.
     pub fn open_job(&self) -> Result<Option<Job>, EngineError> { Ok(self.store.open_job()?) }
 
-    fn workspace(&self, project: &str) -> PathBuf { self.projects_root.join(project) }
+    /// The job's own folder, as recorded on the job — never recomputed from the project name,
+    /// so moving the root (or a project) cannot redirect a job that is already running.
+    fn workspace(&self, job: &Job) -> PathBuf { PathBuf::from(&job.folder) }
+
+    /// Where a new project's folder goes. A store error is propagated, not read as "unset":
+    /// that would quietly put the project under the wrong root (I3's lesson).
+    fn projects_root(&self) -> Result<PathBuf, EngineError> {
+        Ok(match self.store.get_setting("projects_root")? {
+            Some(p) => PathBuf::from(p),
+            None => self.default_root.clone(),
+        })
+    }
 
     /// One executor per project folder: classification and enforcement share the same
     /// workspace path by construction (parent §11 item 3).
-    pub(crate) fn executor_for(&self, project: &str) -> Result<Executor<Box<dyn Worker>>, EngineError> {
-        let ws = self.workspace(project);
+    pub(crate) fn executor_for(&self, job: &Job) -> Result<Executor<Box<dyn Worker>>, EngineError> {
+        let ws = self.workspace(job);
         let log = match &self.log_path { Some(p) => ActionLog::open(p)?, None => ActionLog::open_in_memory()? };
         let (sandbox, admin) = (self.workers)(&ws);
         Ok(Executor::new(sandbox, admin, log, ws))
     }
 
-    fn create_project_folder(&self, project: &str) -> Result<(), EngineError> {
-        let ws = self.workspace(project);
-        std::fs::create_dir_all(&ws)?;
+    fn create_project_folder(&self, folder: &Path) -> Result<(), EngineError> {
+        std::fs::create_dir_all(folder)?;
         // Shared with the sandbox user (1b spec §7). Best effort: in tests there is no such group.
         // ponytail: shells out to chgrp/chmod; fine for one folder per project.
-        let _ = std::process::Command::new("chgrp").arg("ai-sandbox").arg(&ws).status();
-        let _ = std::process::Command::new("chmod").arg("2770").arg(&ws).status();
+        let _ = std::process::Command::new("chgrp").arg("ai-sandbox").arg(folder).status();
+        let _ = std::process::Command::new("chmod").arg("2770").arg(folder).status();
         Ok(())
     }
 
-    pub(crate) fn read_blueprint(&self, project: &str) -> Option<String> {
-        std::fs::read_to_string(self.workspace(project).join("BLUEPRINT.md")).ok()
+    pub(crate) fn read_blueprint(&self, job: &Job) -> Option<String> {
+        std::fs::read_to_string(self.workspace(job).join("BLUEPRINT.md")).ok()
     }
 
     /// The only entry point: one user message in, the lines to show the user out.
@@ -147,15 +158,24 @@ impl<M: Model> Engine<M> {
             Move::Start { project, new_project: _, description, goal, creative, understood, remember } => {
                 let name = sanitize_project_name(&project);
                 let existing = self.store.get_project(&name)?;
-                if existing.is_none() { self.create_project_folder(&name)?; }
+                let is_new = existing.is_none();
+                // An existing project keeps the folder it was created in. Recomputing it from the
+                // root re-homed the project on every start, overwriting the stored folder (1b bug).
+                let folder = match &existing {
+                    Some(p) => PathBuf::from(&p.folder),
+                    None => self.projects_root()?.join(&name),
+                };
+                if is_new { self.create_project_folder(&folder)?; }
                 let desc = existing.map(|p| p.description).unwrap_or(description);
-                self.store.upsert_project(&name, &self.workspace(&name).display().to_string(), &desc)?;
+                let folder = folder.display().to_string();
+                self.store.upsert_project(&name, &folder, &desc)?;
                 // I6: `remember` on a `start` move was saved silently — only the `Reply` arm told
                 // the user. Same "(Noted for the future: …)" line here, computed before the value
                 // moves into `add_instruction`.
                 let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
                 if let Some(r) = remember { self.store.add_instruction(&r)?; }
-                let job = Job::new(&name, &goal, creative, &understood);
+                let mut job = Job::new(&name, &folder, &goal, creative, &understood);
+                job.new_project = is_new;
                 self.store.save_job(&job)?;
                 let mut out = vec![understood];
                 if let Some(n) = note { out.push(n); }
@@ -183,7 +203,9 @@ impl<M: Model> Engine<M> {
     /// The bounded last-run note (1b spec §6.6): written from the record when a job ends
     /// badly, wiped when a job in the project is proven done. Never more than one file.
     fn write_or_wipe_last_run(&self, job: &Job) {
-        let path = self.workspace(&job.project).join("LAST_RUN.md");
+        // A housekeeping job has no project folder to leave a note in.
+        if job.housekeeping { return; }
+        let path = self.workspace(job).join("LAST_RUN.md");
         match job.state {
             State::Done => { let _ = std::fs::remove_file(&path); }
             State::Failed | State::Cancelled => {
@@ -243,7 +265,7 @@ impl<M: Model> Engine<M> {
             let earlier = job.steps.iter().rev().find(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).map(|s| s.detail.clone()).unwrap_or_default();
             return self.reject(job, &format!("that exact action already failed with: {earlier} — work around it or replan"));
         }
-        let exec = self.executor_for(&job.project)?;
+        let exec = self.executor_for(job)?;
         match exec.execute(&job.id, &action, approved)? {
             ExecOutcome::Blocked(reason) => {
                 job.rejections = 0; // a legal act needing approval is a valid move, not a rejection
@@ -307,8 +329,8 @@ impl<M: Model> Engine<M> {
                 let text = format!("I gave up on {}: {} steps without finishing.", job.project, Self::MAX_STEPS);
                 return self.finish(job, State::Failed, text);
             }
-            let last_run = std::fs::read_to_string(self.workspace(&job.project).join("LAST_RUN.md")).ok();
-            let p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job.project).as_deref(), last_run.as_deref());
+            let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
+            let p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
             let mv = self.model.next_move(&p)?;
             let rejected = match (job.state, mv) {
                 (State::Asking, Move::Ask { questions }) | (State::Working, Move::Ask { questions }) | (State::Planning, Move::Ask { questions }) if !job.creative => {
@@ -487,9 +509,26 @@ mod tests {
         ], "reuse");
         e.handle("make p").unwrap();
         assert!(e.open_job().unwrap().is_none());
+        let folder = e.store.get_project("p").unwrap().unwrap().folder;
+        // Moving the root for *new* projects must not move a project that already has a folder.
+        let other = crate::testing::temp_root("reuse-other");
+        e.store.set_setting("projects_root", &other.display().to_string()).unwrap();
         e.handle("add a menu to p").unwrap();
         assert_eq!(e.store.list_projects().unwrap().len(), 1, "same project row, not a second one");
         assert_eq!(e.store.list_projects().unwrap()[0].description, "prime printer", "the original description is kept");
+        assert_eq!(e.store.get_project("p").unwrap().unwrap().folder, folder, "the stored folder is read back, never recomputed from the root");
+    }
+
+    #[test]
+    fn new_projects_land_under_the_projects_root_setting() {
+        let (mut e, _, root) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "projects-root");
+        let other = crate::testing::temp_root("projects-root-other");
+        e.store.set_setting("projects_root", &other.display().to_string()).unwrap();
+        e.handle("make p").unwrap();
+        let row = e.store.get_project("p").unwrap().unwrap();
+        assert_eq!(row.folder, other.join("p").display().to_string());
+        assert!(other.join("p").is_dir());
+        assert!(!root.join("p").exists(), "the constructor's root is only the default, not the answer");
     }
 
     #[test]
@@ -806,8 +845,8 @@ mod tests {
 
     #[test]
     fn step_cap_is_rechecked_on_the_approval_path() {
-        let (mut e, rec, _) = engine_with(vec![], "cap-approval");
-        let mut job = Job::new("p", "goal", true, "Starting p");
+        let (mut e, rec, root) = engine_with(vec![], "cap-approval");
+        let mut job = Job::new("p", &root.display().to_string(), "goal", true, "Starting p");
         job.plan = vec!["step".into()];
         job.state = State::WaitingApproval;
         for i in 0..25 { job.steps.push(StepRecord { plan_step: 1, action: write(&format!("f{i}")), ok: true, detail: "ok".into() }); }

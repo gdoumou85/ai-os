@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn housekeeping_job_turn_has_no_project_no_blueprint() {
-        let mut j = Job::new("scratch", "prepare /data/work", false, "Housekeeping: preparing /data/work");
+        let mut j = Job::new("scratch", "/data/projects/scratch", "prepare /data/work", false, "Housekeeping: preparing /data/work");
         j.housekeeping = true;
         let p = job_turn(&[], &j, None, None);
         assert!(p.user.contains("no project, no blueprint"), "{}", p.user);
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn job_turn_carries_goal_answers_plan_blueprint_and_state_hint() {
-        let mut j = Job::new("primes", "print ten primes", false, "Starting primes");
+        let mut j = Job::new("primes", "/data/projects/primes", "print ten primes", false, "Starting primes");
         j.answers.push(("Which language?".into(), "python".into()));
         j.plan = vec!["write primes.py".into(), "run it".into()];
         j.state = State::Working;
@@ -188,14 +188,14 @@ mod tests {
         assert!(p.user.contains("done needs a check"));
         assert!(p.user.contains("act"), "working state hints the legal moves");
         assert!(!p.user.contains("LAST RUN"), "no last-run section when there is no note");
-        let asking = Job::new("primes", "g", false, "u");
+        let asking = Job::new("primes", "/data/projects/primes", "g", false, "u");
         assert!(job_turn(&[], &asking, None, None).user.contains("no blueprint yet"));
         assert!(job_turn(&[], &asking, None, None).user.contains("ask"));
     }
 
     #[test]
     fn last_run_note_is_shown_with_the_fix_first_rule() {
-        let j = Job::new("primes", "g", true, "u");
+        let j = Job::new("primes", "/data/projects/primes", "g", true, "u");
         let p = job_turn(&[], &j, None, Some("goal: print primes\nfailed at plan step 2\nlast error: NameError: prmes"));
         assert!(p.user.contains("LAST RUN"));
         assert!(p.user.contains("NameError: prmes"));
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn older_steps_are_summarised_and_blueprint_is_capped() {
-        let mut j = Job::new("p", "g", true, "u");
+        let mut j = Job::new("p", "/data/projects/p", "g", true, "u");
         for i in 0..9 {
             j.steps.push(StepRecord { plan_step: 1, action: Action::RunCommand { argv: vec![format!("cmd{i}")] }, ok: i != 2, detail: format!("detail-{i}") });
         }
@@ -221,7 +221,7 @@ mod tests {
     /// as a byte count, not re-serialised whole.
     #[test]
     fn a_large_write_file_step_does_not_blow_the_prompt_budget() {
-        let mut j = Job::new("p", "g", true, "u");
+        let mut j = Job::new("p", "/data/projects/p", "g", true, "u");
         let big = "x".repeat(20_000);
         j.steps.push(StepRecord { plan_step: 1, action: Action::WriteFile { path: "big.py".into(), contents: big }, ok: true, detail: "written".into() });
         let p = job_turn(&[], &j, None, None);
@@ -231,23 +231,23 @@ mod tests {
 
     #[test]
     fn allowed_moves_are_narrowed_by_state_and_mode() {
-        let mut asking = Job::new("p", "g", false, "u");
+        let mut asking = Job::new("p", "/data/projects/p", "g", false, "u");
         asking.state = State::Asking;
         assert_eq!(job_turn(&[], &asking, None, None).allowed, vec!["ask", "plan"]);
 
-        let mut planning_creative = Job::new("p", "g", true, "u");
+        let mut planning_creative = Job::new("p", "/data/projects/p", "g", true, "u");
         planning_creative.state = State::Planning;
         assert_eq!(job_turn(&[], &planning_creative, None, None).allowed, vec!["plan"]);
 
-        let mut planning_not_creative = Job::new("p", "g", false, "u");
+        let mut planning_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         planning_not_creative.state = State::Planning;
         assert_eq!(job_turn(&[], &planning_not_creative, None, None).allowed, vec!["ask", "plan"]);
 
-        let mut working_creative = Job::new("p", "g", true, "u");
+        let mut working_creative = Job::new("p", "/data/projects/p", "g", true, "u");
         working_creative.state = State::Working;
         assert_eq!(job_turn(&[], &working_creative, None, None).allowed, vec!["act", "replan", "done", "give_up"]);
 
-        let mut working_not_creative = Job::new("p", "g", false, "u");
+        let mut working_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         working_not_creative.state = State::Working;
         assert_eq!(job_turn(&[], &working_not_creative, None, None).allowed, vec!["ask", "act", "replan", "done", "give_up"]);
 
@@ -271,23 +271,23 @@ mod tests {
 
         check(&front_door(&[], &[], &[], "hi"));
 
-        let mut asking = Job::new("p", "g", false, "u");
+        let mut asking = Job::new("p", "/data/projects/p", "g", false, "u");
         asking.state = State::Asking;
         check(&job_turn(&[], &asking, None, None));
 
-        let mut planning_creative = Job::new("p", "g", true, "u");
+        let mut planning_creative = Job::new("p", "/data/projects/p", "g", true, "u");
         planning_creative.state = State::Planning;
         check(&job_turn(&[], &planning_creative, None, None));
 
-        let mut planning_not_creative = Job::new("p", "g", false, "u");
+        let mut planning_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         planning_not_creative.state = State::Planning;
         check(&job_turn(&[], &planning_not_creative, None, None));
 
-        let mut working_creative = Job::new("p", "g", true, "u");
+        let mut working_creative = Job::new("p", "/data/projects/p", "g", true, "u");
         working_creative.state = State::Working;
         check(&job_turn(&[], &working_creative, None, None));
 
-        let mut working_not_creative = Job::new("p", "g", false, "u");
+        let mut working_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         working_not_creative.state = State::Working;
         check(&job_turn(&[], &working_not_creative, None, None));
     }

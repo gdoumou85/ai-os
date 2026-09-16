@@ -1,4 +1,5 @@
 use crate::job::Job;
+use executor::undo::UndoEntry;
 use rusqlite::{Connection, OptionalExtension};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,7 +28,9 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY, folder TEXT NOT NULL, description TEXT NOT NULL, touched_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS core_jobs(id TEXT PRIMARY KEY, project TEXT NOT NULL, state TEXT NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS instructions(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, at INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);",
+             CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS undo(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, seq INTEGER NOT NULL, entry TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);",
         )?;
         Ok(Self { conn })
     }
@@ -78,6 +81,64 @@ impl Store {
         Ok(match json { Some(j) => Some(serde_json::from_str(&j)?), None => None })
     }
 
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        Ok(self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+    }
+
+    /// Returns what the key held before — the caller needs that to put the setting back (undo).
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<Option<String>, StoreError> {
+        let previous = self.get_setting(key)?;
+        self.conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )?;
+        Ok(previous)
+    }
+
+    /// Putting back a setting that was never set means removing the row, not storing "".
+    pub fn delete_setting(&self, key: &str) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
+    pub fn add_undo(&self, job_id: &str, entry: &UndoEntry) -> Result<(), StoreError> {
+        let seq: i64 = self.conn.query_row("SELECT COUNT(*) FROM undo WHERE job_id = ?1", [job_id], |r| r.get(0))?;
+        self.conn.execute(
+            "INSERT INTO undo(job_id, seq, entry, applied, at) VALUES (?1, ?2, ?3, 0, ?4)",
+            (job_id, seq + 1, serde_json::to_string(entry)?, now_ms()),
+        )?;
+        Ok(())
+    }
+
+    /// Newest first: undo runs the job backwards, so the last change made is the first put back.
+    pub fn unapplied_undo(&self, job_id: &str) -> Result<Vec<(i64, UndoEntry)>, StoreError> {
+        let mut st = self.conn.prepare("SELECT id, entry FROM undo WHERE job_id = ?1 AND applied = 0 ORDER BY seq DESC")?;
+        let rows = st.query_map([job_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, json) = row?;
+            out.push((id, serde_json::from_str(&json)?));
+        }
+        Ok(out)
+    }
+
+    pub fn mark_undo_applied(&self, row_id: i64) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE undo SET applied = 1 WHERE id = ?1", [row_id])?;
+        Ok(())
+    }
+
+    /// The job "undo that" means: the most recently touched finished job that still has
+    /// something left to put back. A job still running is excluded — stop it first.
+    pub fn last_undoable_job(&self) -> Result<Option<Job>, StoreError> {
+        let json: Option<String> = self.conn.query_row(
+            "SELECT json FROM core_jobs WHERE state IN ('done','failed','cancelled')
+               AND EXISTS (SELECT 1 FROM undo WHERE undo.job_id = core_jobs.id AND undo.applied = 0)
+             ORDER BY updated_at DESC LIMIT 1",
+            [], |r| r.get(0),
+        ).optional()?;
+        Ok(match json { Some(j) => Some(serde_json::from_str(&j)?), None => None })
+    }
+
     pub fn add_instruction(&self, text: &str) -> Result<(), StoreError> {
         self.conn.execute("INSERT INTO instructions(text, at) VALUES (?1, ?2)", (text, now_ms()))?;
         Ok(())
@@ -107,6 +168,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::job::{Job, State};
+    use executor::undo::UndoEntry;
 
     #[test]
     fn projects_round_trip_newest_first() {
@@ -123,7 +185,7 @@ mod tests {
     #[test]
     fn job_saves_loads_and_open_job_ignores_finished() {
         let s = Store::open_in_memory().unwrap();
-        let mut j = Job::new("alpha", "do it", false, "Starting alpha");
+        let mut j = Job::new("alpha", "/data/projects/alpha", "do it", false, "Starting alpha");
         j.plan = vec!["one".into()];
         s.save_job(&j).unwrap();
         assert_eq!(s.open_job().unwrap().unwrap().id, j.id);
@@ -140,13 +202,65 @@ mod tests {
     #[test]
     fn two_jobs_for_the_same_project_both_persist() {
         let s = Store::open_in_memory().unwrap();
-        let a = Job::new("p", "first", true, "Starting p");
-        let b = Job::new("p", "second", true, "Starting p again");
+        let a = Job::new("p", "/data/projects/p", "first", true, "Starting p");
+        let b = Job::new("p", "/data/projects/p", "second", true, "Starting p again");
         assert_ne!(a.id, b.id);
         s.save_job(&a).unwrap();
         s.save_job(&b).unwrap();
         assert_eq!(s.load_job(&a.id).unwrap().unwrap().goal, "first");
         assert_eq!(s.load_job(&b.id).unwrap().unwrap().goal, "second");
+    }
+
+    #[test]
+    fn settings_round_trip_and_hand_back_the_previous_value() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.get_setting("projects_root").unwrap().is_none());
+        assert_eq!(s.set_setting("projects_root", "/data/projects").unwrap(), None);
+        assert_eq!(s.get_setting("projects_root").unwrap().as_deref(), Some("/data/projects"));
+        // The previous value is what Task 9 needs to put a setting back.
+        assert_eq!(s.set_setting("projects_root", "/srv/work").unwrap().as_deref(), Some("/data/projects"));
+        assert_eq!(s.get_setting("projects_root").unwrap().as_deref(), Some("/srv/work"));
+        s.delete_setting("projects_root").unwrap();
+        assert!(s.get_setting("projects_root").unwrap().is_none(), "deleting restores the never-set state, not an empty string");
+    }
+
+    #[test]
+    fn undo_rows_come_back_newest_first_and_applied_ones_drop_out() {
+        let s = Store::open_in_memory().unwrap();
+        let first = UndoEntry::DirCreated { path: "/data/projects/p".into() };
+        let second = UndoEntry::PackagesAdded { packages: vec!["cowsay".into()] };
+        s.add_undo("job-1", &first).unwrap();
+        s.add_undo("job-1", &second).unwrap();
+        s.add_undo("job-2", &UndoEntry::Setting { key: "k".into(), previous: None }).unwrap();
+
+        let rows = s.unapplied_undo("job-1").unwrap();
+        assert_eq!(rows.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>(), vec![second, first.clone()],
+                   "undo runs backwards: the last thing done is the first thing put back");
+        s.mark_undo_applied(rows[0].0).unwrap();
+        assert_eq!(s.unapplied_undo("job-1").unwrap().iter().map(|(_, e)| e.clone()).collect::<Vec<_>>(), vec![first]);
+        assert_eq!(s.unapplied_undo("job-2").unwrap().len(), 1, "another job's rows are untouched");
+    }
+
+    #[test]
+    fn last_undoable_job_ignores_open_jobs_and_jobs_without_rows() {
+        let s = Store::open_in_memory().unwrap();
+        let mut job = Job::new("a", "/data/projects/a", "one", true, "u");
+        s.save_job(&job).unwrap();
+        s.add_undo(&job.id, &UndoEntry::DirCreated { path: "/data/projects/a".into() }).unwrap();
+        assert!(s.last_undoable_job().unwrap().is_none(), "a job still running is not undoable yet");
+
+        let mut bare = Job::new("b", "/data/projects/b", "two", true, "u");
+        bare.state = State::Done;
+        s.save_job(&bare).unwrap();
+        assert!(s.last_undoable_job().unwrap().is_none(), "a finished job that changed nothing has nothing to undo");
+
+        job.state = State::Cancelled;
+        s.save_job(&job).unwrap();
+        assert_eq!(s.last_undoable_job().unwrap().unwrap().id, job.id);
+
+        let rows = s.unapplied_undo(&job.id).unwrap();
+        s.mark_undo_applied(rows[0].0).unwrap();
+        assert!(s.last_undoable_job().unwrap().is_none(), "once every row is applied the job is spent");
     }
 
     #[test]
