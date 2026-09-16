@@ -1,5 +1,5 @@
 //! The rail (1d design §4): a tall window of cards and a text box; a client of ai-os-engine.
-use aios_proto::{Client, Event};
+use aios_proto::{ChangedFile, Client, Event};
 use aios_rail::cards::{Card, CardKind, Cards, Change};
 use gtk4 as gtk;
 use gtk::prelude::*;
@@ -30,13 +30,21 @@ fn net_thread(to_ui: Sender<FromNet>) -> Sender<String> {
                 let _ = writer.hello();
                 let ui = to_ui.clone();
                 let pump = std::thread::spawn(move || { while let Some(e) = reader.next_event() { if ui.send(FromNet::Event(e)).is_err() { break } } });
+                let mut ui_gone = false;
                 while !pump.is_finished() {
                     match say_rx.recv_timeout(Duration::from_millis(200)) {
                         Ok(t) => { if writer.say(&t).is_err() { break } }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(_) => return,
+                        Err(_) => { ui_gone = true; break }
                     }
                 }
+                // The two halves are separate fds over one socket: dropping the writer would leave
+                // the pump parked on a live connection the service never prunes, and the old and
+                // new connections would both push events into the UI channel (every card twice).
+                // Shut the socket down, then wait for the pump to end before reconnecting.
+                writer.shutdown();
+                let _ = pump.join();
+                if ui_gone { return }
                 let _ = to_ui.send(FromNet::Down);
                 std::thread::sleep(Duration::from_secs(3));
             }
@@ -56,6 +64,18 @@ fn render(card: &Card, say: &Sender<String>) -> gtk::Widget {
     b.add_css_class("card");
     let title = |t: &str| { let l = gtk::Label::new(Some(t)); l.add_css_class("title"); l.set_xalign(0.0); l.set_wrap(true); l };
     let text = |t: &str| { let l = gtk::Label::new(Some(t)); l.set_xalign(0.0); l.set_wrap(true); l.set_selectable(true); l };
+    // One block for every card that carries files: an image is a thumbnail whether the job
+    // finished, failed or was stopped, and each file gets its own Open row.
+    let file_rows = |into: &gtk::Box, files: &[ChangedFile]| {
+        for f in files {
+            if card.thumbnails.contains(&f.path) { let p = gtk::Picture::for_filename(&f.path); p.set_size_request(-1, 200); p.set_can_shrink(true); into.append(&p); }
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+            let l = text(&name); l.set_hexpand(true); row.append(&l);
+            let open = gtk::Button::with_label("Open"); let path = f.path.clone(); open.connect_clicked(move |_| open_path(&path)); row.append(&open);
+            into.append(&row);
+        }
+    };
     match &card.kind {
         CardKind::You => { b.add_css_class("you"); b.append(&text(&card.text)); }
         CardKind::Said => { b.add_css_class("said"); b.append(&text(&card.text)); }
@@ -76,18 +96,11 @@ fn render(card: &Card, say: &Sender<String>) -> gtk::Widget {
         CardKind::Done { text: t, check, files } => {
             b.add_css_class("done"); b.append(&title("Done")); b.append(&text(t));
             if let Some(c) = check { let l = text(&format!("check: {c}")); l.add_css_class("dim"); b.append(&l); }
-            for f in files {
-                if card.thumbnails.contains(&f.path) { let p = gtk::Picture::for_filename(&f.path); p.set_size_request(-1, 200); p.set_can_shrink(true); b.append(&p); }
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-                let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
-                let l = text(&name); l.set_hexpand(true); row.append(&l);
-                let open = gtk::Button::with_label("Open"); let path = f.path.clone(); open.connect_clicked(move |_| open_path(&path)); row.append(&open);
-                b.append(&row);
-            }
+            file_rows(&b, files);
         }
         CardKind::Failed { text: t, files } | CardKind::Stopped { text: t, files } => {
             b.add_css_class("failed"); b.append(&title(if matches!(card.kind, CardKind::Failed { .. }) { "Could not finish" } else { "Stopped" })); b.append(&text(t));
-            for f in files { let row = gtk::Box::new(gtk::Orientation::Horizontal, 6); let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string(); let l = text(&name); l.set_hexpand(true); row.append(&l); let open = gtk::Button::with_label("Open"); let path = f.path.clone(); open.connect_clicked(move |_| open_path(&path)); row.append(&open); b.append(&row); }
+            file_rows(&b, files);
         }
         CardKind::Undone { lines, notes } => {
             b.add_css_class("undone"); b.append(&title("Undone"));
@@ -131,6 +144,11 @@ fn main() {
         root.append(&scroll); root.append(&status); root.append(&entry);
         win.set_child(Some(&root));
 
+        // Stay at the bottom, but only once GTK has allocated the new card: `upper` grows when the
+        // child is laid out, which is after the event drain returns, so scrolling there left the
+        // newest card below the fold until something else moved the view.
+        scroll.vadjustment().connect_changed(|a| a.set_value(a.upper() - a.page_size()));
+
         let (to_ui, from_net) = channel::<FromNet>();
         let say = net_thread(to_ui);
         let cards = Rc::new(RefCell::new(Cards::default()));
@@ -139,7 +157,7 @@ fn main() {
         let s = say.clone();
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(t); e.set_text(""); } });
 
-        let (cards2, widgets2, column2, status2, scroll2, say2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), scroll.clone(), say.clone());
+        let (cards2, widgets2, column2, status2, say2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone());
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
                 match msg {
@@ -155,7 +173,6 @@ fn main() {
                                 Change::Line(t) => status2.set_text(&t),
                             }
                         }
-                        let adj = scroll2.vadjustment(); adj.set_value(adj.upper());
                     }
                 }
             }

@@ -114,6 +114,10 @@ impl Writer {
     }
     pub fn say(&mut self, text: &str) -> std::io::Result<()> { self.send(&Request::Say(text.to_string())) }
     pub fn hello(&mut self) -> std::io::Result<()> { self.send(&Request::Hello(Default::default())) }
+    /// Close the connection in both directions. `split` handed out two fds over one socket
+    /// (`try_clone`), so dropping the writer leaves the reader's thread parked on a live socket;
+    /// this makes its `read_line` return 0 so it can end. Idempotent enough to call on any exit.
+    pub fn shutdown(&self) { let _ = self.stream.shutdown(std::net::Shutdown::Both); }
 }
 
 impl Reader {

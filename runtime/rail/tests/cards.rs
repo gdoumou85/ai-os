@@ -59,3 +59,24 @@ fn busy_is_a_line_not_a_card_and_state_rebuilds_a_job() {
     assert!(matches!(&cards.list[1].kind, CardKind::NeedsAnswer { questions } if questions == &vec!["which?".to_string()]));
     assert_eq!(cards.apply(&Event::State { job: None }), vec![], "an empty state changes nothing");
 }
+
+#[test]
+fn a_reconnect_refills_the_open_job_instead_of_opening_a_second_one() {
+    let st = |steps: Vec<StepView>| JobState { id: j(), name: "p".into(), housekeeping: false, understood: "Starting p".into(),
+        plan: vec!["a".into(), "b".into()], steps, waiting: Waiting::Answer { questions: vec!["which?".into()] } };
+    let mut cards = Cards::default();
+    cards.apply(&Event::State { job: Some(st(vec![StepView { plan_step: 1, text: "wrote a".into(), ok: true }])) });
+    assert_eq!(cards.list.len(), 2, "the Building card and the question");
+
+    // The socket dropped and came back: the same job, one step further on.
+    let again = cards.apply(&Event::State { job: Some(st(vec![
+        StepView { plan_step: 1, text: "wrote a".into(), ok: true },
+        StepView { plan_step: 2, text: "ran b".into(), ok: true }])) });
+    assert_eq!(again, vec![Change::Updated(0)], "the open card is refilled, nothing is added");
+    assert_eq!(cards.list.len(), 2, "still one Building card and one question");
+    assert_eq!(cards.list.iter().filter(|c| matches!(c.kind, CardKind::Building { .. })).count(), 1);
+    assert_eq!(cards.list.iter().filter(|c| matches!(c.kind, CardKind::NeedsAnswer { .. })).count(), 1);
+    let CardKind::Building { steps, .. } = &cards.list[0].kind else { panic!() };
+    assert!(steps[0].done && steps[1].done, "the second step ticked in place");
+    assert_eq!(cards.list[0].buttons, vec![Button { label: "Stop".into(), say: "stop".into() }], "still stoppable");
+}

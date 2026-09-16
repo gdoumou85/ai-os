@@ -95,17 +95,32 @@ impl Cards {
     /// A reopened rail: the open job as one Building card (steps ticked so far) plus its
     /// waiting card, if any. Earlier finished jobs are not replayed (1d §4.2).
     fn rebuild(&mut self, st: &JobState) -> Vec<Change> {
-        let i = self.open_building(&st.id, &st.name, &st.understood);
+        // A second State for the job already on screen is a reconnect, not a new job: refill that
+        // card. Opening another one would strand the first, Stop button and all.
+        let open = self.building.filter(|&i| self.list[i].job_id.as_deref() == Some(st.id.as_str()));
+        let (i, mut ch) = match open {
+            Some(i) => (i, vec![Change::Updated(i)]),
+            None => { let i = self.open_building(&st.id, &st.name, &st.understood); (i, vec![Change::Added(i)]) }
+        };
         if let CardKind::Building { steps, .. } = &mut self.list[i].kind {
             *steps = st.plan.iter().map(|t| StepLine { text: t.clone(), done: false, ok: false, detail: None }).collect();
             for s in &st.steps { if let Some(l) = steps.get_mut(s.plan_step.saturating_sub(1)) { l.done = true; l.ok = s.ok; l.detail = Some(s.text.clone()); } }
         }
-        let mut ch = vec![Change::Added(i)];
-        match &st.waiting {
-            Waiting::None => {}
-            Waiting::Answer { questions } => ch.extend(self.apply(&Event::NeedsAnswer { job_id: st.id.clone(), questions: questions.clone() })),
-            Waiting::Ok { what, why } => ch.extend(self.apply(&Event::NeedsOk { job_id: st.id.clone(), what: what.clone(), why: why.clone() })),
-        }
+        ch.extend(self.waiting_card(st));
         ch
+    }
+
+    /// The card for what the job is waiting on, unless it is already the last card on screen —
+    /// a reconnect resends the same State and would otherwise ask the same question twice.
+    fn waiting_card(&mut self, st: &JobState) -> Vec<Change> {
+        let (kind, ev) = match &st.waiting {
+            Waiting::None => return vec![],
+            Waiting::Answer { questions } => (CardKind::NeedsAnswer { questions: questions.clone() },
+                Event::NeedsAnswer { job_id: st.id.clone(), questions: questions.clone() }),
+            Waiting::Ok { what, why } => (CardKind::NeedsOk { what: what.clone(), why: why.clone() },
+                Event::NeedsOk { job_id: st.id.clone(), what: what.clone(), why: why.clone() }),
+        };
+        if self.list.last().map(|c| &c.kind) == Some(&kind) { return vec![] }
+        self.apply(&ev)
     }
 }

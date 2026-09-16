@@ -10,6 +10,16 @@ for b in ai-os-engine ai-os-chat ai-os-rail; do
   [ -f "$src" ] || { echo "skip $b (not built)"; continue; }
   install -m 0755 -o root -g root "$src" /usr/local/bin/$b
 done
+# Open on a text file must land in the text editor. The distro's default for text/x-python is
+# LibreOffice Writer, which opens a .py as a document with an import dialog. Set ai's own
+# defaults; a distro without the editor installed just says so. Idempotent.
+editor=org.gnome.TextEditor.desktop
+if ls /usr/share/applications/$editor >/dev/null 2>&1; then
+  runuser -u ai -- env XDG_RUNTIME_DIR=/run/user/1000 xdg-mime default $editor \
+    text/x-python text/markdown text/plain text/x-shellscript application/json
+else
+  echo "skip mime defaults ($editor not installed)"
+fi
 install -d -o ai -g ai -m 0755 /home/ai/.config/systemd/user
 install -m 0644 -o ai -g ai "$repo/trial/ai-os-engine.service" /home/ai/.config/systemd/user/ai-os-engine.service
 sed -i 's/\r$//' /home/ai/.config/systemd/user/ai-os-engine.service

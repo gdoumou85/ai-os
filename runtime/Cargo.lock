@@ -47,7 +47,6 @@ version = "0.0.1"
 dependencies = [
  "aios-proto",
  "gtk4",
- "serde_json",
 ]
 
 [[package]]
