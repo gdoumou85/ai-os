@@ -99,6 +99,13 @@ pub struct SandboxWorker {
     pub workspace: PathBuf,
 }
 
+/// Where an `/etc` read is allowed to land once every symlink is resolved. `/etc` is full of
+/// links out of itself — `/etc/os-release` → `/usr/lib/os-release`, `/etc/localtime` →
+/// `/usr/share/zoneinfo/…`, `/etc/mtab` → `/proc/self/mounts`, and the whole alternatives
+/// system — so pinning the target to `/etc` alone would refuse most of what makes `/etc`
+/// worth reading. All four are world-readable system state; permissions still decide.
+const SYSTEM_READ_ROOTS: [&str; 4] = ["/etc", "/usr", "/run", "/proc"];
+
 impl SandboxWorker {
     /// Canonicalize the workspace itself once per call, as an `Outcome`-shaped error so call
     /// sites can just `?`-style propagate it with `match ... { Err(out) => return out }`.
@@ -120,22 +127,32 @@ impl SandboxWorker {
     /// wrapper has its own protected-file list for the writes it does allow).
     ///
     /// The door is keyed on the *asked-for* path, not just on where it lands, and the
-    /// canonical target still has to stay in whichever root was opened. So `/etc/fstab` reads,
+    /// canonical target still has to stay in the roots that door opened. So `/etc/fstab` reads,
     /// a workspace file that is secretly a symlink into `/etc` does NOT (the request was for a
-    /// workspace path, so only the workspace is open to it), and an `/etc` path that symlinks
-    /// somewhere else does not either. Both halves have to agree or it is refused.
+    /// workspace path, so only the workspace is open to it), and an `/etc` path that resolves
+    /// outside the system roots does not either. Both halves have to agree or it is refused.
     fn existing_inside(&self, path: &str, etc_ok: bool) -> Result<PathBuf, Outcome> {
-        let etc = etc_ok && under_any(path, &["/etc"]);
-        if !resolves_inside(path, &self.workspace) && !etc {
+        // `join` on an absolute path just yields that path, so this needs no workspace for /etc.
+        let canon = || fs::canonicalize(self.workspace.join(path)).map_err(|_| Outcome::err("cannot resolve path"));
+        // An `/etc` read must not need the workspace to exist — it is system state, nothing to
+        // do with any project — so that branch never canonicalizes the workspace at all.
+        if etc_ok && under_any(path, &["/etc"]) {
+            let t = canon()?;
+            return if under_any(&t.to_string_lossy(), &SYSTEM_READ_ROOTS) {
+                Ok(t)
+            } else {
+                Err(Outcome::err("path escapes workspace"))
+            };
+        }
+        if !resolves_inside(path, &self.workspace) {
             return Err(Outcome::err("path escapes workspace"));
         }
         let ws_canon = self.canonical_workspace()?;
-        let target = fs::canonicalize(self.workspace.join(path))
-            .map_err(|_| Outcome::err("cannot resolve path"))?;
-        if !target.starts_with(&ws_canon) && !(etc && target.starts_with("/etc")) {
+        let t = canon()?;
+        if !t.starts_with(&ws_canon) {
             return Err(Outcome::err("path escapes workspace"));
         }
-        Ok(target)
+        Ok(t)
     }
 
     /// Run `argv` in the jail through the wrapper. `net` is `none` (PrivateNetwork) or a
@@ -144,17 +161,11 @@ impl SandboxWorker {
     /// argv goes across RAW. systemd expands `${VAR}` in a unit's argv, and the wrapper
     /// doubles every `$` itself right before it execs systemd-run — escaping here as well
     /// would double it twice and leave `$$` in the command's own output.
-    fn run_in_sandbox(&self, net: &str, envs: &[String], argv: &[String]) -> Outcome {
-        let mut cmd = Command::new("sudo");
-        cmd.args(["-n", admin::WRAPPER, "sandbox-run"])
-            .arg(format!("--net={net}"))
-            .arg(format!("--cwd={}", self.workspace.display()));
-        for e in envs {
-            cmd.arg(format!("--env={e}"));
-        }
+    pub(crate) fn run_in_sandbox(&self, net: &str, envs: &[String], argv: &[String]) -> Outcome {
+        let args = sandbox_args(&self.workspace.display().to_string(), net, envs, argv);
         // The wrapper `exec`s systemd-run, so this status/stdout/stderr is the command's own.
         // A wrapper refusal is exit 3 with a `refused: …` line on stderr, which reads the same.
-        match cmd.arg("--").args(argv).output() {
+        match Command::new("sudo").args(["-n", admin::WRAPPER]).args(&args).output() {
             Ok(o) => {
                 let ok = o.status.success();
                 let stdout = String::from_utf8_lossy(&o.stdout);
@@ -173,6 +184,9 @@ impl SandboxWorker {
     /// network allowlist holding nothing but the resolver and the manager's own registry.
     /// Steps run in order and stop at the first failure; the detail is that step's output.
     fn fetch(&self, manager: Manager, packages: &[String]) -> Outcome {
+        if packages.is_empty() {
+            return Outcome::err("no packages named");
+        }
         let hosts = admin::resolve_all(admin::registry_hosts(manager));
         if hosts.is_empty() {
             return Outcome::err("could not resolve the package registry");
@@ -181,8 +195,20 @@ impl SandboxWorker {
         let ws = self.workspace.display().to_string();
         // HOME: pip/npm/cargo all want caches and config under it, and the jail hides the real
         // one (ProtectHome). CARGO_HOME likewise, so `cargo add`/`fetch` land inside the project.
-        let envs = [format!("HOME={ws}"), format!("CARGO_HOME={ws}/.cargo")];
-        let mut last = Outcome::err("nothing to fetch");
+        // The three config vars point the tools at nothing: HOME is the workspace, so a config
+        // file an earlier sandboxed command planted there could otherwise re-point this fixed
+        // argv at another host that happens to share the allowlisted CDN addresses.
+        // Accepted ceilings: during a fetch the resolver address is open on every port, and
+        // cargo still reads `.cargo/config.toml` under the workspace (CARGO_HOME lives there
+        // by design, so a planted registry override is possible for cargo alone).
+        let envs = [
+            format!("HOME={ws}"),
+            format!("CARGO_HOME={ws}/.cargo"),
+            "PIP_CONFIG_FILE=/dev/null".to_string(),
+            "NPM_CONFIG_USERCONFIG=/dev/null".to_string(),
+            "NPM_CONFIG_GLOBALCONFIG=/dev/null".to_string(),
+        ];
+        let mut done: Option<Outcome> = None;
         for mut argv in admin::fetch_argv(manager, packages) {
             // systemd resolves a unit's program against `/`, not `--working-directory`, so a
             // workspace-relative program (`.venv/bin/pip`) has to be made absolute here — and
@@ -193,13 +219,27 @@ impl SandboxWorker {
                     *p = format!("{ws}/{}", p.trim_start_matches("./"));
                 }
             }
-            last = self.run_in_sandbox(&net, &envs, &argv);
-            if !last.ok {
-                return last;
+            let step = self.run_in_sandbox(&net, &envs, &argv);
+            if !step.ok {
+                return step;
             }
+            done = Some(step);
         }
-        last
+        // `fetch_argv` yields at least one step for every manager, and `packages` is non-empty.
+        done.expect("fetch_argv yields at least one step")
     }
+}
+
+/// The wrapper argv for one sandboxed run, from the verb on. Pure, so the shape can be checked
+/// without a machine: every option comes before the `--`, and everything after it is the
+/// command exactly as given — a package or filename that reads like an option (`--net=…`) lands
+/// on the far side of the `--` and can never be taken for one.
+pub(crate) fn sandbox_args(cwd: &str, net: &str, envs: &[String], argv: &[String]) -> Vec<String> {
+    let mut args = vec!["sandbox-run".to_string(), format!("--net={net}"), format!("--cwd={cwd}")];
+    args.extend(envs.iter().map(|e| format!("--env={e}")));
+    args.push("--".to_string());
+    args.extend(argv.iter().cloned());
+    args
 }
 
 /// Last `n` chars of `s` — for failures the reason is at the end of the output, not the start.
@@ -442,6 +482,49 @@ mod tests {
         let out = w.run(&Action::ReadFile { path: "a.txt".into(), from_line: Some(2), lines: Some(2) });
         assert!(out.ok);
         assert_eq!(out.detail, "2: l2\n3: l3\n");
+    }
+
+    #[test]
+    fn sandbox_args_keeps_every_option_before_the_dash_dash() {
+        // A package literally named `--net=1.2.3.4`: if it were ever spliced in ahead of the
+        // `--`, the wrapper would read it as the allowlist and open the jail to that address.
+        let argv: Vec<String> = ["pip", "install", "--", "--net=1.2.3.4"].iter().map(|s| s.to_string()).collect();
+        let envs = vec!["HOME=/data/p".to_string(), "PIP_CONFIG_FILE=/dev/null".to_string()];
+        assert_eq!(
+            sandbox_args("/data/p", "10.0.0.1,1.2.3.4", &envs, &argv),
+            vec![
+                "sandbox-run",
+                "--net=10.0.0.1,1.2.3.4",
+                "--cwd=/data/p",
+                "--env=HOME=/data/p",
+                "--env=PIP_CONFIG_FILE=/dev/null",
+                "--",
+                "pip",
+                "install",
+                "--",
+                "--net=1.2.3.4",
+            ]
+        );
+        // No envs: the `--` still separates, and argv still comes across untouched.
+        assert_eq!(
+            sandbox_args("/data/p", "none", &[], &["id".to_string()]),
+            vec!["sandbox-run", "--net=none", "--cwd=/data/p", "--", "id"]
+        );
+    }
+
+    /// The fetch allowlist really is an allowlist, not just "network on": a host that is not on
+    /// it stays unreachable even from a run opened up for the registry. Gated like the machine
+    /// tests — it needs the distro, the wrapper and a working resolver.
+    #[test]
+    fn fetch_allowlist_reaches_nothing_else() {
+        if std::env::var("AI_OS_SANDBOX_IT").as_deref() != Ok("1") { return; }
+        let hosts = crate::admin::resolve_all(crate::admin::registry_hosts(Manager::Pip));
+        assert!(!hosts.is_empty(), "no registry addresses to build an allowlist from");
+        let net = crate::admin::resolver_ips().into_iter().chain(hosts).collect::<Vec<_>>().join(",");
+        let w = SandboxWorker { user: "ai-sandbox".into(), workspace: PathBuf::from("/data/housekeeping") };
+        let argv: Vec<String> = ["curl", "-sS", "-m", "8", "https://example.com"].iter().map(|s| s.to_string()).collect();
+        let out = w.run_in_sandbox(&net, &[], &argv);
+        assert!(!out.ok, "an off-allowlist host must stay unreachable during a fetch: {}", out.detail);
     }
 
     #[test]

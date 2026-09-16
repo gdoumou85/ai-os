@@ -86,10 +86,15 @@ case "$verb" in
         [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] || refuse "bad ip: $ip"; netprops+=("--property=IPAddressAllow=$ip"); done
     fi
     args=(); for a in "$@"; do args+=("${a//\$/\$\$}"); done   # systemd expands ${VAR} in argv
+    # /mnt is an empty read-only tmpfs, not merely /mnt/c hidden: on this WSL2 workshop every
+    # Windows drive mounts under /mnt, and /mnt/wsl is the host's own plumbing. The one file
+    # bound back in is what /etc/resolv.conf points at, or an allowlisted fetch could never
+    # resolve anything; the leading `-` ignores it on bare metal, where /mnt/wsl does not exist.
     exec systemd-run --quiet --pipe --wait --collect --uid=ai-sandbox "--working-directory=$cwd" \
       "${netprops[@]}" --property=ProtectHome=yes --property=PrivateTmp=yes \
       --property=ProtectSystem=strict --property=UMask=0002 --property=TemporaryFileSystem=/data:ro \
-      "--property=InaccessiblePaths=-/mnt/c -/media -/srv" "--property=BindPaths=$cwd" "--property=ReadWritePaths=$cwd" \
+      --property=TemporaryFileSystem=/mnt:ro "--property=BindReadOnlyPaths=-/mnt/wsl/resolv.conf" \
+      "--property=InaccessiblePaths=-/media -/srv" "--property=BindPaths=$cwd" "--property=ReadWritePaths=$cwd" \
       "${envs[@]}" -- "${args[@]}" ;;
   *) refuse "unknown verb: ${verb:-<none>}" ;;
 esac

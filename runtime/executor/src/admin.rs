@@ -49,8 +49,10 @@ pub fn registry_hosts(m: Manager) -> &'static [&'static str] {
     }
 }
 
-/// Every address those hosts resolve to right now, in order, deduped. Empty means the
-/// registry could not be resolved at all (offline, or DNS down).
+/// Every address those hosts resolve to right now, in order, deduped. Empty if ANY host in the
+/// list came back with nothing: a half-resolved allowlist is worse than none, because the fetch
+/// would start, reach part of its registry and then stall on the host we could not look up.
+/// Empty is the caller's cue to refuse (offline, or DNS down).
 /// ponytail: these registries sit behind CDNs that hand out a rotating slice of their address
 /// pool, so the allowlist is a snapshot — a fetch whose connection lands on an address this
 /// lookup did not return is blocked and has to be retried. Widen to the published CDN ranges
@@ -59,12 +61,14 @@ pub fn resolve_all(hosts: &[&str]) -> Vec<String> {
     let mut ips: Vec<String> = vec![];
     for h in hosts {
         // 443: we only ever fetch over https, and `to_socket_addrs` needs a port.
-        if let Ok(addrs) = (*h, 443u16).to_socket_addrs() {
-            for a in addrs {
-                let ip = a.ip().to_string();
-                if !ips.contains(&ip) {
-                    ips.push(ip);
-                }
+        let addrs = (*h, 443u16).to_socket_addrs().map(|a| a.collect::<Vec<_>>()).unwrap_or_default();
+        if addrs.is_empty() {
+            return vec![];
+        }
+        for a in addrs {
+            let ip = a.ip().to_string();
+            if !ips.contains(&ip) {
+                ips.push(ip);
             }
         }
     }
@@ -383,6 +387,14 @@ mod tests {
         assert_eq!(pip[1], vec![".venv/bin/pip", "install", "--", "tabulate"]);
         assert_eq!(fetch_argv(Manager::Npm, &["left-pad".into()]), vec![vec!["npm", "install", "--", "left-pad"]]);
         assert_eq!(fetch_argv(Manager::Cargo, &["serde".into()]), vec![vec!["cargo", "add", "--", "serde"], vec!["cargo", "fetch"]]);
+    }
+
+    #[test]
+    fn one_unresolvable_host_empties_the_whole_allowlist() {
+        // `localhost` resolves without a network; `.invalid` is reserved and never resolves.
+        // One hole is enough to throw the list away — the caller then refuses the fetch.
+        assert!(resolve_all(&["localhost", "nonexistent.invalid"]).is_empty());
+        assert!(!resolve_all(&["localhost"]).is_empty());
     }
 
     #[test]
