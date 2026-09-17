@@ -1,6 +1,6 @@
 //! The engine as a long-running service on a private socket; front doors connect to it.
 use aios_core::engine::{Engine, HOUSEKEEPING_DIR};
-use aios_core::model::OllamaModel;
+use aios_core::model::{Model, OllamaModel};
 use aios_core::service;
 use aios_core::store::Store;
 use executor::admin::AdminWorker;
@@ -18,9 +18,10 @@ fn main() {
     service::run(listener, Box::new(move |sink| {
         let store = Store::open(&db).expect("open store");
         // One state for the whole process: the accessibility bus connection and the id table
-        // outlive any one job. Task 7 swaps the 8192 for the model's own context size.
-        let desktop = DesktopState::for_model(8192);
-        Engine::new(store, OllamaModel::local(&model), root, Some(db),
+        // outlive any one job. The look cap follows the model's own context (2a §4).
+        let llm = OllamaModel::local(&model);
+        let desktop = DesktopState::for_model(llm.context_tokens());
+        Engine::new(store, llm, root, Some(db),
             Box::new(move |ws| (
                 Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
                 Box::new(AdminWorker) as Box<dyn Worker>,

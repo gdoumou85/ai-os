@@ -79,6 +79,17 @@ pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
     out
 }
 
+/// The windows a job worked: those it looked into or opened, in first-seen order, from the steps
+/// that succeeded (2a §7). Ids come from a look, so a job that pressed anything looked first.
+pub(crate) fn windows_worked(job: &Job) -> Vec<String> {
+    let mut v: Vec<String> = vec![];
+    for s in job.steps.iter().filter(|s| s.ok) {
+        let w = match &s.action { Action::Look { window: Some(w), .. } => w, Action::OpenApp { name, .. } => name, _ => continue };
+        if !v.contains(w) { v.push(w.clone()); }
+    }
+    v
+}
+
 pub fn sanitize_project_name(raw: &str) -> String {
     let mut s = String::new();
     let mut dash = false;
@@ -448,7 +459,7 @@ impl<M: Model> Engine<M> {
         let ev = match state {
             State::Done => {
                 let check = job.steps.last().map(|s| format!("{}: {}", describe(&s.action), if s.ok { "ok" } else { "failed" }));
-                Event::Done { job_id, text, check, files, windows: vec![] }
+                Event::Done { job_id, text, check, files, windows: windows_worked(&job) }
             }
             State::Cancelled => Event::Stopped { job_id, text, files },
             // `finish` is only ever called with done/cancelled/failed; anything else ended badly.
@@ -1978,6 +1989,29 @@ mod tests {
         let ev = events_of(&mut e, "make p");
         let Event::Failed { files, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
         assert!(files.iter().all(|f| !f.path.ends_with("LAST_RUN.md")), "{files:?}");
+    }
+
+    /// 2a §7: the windows a job worked are the ones it looked into or opened, each once, from
+    /// the steps that succeeded — nothing is stored on the job for it.
+    #[test]
+    fn done_lists_the_windows_the_job_looked_into_or_opened() {
+        let look = |w: &str| Action::Look { window: Some(w.into()), find: None };
+        let (mut e, _, _) = engine_with(vec![
+            Move::Housekeep { goal: "take the editor".into(), understood: "Taking the editor".into(), remember: None }, plan(),
+            act(1, Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }),
+            act(1, look("Text Editor")), act(1, Action::Press { control: 1, name: "Save".into() }), act(1, look("Text Editor")),
+            done(Action::Read { control: 2, from_line: None, lines: None }),
+        ], "windows-worked");
+        let ev = e.handle_events("take my editor").unwrap();
+        let Event::Done { windows, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
+        assert_eq!(windows, &vec!["org.gnome.Calculator".to_string(), "Text Editor".to_string()]);
+    }
+
+    #[test]
+    fn a_project_job_with_no_desktop_steps_lists_no_windows() {
+        let (mut e, _, _) = engine_with(happy_path(), "no-windows");
+        let ev = e.handle_events("make p").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { windows, .. } if windows.is_empty()), "{ev:?}");
     }
 
     #[test]

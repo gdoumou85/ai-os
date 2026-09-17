@@ -15,6 +15,9 @@ pub enum ModelError {
 /// The one thing the loop needs from a model: given a prompt, one move. Swappable (1b spec §5).
 pub trait Model {
     fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError>;
+    /// The context the model is run with, in tokens: what a step's evidence has to fit in. The
+    /// desktop hand's look cap follows it (2a §4).
+    fn context_tokens(&self) -> usize { 8192 }
 }
 
 /// Scripted moves for tests; records every prompt it was given.
@@ -30,6 +33,10 @@ impl Model for FakeModel {
         self.queue.borrow_mut().pop_front().ok_or(ModelError::Exhausted)
     }
 }
+
+/// The context Ollama is asked for and the one the rest of the machine plans against: one number,
+/// so `ollama_body` and `context_tokens` can never drift apart.
+const NUM_CTX: usize = 8192;
 
 /// Ollama over HTTP on this machine (parent §4.3): grammar-forced via `format`, thinking off,
 /// temperature 0, 8k context — the Phase 0 settings.
@@ -69,7 +76,7 @@ pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
         "stream": false,
         "think": false,
         "format": narrow_schema(schema::value(), &prompt.allowed),
-        "options": { "temperature": 0.0, "num_ctx": 8192 },
+        "options": { "temperature": 0.0, "num_ctx": NUM_CTX },
         "messages": [
             { "role": "system", "content": prompt.system },
             { "role": "user", "content": prompt.user }
@@ -94,6 +101,8 @@ impl Model for OllamaModel {
             .map_err(|e| ModelError::Http(e.to_string()))?;
         parse_ollama(&resp)
     }
+
+    fn context_tokens(&self) -> usize { NUM_CTX }
 }
 
 #[cfg(test)]
@@ -163,6 +172,15 @@ mod tests {
         assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 9);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn the_ollama_connection_says_its_context_and_sends_the_same_number() {
+        let m = OllamaModel::local("x");
+        assert_eq!(m.context_tokens(), 8192);
+        let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![] });
+        assert_eq!(b["options"]["num_ctx"], m.context_tokens());
+        assert_eq!(FakeModel::new(vec![]).context_tokens(), 8192, "the trait default");
     }
 
     #[test]
