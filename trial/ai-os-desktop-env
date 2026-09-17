@@ -11,5 +11,9 @@ dbus-update-activation-environment --systemd XDG_CURRENT_DESKTOP=GNOME XDG_SESSI
 mkdir -p ~/.config/systemd/user/graphical-session.target.d
 printf '[Unit]\nRefuseManualStart=no\n' > ~/.config/systemd/user/graphical-session.target.d/manual.conf
 systemctl --user daemon-reload
-systemctl --user start graphical-session.target || true
-systemctl --user restart xdg-desktop-portal-gnome xdg-desktop-portal 2>/dev/null || true
+# --no-block, both of them: this runs as ExecStartPost, so the unit is not "active" until it
+# returns, and a portal start job that waits on its own bus name would otherwise hold the desktop
+# in "activating" until the start timeout kills it — on a cold boot it does exactly that, forever.
+# The portals are a convenience for the vision probes; the hand needs only the accessibility bus.
+systemctl --user --no-block start graphical-session.target || true
+systemctl --user --no-block restart xdg-desktop-portal-gnome xdg-desktop-portal 2>/dev/null || true
