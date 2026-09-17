@@ -630,7 +630,10 @@ impl<M: Model> Engine<M> {
         // times this way and then had no steps left for the rest of the job. Only an *immediate*
         // repeat is caught, so re-running a command after something else has changed stays
         // legitimate, and a `done` check is exempt entirely: re-running one verbatim is its point.
-        if !is_check && job.steps.last().is_some_and(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key) {
+        // A second press of the same button, or the same text typed again, is ordinary desktop
+        // work (a repeated digit, a second Next): exempt like a check is (2a §5).
+        let repeatable = matches!(action, Action::Press { .. } | Action::Type { .. });
+        if !is_check && !repeatable && job.steps.last().is_some_and(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key) {
             return self.reject(job, "that exact action just succeeded — its result is in the steps above; move on to the next step");
         }
         if !is_check && !approved && job.failed_actions.contains(&key) {
@@ -1263,6 +1266,23 @@ mod tests {
         assert_eq!(rec.calls.borrow().iter().filter(|a| **a == write("BLUEPRINT.md")).count(), 1, "{:?}", rec.calls.borrow());
         let prompts = e.model.prompts.borrow();
         assert!(prompts[4].user.contains("just succeeded"), "the model is told why: {}", prompts[4].user);
+    }
+
+    /// 2a §5: a repeated digit or a second Next is normal desktop work — 1d's "that exact action
+    /// just succeeded" refusal exempts `press` and `type`.
+    #[test]
+    fn the_same_press_twice_in_a_row_runs_twice() {
+        // Housekeeping jobs: no blueprint gate to satisfy, so the scripted moves are just the
+        // two repeats and the check.
+        let hk = |goal: &str| Move::Housekeep { goal: goal.into(), understood: "Pressing twice".into(), remember: None };
+        let press = Action::Press { control: 3, name: "1".into() };
+        let (mut e, rec, _) = engine_with(vec![hk("press twice"), plan(), act(1, press.clone()), act(1, press.clone()), done(run("python3"))], "press-twice");
+        e.handle("press twice").unwrap();
+        assert_eq!(rec.desktop_calls.borrow().len(), 2, "both presses reached the desktop hand");
+        let run_twice = Action::RunCommand { argv: vec!["ls".into()] };
+        let (mut e2, rec2, _) = engine_with(vec![hk("run twice"), plan(), act(1, run_twice.clone()), act(1, run_twice.clone()), done(run("python3"))], "run-twice");
+        e2.handle("press twice").unwrap();
+        assert_eq!(rec2.calls.borrow().iter().filter(|a| **a == run_twice).count(), 1, "a repeated command is still refused");
     }
 
     #[test]
