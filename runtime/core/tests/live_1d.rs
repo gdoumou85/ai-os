@@ -33,6 +33,7 @@ fn start_service() -> PathBuf {
 /// Say it, print every event, return once `stop` matches. Panics after `limit` seconds.
 fn say_until(c: &mut Client, text: &str, limit: u64, stop: impl Fn(&Event) -> bool) -> Vec<Event> {
     println!("you> {text}");
+    c.set_read_timeout(Some(Duration::from_secs(limit))).unwrap();
     c.say(text).unwrap();
     let t = Instant::now();
     let mut got = vec![];
@@ -43,7 +44,7 @@ fn say_until(c: &mut Client, text: &str, limit: u64, stop: impl Fn(&Event) -> bo
         if done { return got; }
         assert!(t.elapsed().as_secs() < limit, "no end after {limit}s: {got:?}");
     }
-    panic!("connection closed: {got:?}");
+    panic!("connection closed or nothing said for {limit}s: {got:?}");
 }
 
 fn must_clear(path: &str, dir: bool) {

@@ -104,6 +104,9 @@ impl Client {
     pub fn say(&mut self, text: &str) -> std::io::Result<()> { self.writer.say(text) }
     pub fn hello(&mut self) -> std::io::Result<()> { self.writer.hello() }
     pub fn next_event(&mut self) -> Option<Event> { self.reader.next_event() }
+    /// A read that waits longer than `d` ends the connection (`next_event` gives `None`) instead
+    /// of hanging forever; for scripts and tests, never the rail.
+    pub fn set_read_timeout(&self, d: Option<std::time::Duration>) -> std::io::Result<()> { self.reader.lines.get_ref().set_read_timeout(d) }
 }
 
 impl Writer {
