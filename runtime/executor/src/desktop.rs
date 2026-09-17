@@ -57,8 +57,15 @@ const INTERESTING: [&str; 21] = [
 /// `find` keeps those whose name or role contains it (case-insensitive). Long labels are furniture.
 pub fn select<'a>(nodes: &'a [Node], find: Option<&str>) -> Vec<&'a Node> {
     let f = find.map(|s| s.to_lowercase());
+    // A toolkit commonly exposes a control's own caption as a label beside it: GNOME Calculator
+    // lists every one of its keys twice, so half the look is lines that say what the line above
+    // already said and carry no action. That is filler like a panel (§4), and on the workshop's
+    // 40-control cap it was the difference between seeing the `=` key and never reaching it.
+    // ponytail: O(n²) over one window's nodes, thousands at the very most.
+    let echoes_a_control = |name: &str| nodes.iter().any(|n| n.showing && n.role != "label" && !name.is_empty()
+        && INTERESTING.contains(&n.role.as_str()) && n.name == name);
     let v: Vec<&'a Node> = nodes.iter().filter(|n| n.showing && INTERESTING.contains(&n.role.as_str()))
-        .filter(|n| n.role != "label" || n.name.chars().count() <= 80)
+        .filter(|n| n.role != "label" || (n.name.chars().count() <= 80 && !echoes_a_control(&n.name)))
         .filter(|n| f.as_ref().map_or(true, |f| n.name.to_lowercase().contains(f) || n.role.to_lowercase().contains(f)))
         .collect();
     // ponytail: stable partition keeps tree order within each half.
@@ -127,6 +134,21 @@ mod tests {
         assert_eq!(found, vec!["Bold"]);
         let by_role: Vec<&str> = select(&nodes, Some("text")).iter().map(|n| n.role.as_str()).collect();
         assert_eq!(by_role, vec!["text"], "find matches the role too");
+    }
+
+    /// GNOME Calculator lists all twenty-five of its keys twice — `[push button] =` and
+    /// `[label] = "="` — so the 40-control cap cut the look off at `×` and the live run's model
+    /// never saw the `=` key at all. A label that only says what a control beside it says is
+    /// filler; a label that says something of its own stays.
+    #[test]
+    fn a_label_that_only_echoes_a_control_is_filler() {
+        let nodes = vec![node("push button", "=", true), node("label", "=", true),
+                         node("push button", "4", true), node("label", "4", true),
+                         node("label", "1 word, 17 characters", true),
+                         node("text", "", true), node("label", "", true)];
+        let got: Vec<(&str, &str)> = select(&nodes, None).iter().map(|n| (n.role.as_str(), n.name.as_str())).collect();
+        assert_eq!(got, vec![("push button", "="), ("push button", "4"), ("label", "1 word, 17 characters"), ("text", ""), ("label", "")],
+                   "the two echoing labels go; the status label and the nameless ones stay");
     }
 
     #[test]
