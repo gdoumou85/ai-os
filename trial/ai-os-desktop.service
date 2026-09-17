@@ -1,0 +1,14 @@
+[Unit]
+Description=AI OS invisible desktop session (workshop)
+
+[Service]
+Environment=XDG_SESSION_TYPE=wayland
+Environment=XDG_CURRENT_DESKTOP=GNOME
+Environment=GNOME_ACCESSIBILITY=1
+ExecStart=/usr/bin/gnome-shell --headless --wayland-display wayland-ai --virtual-monitor 1600x900 --wayland --no-x11
+ExecStartPost=/usr/local/libexec/ai-os-desktop-env
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

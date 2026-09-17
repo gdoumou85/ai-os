@@ -7,4 +7,6 @@ pub mod log;
 pub mod worker;
 pub mod undo;
 pub mod admin;
+pub mod desktop;
+pub mod atspi;
 pub mod executor;

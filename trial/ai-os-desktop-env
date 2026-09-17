@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# ExecStartPost of ai-os-desktop.service: once the shell's socket is up, tell the user manager and
+# the portals which display and desktop this is, so apps launched into it register on the a11y bus.
+set -e
+for _ in $(seq 40); do [ -S "$XDG_RUNTIME_DIR/wayland-ai" ] && break; sleep 0.25; done
+[ -S "$XDG_RUNTIME_DIR/wayland-ai" ] || { echo "wayland-ai never appeared" >&2; exit 1; }
+export WAYLAND_DISPLAY=wayland-ai
+gsettings set org.gnome.desktop.interface toolkit-accessibility true || true
+systemctl --user set-environment XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=wayland-ai GNOME_ACCESSIBILITY=1
+dbus-update-activation-environment --systemd XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=wayland-ai GNOME_ACCESSIBILITY=1
+mkdir -p ~/.config/systemd/user/graphical-session.target.d
+printf '[Unit]\nRefuseManualStart=no\n' > ~/.config/systemd/user/graphical-session.target.d/manual.conf
+systemctl --user daemon-reload
+# --no-block, both of them: this runs as ExecStartPost, so the unit is not "active" until it
+# returns, and a portal start job that waits on its own bus name would otherwise hold the desktop
+# in "activating" until the start timeout kills it — on a cold boot it does exactly that, forever.
+# The portals are a convenience for the vision probes; the hand needs only the accessibility bus.
+systemctl --user --no-block start graphical-session.target || true
+systemctl --user --no-block restart xdg-desktop-portal-gnome xdg-desktop-portal 2>/dev/null || true

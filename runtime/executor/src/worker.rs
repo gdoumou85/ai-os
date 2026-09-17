@@ -26,7 +26,8 @@ impl Outcome {
 }
 
 /// A thing that can perform actions. The spine ships two real impls (SandboxWorker,
-/// AdminWorker); tests use FakeWorker.
+/// AdminWorker) and the executor now has a third lane for the desktop hand, whose real
+/// impl lands later in 2a; tests use FakeWorker.
 pub trait Worker {
     fn run(&self, action: &Action) -> Outcome;
     /// Put back what an earlier `run` recorded. Only workers with a privileged hand can.

@@ -2,6 +2,7 @@ use executor::action::Action;
 use executor::executor::{ExecOutcome, Executor};
 use executor::log::ActionLog;
 use executor::admin::AdminWorker;
+use executor::atspi::{DesktopState, DesktopWorker};
 use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 
@@ -12,8 +13,10 @@ fn main() {
     std::fs::create_dir_all(&ws).ok();
     let sandbox: Box<dyn Worker> = Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.clone() });
     let admin: Box<dyn Worker> = Box::new(AdminWorker);
+    // The demo binary has no model to ask for a context size; 8192 is the workshop's.
+    let desktop: Box<dyn Worker> = Box::new(DesktopWorker(DesktopState::for_model(8192)));
     let log = ActionLog::open("/data/ai-os.db").expect("open log");
-    let exec = Executor::new(sandbox, admin, log, ws);
+    let exec = Executor::new(sandbox, admin, desktop, log, ws);
     match exec.execute("demo", &action, false).expect("execute") {
         ExecOutcome::Ran(o) => println!("RAN ok={} detail={}", o.ok, o.detail),
         ExecOutcome::Blocked(reason) => println!("BLOCKED: {reason}"),

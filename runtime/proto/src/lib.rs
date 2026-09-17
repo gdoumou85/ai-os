@@ -58,7 +58,7 @@ pub enum Event {
     Step { job_id: String, plan_step: usize, text: String, ok: bool },
     NeedsAnswer { job_id: String, questions: Vec<String> },
     NeedsOk { job_id: String, what: String, why: String },
-    Done { job_id: String, text: String, check: Option<String>, files: Vec<ChangedFile> },
+    Done { job_id: String, text: String, check: Option<String>, files: Vec<ChangedFile>, #[serde(default)] windows: Vec<String> },
     Failed { job_id: String, text: String, files: Vec<ChangedFile> },
     Stopped { job_id: String, text: String, files: Vec<ChangedFile> },
     Undone { job_id: String, name: String, lines: Vec<UndoLine>, notes: Vec<String> },
@@ -79,6 +79,12 @@ impl Event {
             _ => None,
         }
     }
+}
+
+/// The one line every Done card of a job that used the desktop hand carries (2a design §7).
+pub fn window_note(windows: &[String]) -> Option<String> {
+    if windows.is_empty() { return None; }
+    Some(format!("What I did inside {} can't be undone by me.", windows.join(" and ")))
 }
 
 /// A line from a client: `{"say":"…"}` or `{"hello":{}}`.
@@ -152,7 +158,7 @@ mod tests {
             Event::Step { job_id: "j".into(), plan_step: 1, text: "wrote a".into(), ok: true },
             Event::NeedsAnswer { job_id: "j".into(), questions: vec!["?".into()] },
             Event::NeedsOk { job_id: "j".into(), what: "http post to x".into(), why: "network".into() },
-            Event::Done { job_id: "j".into(), text: "done".into(), check: Some("ran true".into()), files: vec![ChangedFile { path: "/a".into(), kind: FileKind::Text, size: 1 }] },
+            Event::Done { job_id: "j".into(), text: "done".into(), check: Some("ran true".into()), files: vec![ChangedFile { path: "/a".into(), kind: FileKind::Text, size: 1 }], windows: vec![] },
             Event::Failed { job_id: "j".into(), text: "gave up".into(), files: vec![] },
             Event::Stopped { job_id: "j".into(), text: "Stopped".into(), files: vec![] },
             Event::Undone { job_id: "j".into(), name: "p".into(), lines: vec![UndoLine { text: "put back".into(), ok: true }], notes: vec!["n".into()] },
@@ -181,6 +187,16 @@ mod tests {
         assert_eq!(back, e);
         let none: Waiting = serde_json::from_str("\"none\"").unwrap();
         assert_eq!(none, Waiting::None);
+    }
+
+    #[test]
+    fn an_old_done_without_windows_still_parses_and_the_note_reads_right() {
+        let old = r#"{"kind":"done","job_id":"j","text":"t","check":null,"files":[]}"#;
+        let e: Event = serde_json::from_str(old).unwrap();
+        assert!(matches!(&e, Event::Done { windows, .. } if windows.is_empty()));
+        assert_eq!(window_note(&[]), None);
+        assert_eq!(window_note(&["Text Editor".into()]).unwrap(), "What I did inside Text Editor can't be undone by me.");
+        assert_eq!(window_note(&["Writer".into(), "Calculator".into()]).unwrap(), "What I did inside Writer and Calculator can't be undone by me.");
     }
 
     #[test]

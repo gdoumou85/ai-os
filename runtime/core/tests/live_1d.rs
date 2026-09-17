@@ -2,11 +2,12 @@
 // a temp socket, no human. Inside the distro with Ollama and the wrapper installed:
 //   AI_OS_LIVE=1 cargo test -p aios-core --test live_1d -- --nocapture
 use aios_core::engine::Engine;
-use aios_core::model::OllamaModel;
+use aios_core::model::{Model, OllamaModel};
 use aios_core::service;
 use aios_core::store::Store;
 use aios_proto::{Client, Event};
 use executor::admin::AdminWorker;
+use executor::atspi::{DesktopState, DesktopWorker};
 use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -21,8 +22,11 @@ fn start_service() -> PathBuf {
     let sock = dir.join("ai-os.sock");
     let listener = service::bind(&sock).unwrap();
     std::thread::spawn(move || service::run(listener, Box::new(|sink| {
-        Engine::new(Store::open(DB).unwrap(), OllamaModel::local("qwen3.5:9b"), PathBuf::from("/data/projects"), Some(DB.into()),
-            Box::new(|ws| (Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>, Box::new(AdminWorker) as Box<dyn Worker>)),
+        // Built on the engine thread: the state is an `Rc`, so it never crosses one.
+        let llm = OllamaModel::local("qwen3.5:9b");
+        let desktop = DesktopState::for_model(llm.context_tokens());
+        Engine::new(Store::open(DB).unwrap(), llm, PathBuf::from("/data/projects"), Some(DB.into()),
+            Box::new(move |ws| (Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>, Box::new(AdminWorker) as Box<dyn Worker>, Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>)),
             PathBuf::from("/data/housekeeping"), PathBuf::from("/data/snapshots")).with_sink(sink)
     })));
     let t = Instant::now();

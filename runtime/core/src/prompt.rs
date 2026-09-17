@@ -20,7 +20,8 @@ Rules:
 - The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`), never by an absolute path: an absolute path leaves the workspace and needs the user's yes.
 - A file outside the project is written with `write_file` and its absolute path, never with run_command (`echo`, `tee`, `cp`): the sandbox cannot reach out there, so such a command reports success and writes nothing. It needs the user's yes (reading under /etc is free); say in one line why you need it.
 - Remove software with `remove` and change a setting with `set_setting`; both are hands like the rest, not run_command.
-- The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.";
+- The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.
+- Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`, never with run_command: the sandbox cannot see a window.";
 
 fn join_instructions(instructions: &[String]) -> String {
     if instructions.is_empty() { "(none)".into() } else { instructions.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n") }
@@ -33,7 +34,7 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(S
     let recent_txt = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
     let user = format!(
         "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk), start (new work: give project, new_project, description, goal, creative, understood), or \
-         housekeep (the machine itself: folders, settings, tools; give goal, understood). \
+         housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked; give goal, understood). \
          Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself. \
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, recent_txt, message
@@ -75,6 +76,7 @@ fn compact_action(action: &Action) -> String {
             let f: String = find.chars().take(60).collect();
             format!("edit_file {path} (find: {f})")
         }
+        Action::Type { control, text, .. } => format!("type into {control} ({} chars)", text.chars().count()),
         other => {
             let full = serde_json::to_string(other).unwrap_or_default();
             if full.chars().count() > 400 {
@@ -111,7 +113,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
     let (header, bp_block) = if job.housekeeping {
-        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data and /home/ai, and a check out there reports what the sandbox cannot see, not what is not there. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) make_dir the folder, 2) set_setting projects_root=<that absolute path>, 3) done with make_dir (or run_command ls) as the check, and that job is not done until the setting is set.".to_string(), String::new())
+        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data and /home/ai, and a check out there reports what the sandbox cannot see, not what is not there. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) make_dir the folder, 2) set_setting projects_root=<that absolute path>, 3) done with make_dir (or run_command ls) as the check, and that job is not done until the setting is set. A window the user named is found with `look` first; nothing inside a window is a file of yours.".to_string(), String::new())
     } else {
         let bp = match blueprint {
             Some(b) => b.chars().take(3000).collect::<String>(),
@@ -209,6 +211,24 @@ mod tests {
         assert!(SYSTEM.contains("reading under /etc is free"));
         // The two hands the list left out: the model reached for run_command instead.
         assert!(SYSTEM.contains("`remove`") && SYSTEM.contains("`set_setting`"));
+    }
+
+    #[test]
+    fn system_rules_teach_the_desktop_hand_and_name_no_application() {
+        for w in ["`look`", "`press`", "`type`", "`read`", "`open_app`", "Look before you act"] { assert!(SYSTEM.contains(w), "{w}"); }
+        // The live 2a run: the model typed the line five times over and reached for Close, because
+        // nothing told it that Save lives behind the menu button and answers to `Ctrl+S`.
+        for w in ["look for its menu or menu button", "`Ctrl+S`"] { assert!(SYSTEM.contains(w), "{w}"); }
+        assert!(!SYSTEM.contains("Writer") && !SYSTEM.contains("Calculator") && !SYSTEM.contains("Text Editor"), "nothing per-app");
+        let p = front_door(&[], &[], &[], "take my editor window");
+        assert!(p.user.contains("a window the user named"), "{}", p.user);
+        // The live 2a run: "open the calculator and tell me what 12 times 34 is" was read as a new
+        // software project called calculator-task, blueprint and all, because housekeeping only
+        // offered a window the user already had open.
+        assert!(p.user.contains("or one you open yourself"), "{}", p.user);
+        let job = Job::new_housekeeping("/data/housekeeping", "take the editor", "Taking it");
+        let t = job_turn(&[], &job, None, None);
+        assert!(t.user.contains("found with `look` first"), "{}", t.user);
     }
 
     #[test]

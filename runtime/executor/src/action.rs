@@ -24,6 +24,38 @@ pub enum Action {
     MakeDir { path: String },
     FetchPackages { manager: Manager, packages: Vec<String> },
     SetSetting { key: String, value: String },
+    // The desktop hand (2a design §3). Ids come from the worker's own table; `name` on a press is
+    // the model echoing what `look` reported, verified by the worker before anything runs, so the
+    // risk rule can read a name without leaving `classify` pure.
+    /// No window: list the open windows. A window: its controls, narrowed by `find`.
+    Look {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        find: Option<String>,
+    },
+    Press { control: u32, name: String },
+    /// Appends at the end; `replace` clears the control first.
+    Type {
+        control: u32,
+        text: String,
+        #[serde(default)]
+        replace: bool,
+    },
+    /// Windowed like `ReadFile`.
+    Read {
+        control: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_line: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines: Option<usize>,
+    },
+    /// A desktop-entry id (`org.gnome.TextEditor`); on the invisible display unless `visible`.
+    OpenApp {
+        name: String,
+        #[serde(default)]
+        visible: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -62,6 +94,13 @@ pub fn valid_name(s: &str) -> bool {
         return false;
     }
     b[1..b.len() - 1].iter().all(|&c| is_mid(c))
+}
+
+/// A desktop-entry id: `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Dots and capitals are normal there
+/// (`org.gnome.TextEditor`); a slash, a space or a leading dot or dash never is.
+pub fn valid_app_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty() && b[0].is_ascii_alphanumeric() && b.iter().all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
 #[cfg(test)]
@@ -113,6 +152,28 @@ mod tests {
             serde_json::from_str::<Action>(r#"{"kind":"service","name":"x","do":"enable"}"#).unwrap(),
             Action::Service { action: ServiceDo::Enable, .. }
         ));
+    }
+
+    #[test]
+    fn desktop_actions_round_trip_with_kind_first() {
+        let a = Action::Press { control: 7, name: "Bold".into() };
+        let s = serde_json::to_string(&a).unwrap();
+        assert!(s.starts_with(r#"{"kind":"press""#), "{s}");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+        let t: Action = serde_json::from_str(r#"{"kind":"type","control":3,"text":"hi"}"#).unwrap();
+        assert_eq!(t, Action::Type { control: 3, text: "hi".into(), replace: false });
+        let o: Action = serde_json::from_str(r#"{"kind":"open_app","name":"org.gnome.Calculator"}"#).unwrap();
+        assert_eq!(o, Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false });
+        let l: Action = serde_json::from_str(r#"{"kind":"look"}"#).unwrap();
+        assert_eq!(l, Action::Look { window: None, find: None });
+        let r: Action = serde_json::from_str(r#"{"kind":"read","control":9,"from_line":5,"lines":20}"#).unwrap();
+        assert_eq!(r, Action::Read { control: 9, from_line: Some(5), lines: Some(20) });
+    }
+
+    #[test]
+    fn app_names_carry_dots_and_capitals_but_never_paths() {
+        for ok in ["org.gnome.TextEditor", "org.gnome.Calculator", "libreoffice-writer", "gnome_calc2"] { assert!(valid_app_name(ok), "{ok}"); }
+        for bad in ["", "../x", "a/b", "a b", ".hidden", "-x", "x;rm"] { assert!(!valid_app_name(bad), "{bad}"); }
     }
 
     #[test]

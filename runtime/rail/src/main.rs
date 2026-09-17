@@ -93,9 +93,10 @@ fn render(card: &Card, say: &Sender<String>) -> gtk::Widget {
         }
         CardKind::NeedsAnswer { questions } => { b.add_css_class("ask"); b.append(&title("Needs your answer")); for q in questions { b.append(&text(q)); } }
         CardKind::NeedsOk { what, why } => { b.add_css_class("ok"); b.append(&title("Needs your OK")); b.append(&text(what)); let l = text(why); l.add_css_class("dim"); b.append(&l); }
-        CardKind::Done { text: t, check, files } => {
+        CardKind::Done { text: t, check, files, windows } => {
             b.add_css_class("done"); b.append(&title("Done")); b.append(&text(t));
             if let Some(c) = check { let l = text(&format!("check: {c}")); l.add_css_class("dim"); b.append(&l); }
+            if let Some(n) = aios_proto::window_note(windows) { let l = text(&n); l.add_css_class("dim"); b.append(&l); }
             file_rows(&b, files);
         }
         CardKind::Failed { text: t, files } | CardKind::Stopped { text: t, files } => {

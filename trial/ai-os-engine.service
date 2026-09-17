@@ -1,11 +1,15 @@
 [Unit]
 Description=AI OS engine (workshop)
+After=ai-os-desktop.service
+Wants=ai-os-desktop.service
 
 [Service]
 ExecStart=/usr/local/bin/ai-os-engine
 Environment=AI_OS_DB=/data/ai-os.db
 Environment=AI_OS_MODEL=qwen3.5:9b
 Environment=AI_OS_PROJECTS=/data/projects
+Environment=AI_OS_DISPLAY_INVISIBLE=wayland-ai
+Environment=AI_OS_DISPLAY_VISIBLE=wayland-0
 Restart=on-failure
 RestartSec=2
 

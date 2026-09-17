@@ -3,9 +3,10 @@
 //   AI_OS_LIVE=1 cargo test -p aios-core --test live_1c -- --nocapture
 use aios_core::engine::Engine;
 use aios_core::job::{Job, State};
-use aios_core::model::OllamaModel;
+use aios_core::model::{Model, OllamaModel};
 use aios_core::store::Store;
 use executor::admin::AdminWorker;
+use executor::atspi::{DesktopState, DesktopWorker};
 use executor::log::ActionLog;
 use executor::worker::{SandboxWorker, Worker};
 use std::path::{Path, PathBuf};
@@ -16,10 +17,13 @@ const WORK: &str = "/data/work";
 
 fn engine() -> Engine<OllamaModel> {
     let store = Store::open(DB).unwrap();
-    Engine::new(store, OllamaModel::local("qwen3.5:9b"), PathBuf::from("/data/projects"), Some(DB.into()),
-        Box::new(|ws| (
+    let llm = OllamaModel::local("qwen3.5:9b");
+    let desktop = DesktopState::for_model(llm.context_tokens());
+    Engine::new(store, llm, PathBuf::from("/data/projects"), Some(DB.into()),
+        Box::new(move |ws| (
             Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
             Box::new(AdminWorker) as Box<dyn Worker>,
+            Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>,
         )),
         PathBuf::from("/data/housekeeping"),
         PathBuf::from("/data/snapshots"))

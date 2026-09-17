@@ -14,8 +14,8 @@ use executor::worker::{Outcome, Worker};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
-/// One project folder in, the two hands that serve it out: (sandbox, admin).
-pub type WorkerFactory = Box<dyn Fn(&Path) -> (Box<dyn Worker>, Box<dyn Worker>)>;
+/// One project folder in, the three hands that serve it out: (sandbox, admin, desktop).
+pub type WorkerFactory = Box<dyn Fn(&Path) -> (Box<dyn Worker>, Box<dyn Worker>, Box<dyn Worker>)>;
 
 /// The scratch folder a housekeeping job works in — the machine's own jobs have no project.
 pub const HOUSEKEEPING_DIR: &str = "/data/housekeeping";
@@ -77,6 +77,27 @@ pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.truncate(20);
     out
+}
+
+/// The five actions that work a window (2a §3). Their world is the window, which moves on between
+/// steps, so neither the "just succeeded" guard nor the "already failed" one holds over them.
+fn on_the_desktop(action: &Action) -> bool {
+    matches!(action, Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. })
+}
+
+/// The windows a job worked: those it looked into, in first-seen order, from the steps that
+/// succeeded (2a §7). Ids come only from a windowed look, so nothing is pressed, typed or read in
+/// a window that was never looked at — and an `open_app` desktop-entry id is not a window's name.
+pub(crate) fn windows_worked(job: &Job) -> Vec<String> {
+    let mut v: Vec<String> = vec![];
+    for s in job.steps.iter().filter(|s| s.ok) {
+        // A blank name is the model's way of writing "list the windows" (the hand reads it as
+        // none), so it is not a window this job worked: the live run's Done card named one.
+        let Action::Look { window: Some(w), .. } = &s.action else { continue };
+        if w.trim().is_empty() || v.contains(w) { continue; }
+        v.push(w.clone());
+    }
+    v
 }
 
 pub fn sanitize_project_name(raw: &str) -> String {
@@ -213,8 +234,8 @@ impl<M: Model> Engine<M> {
     pub(crate) fn executor_for(&self, job: &Job) -> Result<Executor<Box<dyn Worker>>, EngineError> {
         let ws = self.workspace(job);
         let log = match &self.log_path { Some(p) => ActionLog::open(p)?, None => ActionLog::open_in_memory()? };
-        let (sandbox, admin) = (self.workers)(&ws);
-        Ok(Executor::new(sandbox, admin, log, ws))
+        let (sandbox, admin, desktop) = (self.workers)(&ws);
+        Ok(Executor::new(sandbox, admin, desktop, log, ws))
     }
 
     pub(crate) fn read_blueprint(&self, job: &Job) -> Option<String> {
@@ -448,7 +469,7 @@ impl<M: Model> Engine<M> {
         let ev = match state {
             State::Done => {
                 let check = job.steps.last().map(|s| format!("{}: {}", describe(&s.action), if s.ok { "ok" } else { "failed" }));
-                Event::Done { job_id, text, check, files }
+                Event::Done { job_id, text, check, files, windows: windows_worked(&job) }
             }
             State::Cancelled => Event::Stopped { job_id, text, files },
             // `finish` is only ever called with done/cancelled/failed; anything else ended badly.
@@ -598,6 +619,21 @@ impl<M: Model> Engine<M> {
         }
     }
 
+    /// Whether a step that just succeeded leaves `failed` — one key out of `failed_actions` —
+    /// worth another try, because the world it failed in is gone.
+    ///
+    /// A blueprint write or edit changed the disk, which every action reads, so it clears them
+    /// all. A window action changed only the window: the ids a `look` hands out are the very
+    /// thing "control 1 was never handed out" complained of, and a press or an `open_app` moves
+    /// a window on — but none of that says anything about a `run_command` that failed in the
+    /// sandbox, so those keep 1d's "that exact action already failed" memory in a mixed job.
+    /// A `read` changes nothing and clears nothing.
+    fn cleared_by(succeeded: &Action, failed: &str) -> bool {
+        if Self::is_blueprint(succeeded).is_some() { return true; }
+        if matches!(succeeded, Action::Read { .. }) || !on_the_desktop(succeeded) { return false; }
+        serde_json::from_str::<Action>(failed).is_ok_and(|f| on_the_desktop(&f))
+    }
+
     /// True when the user's stop has landed: the job is finished as Cancelled and reported.
     fn stopped(&mut self, job: &Job) -> Result<bool, EngineError> {
         if !self.stop.swap(false, Ordering::SeqCst) { return Ok(false); }
@@ -630,10 +666,27 @@ impl<M: Model> Engine<M> {
         // times this way and then had no steps left for the rest of the job. Only an *immediate*
         // repeat is caught, so re-running a command after something else has changed stays
         // legitimate, and a `done` check is exempt entirely: re-running one verbatim is its point.
-        if !is_check && job.steps.last().is_some_and(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key) {
-            return self.reject(job, "that exact action just succeeded — its result is in the steps above; move on to the next step");
+        // A second press of the same button, or the same text typed again, is ordinary desktop
+        // work (a repeated digit, a second Next): exempt like a check is (2a §5). *A second* is
+        // all §5 claims, and all this exempts: the live 2a run pressed Main Menu eight times in a
+        // row without looking once, toggling the one popover open and shut until the job ran out
+        // of replans, and every press answered "pressed Main Menu" as if it had got somewhere.
+        let trailing = job.steps.iter().rev().take_while(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key).count();
+        let repeatable = matches!(action, Action::Press { .. } | Action::Type { .. }) && trailing < 2;
+        if !is_check && !repeatable && trailing >= 1 {
+            return self.reject(job, if on_the_desktop(&action) {
+                "that exact action already worked; look at the window to see what it did, then take the next step"
+            } else {
+                "that exact action just succeeded — its result is in the steps above; move on to the next step"
+            });
         }
-        if !is_check && !approved && job.failed_actions.contains(&key) {
+        // The same exemption, for the same reason, on the failing side. A desktop action's world
+        // is the window, not the step list: it moves on between steps, so one that failed says
+        // little about the next time — the live 2a run's `read control 1` failed for want of a
+        // look and worked the moment one happened. Repeating it is an ordinary failed step, kept
+        // in hand by MAX_FAILS_PER_STEP; three runs died instead on this rejection, whose budget
+        // is two and fatal, one failed step into the job.
+        if !is_check && !approved && !on_the_desktop(&action) && job.failed_actions.contains(&key) {
             let earlier = job.steps.iter().rev().find(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).map(|s| s.detail.clone()).unwrap_or_default();
             return self.reject(job, &format!("that exact action already failed with: {earlier} — work around it or replan"));
         }
@@ -701,9 +754,9 @@ impl<M: Model> Engine<M> {
                             None => {}
                         }
                     }
-                    // Something changed on disk, so an earlier failure may now succeed:
-                    // re-running the same command after a fix is legitimate (spike finding).
-                    if Self::is_blueprint(&action).is_some() { job.failed_actions.clear(); }
+                    // The world is not the one those failures happened in, so re-running them is
+                    // legitimate (spike finding) — but only the ones this step's world covers.
+                    job.failed_actions.retain(|k| !Self::cleared_by(&action, k));
                 } else {
                     // Recorded even for a check (only the identical-action *lookup* above is
                     // check-exempt): a later `act` proposing this same action must still see why
@@ -785,11 +838,28 @@ impl<M: Model> Engine<M> {
                         let text = format!("I gave up on {}: the plan kept changing ({} replans) without progress.", display_name(&job), job.replans);
                         return self.finish(job, State::Failed, text);
                     }
-                    job.plan = steps; job.rejections = 0;
-                    job.note_to_model = Some(format!("plan revised because: {why}"));
-                    self.store.save_job(&job)?;
-                    self.emit(Event::Plan { job_id: job.id.clone(), steps: job.plan.clone() });
-                    None
+                    // Two replans that are not a change of plan, both seen in the live 2a run: one
+                    // carrying the action the model wanted to take — `{"kind":"look",…}` as its
+                    // single step — and one handing back the plan it already had. Each costs a
+                    // replan, like every other, and the note says which move it wanted; neither
+                    // becomes the plan. Not a rejection: that budget is two and fatal, and these
+                    // are a model one nudge away from the right move, not one answering illegally.
+                    let wrong_move = if steps.iter().any(|s| serde_json::from_str::<Action>(s).is_ok()) {
+                        Some("that is an action, not a plan step; send it with act")
+                    } else if steps == job.plan {
+                        Some("that is the plan you already have; take its next step with act")
+                    } else { None };
+                    if let Some(note) = wrong_move {
+                        job.note_to_model = Some(note.to_string());
+                        self.store.save_job(&job)?;
+                        None
+                    } else {
+                        job.plan = steps; job.rejections = 0;
+                        job.note_to_model = Some(format!("plan revised because: {why}"));
+                        self.store.save_job(&job)?;
+                        self.emit(Event::Plan { job_id: job.id.clone(), steps: job.plan.clone() });
+                        None
+                    }
                 }
                 (State::Working, Move::Act { step, action }) => {
                     if self.perform(&mut job, step, action, false, false)? { return Ok(()); }
@@ -1265,6 +1335,34 @@ mod tests {
         assert!(prompts[4].user.contains("just succeeded"), "the model is told why: {}", prompts[4].user);
     }
 
+    /// 2a §5: a repeated digit or a second Next is normal desktop work — 1d's "that exact action
+    /// just succeeded" refusal exempts `press` and `type`. *A second* is what §5 claims and what
+    /// this exempts: a third identical press in a row is caught, because the live 2a run pressed
+    /// Main Menu eight times without looking once, toggling the same popover open and shut.
+    #[test]
+    fn the_same_press_twice_in_a_row_runs_twice_and_a_third_time_is_refused() {
+        // Housekeeping jobs: no blueprint gate to satisfy, so the scripted moves are just the
+        // two repeats and the check.
+        let hk = |goal: &str| Move::Housekeep { goal: goal.into(), understood: "Pressing twice".into(), remember: None };
+        let press = Action::Press { control: 3, name: "1".into() };
+        let (mut e, rec, _) = engine_with(vec![hk("press twice"), plan(), act(1, press.clone()), act(1, press.clone()), done(run("python3"))], "press-twice");
+        e.handle("press twice").unwrap();
+        assert_eq!(rec.desktop_calls.borrow().len(), 2, "both presses reached the desktop hand");
+        let run_twice = Action::RunCommand { argv: vec!["ls".into()] };
+        let (mut e2, rec2, _) = engine_with(vec![hk("run twice"), plan(), act(1, run_twice.clone()), act(1, run_twice.clone()), done(run("python3"))], "run-twice");
+        e2.handle("press twice").unwrap();
+        assert_eq!(rec2.calls.borrow().iter().filter(|a| **a == run_twice).count(), 1, "a repeated command is still refused");
+        let (mut e3, rec3, _) = engine_with(vec![
+            hk("press thrice"), plan(), act(1, press.clone()), act(1, press.clone()), act(1, press.clone()),
+            act(1, Action::Look { window: Some("Calculator".into()), find: None }), act(1, press.clone()),
+            done(run("python3")),
+        ], "press-thrice");
+        e3.handle("press thrice").unwrap();
+        assert_eq!(rec3.desktop_calls.borrow().iter().filter(|a| **a == press).count(), 3, "the third was refused, the one after the look ran");
+        let prompts = e3.model.prompts.borrow();
+        assert!(prompts.iter().any(|p| p.user.contains("look at the window to see what it did")), "the refusal says to look: {}", prompts.last().unwrap().user);
+    }
+
     #[test]
     fn declined_risky_action_is_told_to_the_model() {
         let post = Action::HttpPost { url: "https://x".into(), body: "b".into() };
@@ -1359,6 +1457,169 @@ mod tests {
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         let prompts = e.model.prompts.borrow();
         assert!(prompts[5].user.contains("rejected: that exact action already failed with: NameError: prnt"), "{}", prompts[5].user);
+    }
+
+    /// The live 2a run: the model typed before looking (refused — "control 1 was never handed
+    /// out"), looked, typed again and got it, then proposed that first type once more and was
+    /// told its own action had already failed. A look hands out the ids the refusal was about,
+    /// so the world it failed in is gone.
+    #[test]
+    fn a_look_clears_the_failures_that_happened_before_the_ids_existed() {
+        let typing = Action::Type { control: 1, text: "reviewed".into(), replace: false };
+        let (mut e, rec, _) = engine_with(vec![
+            Move::Housekeep { goal: "take the editor".into(), understood: "Taking it".into(), remember: None }, plan(),
+            act(1, typing.clone()),                                                  // fails: nothing looked at yet
+            act(1, Action::Look { window: Some("Text Editor".into()), find: None }),  // the ids exist now
+            act(1, typing.clone()),                                                  // the same action, and allowed
+            done(Action::Read { control: 1, from_line: None, lines: None }),
+        ], "look-clears-failures");
+        rec.desktop_outcomes.borrow_mut().extend([
+            Outcome::err("control 1 was never handed out; look at a window to get the ids of its controls"),
+            Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
+            Outcome::ok("typed 8 characters into control 1"),
+            Outcome::ok("(lines 1-2 of 2)\nfirst line\nreviewed"),
+        ]);
+        let ev = e.handle_events("take my editor").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert_eq!(rec.desktop_calls.borrow().iter().filter(|a| **a == typing).count(), 2, "the second type reached the hand");
+        assert!(e.model.prompts.borrow().iter().all(|p| !p.user.contains("already failed")), "nothing was held against it");
+    }
+
+    /// The live 2a run: a refused press, and the 9B replanned with the action it wanted to take
+    /// as its one plan step, over and over, until the replan budget killed the job. It is told
+    /// what the move for that is, and the plan it already had is left standing.
+    #[test]
+    fn a_replan_that_is_really_an_action_is_told_so_and_the_job_goes_on() {
+        let look = Action::Look { window: Some("gnome-calculator".into()), find: None };
+        let (mut e, _, _) = engine_with(vec![
+            Move::Housekeep { goal: "12 times 34".into(), understood: "Calculating".into(), remember: None }, plan(),
+            Move::Replan { steps: vec![serde_json::to_string(&look).unwrap()], why: "the press failed".into() },
+            act(1, look.clone()),
+            done(Action::Read { control: 1, from_line: None, lines: None }),
+        ], "replan-is-an-action");
+        let ev = e.handle_events("what is 12 times 34").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts.iter().any(|p| p.user.contains("that is an action, not a plan step; send it with act")), "{}", prompts.last().unwrap().user);
+        // Never a rejection: that budget is two and fatal, and the live run died of it the first
+        // time this was refused rather than noted. The plan the job had is untouched.
+        assert!(!prompts.iter().any(|p| p.user.contains("rejected")), "it was rejected, not noted");
+        assert_eq!(ev.iter().filter(|x| matches!(x, Event::Plan { .. })).count(), 1, "the plan never changed: {ev:?}");
+    }
+
+    /// The same budget, spent the other way: replanning to the plan already in hand.
+    #[test]
+    fn a_replan_to_the_plan_it_already_has_is_told_to_act() {
+        let Move::Plan { steps } = plan() else { unreachable!() };
+        let (mut e, _, _) = engine_with(vec![
+            Move::Housekeep { goal: "tidy".into(), understood: "Tidying".into(), remember: None }, plan(),
+            Move::Replan { steps: steps.clone(), why: "starting over".into() },
+            act(1, Action::Look { window: None, find: None }),
+            done(Action::Look { window: None, find: None }),
+        ], "replan-same-plan");
+        let ev = e.handle_events("tidy up").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts.iter().any(|p| p.user.contains("that is the plan you already have")), "no such note");
+        assert!(!prompts.iter().any(|p| p.user.contains("rejected")), "it was rejected, not noted");
+    }
+
+    /// Three live 2a runs died here. The model read a control before looking at a window, was
+    /// refused, and sent the same read again; the "already failed" rejection is fatal at two, so
+    /// the job was over one failed step in. A window moves on between steps — the same read works
+    /// the moment a look happens — so a desktop action may be tried again, as a failed step.
+    #[test]
+    fn a_desktop_action_that_failed_may_be_tried_again_and_is_never_rejected_for_it() {
+        let read = Action::Read { control: 1, from_line: None, lines: None };
+        let (mut e, rec, _) = engine_with(vec![
+            Move::Housekeep { goal: "take the editor".into(), understood: "Taking it".into(), remember: None }, plan(),
+            act(1, read.clone()),                                                    // no look yet
+            act(1, read.clone()),                                                    // again, with nothing changed
+            act(1, Action::Look { window: Some("Text Editor".into()), find: None }),
+            act(1, read.clone()),
+            done(read.clone()),
+        ], "desktop-retry");
+        rec.desktop_outcomes.borrow_mut().extend([
+            Outcome::err("control 1 was never handed out; look at a window to get the ids of its controls"),
+            Outcome::err("control 1 was never handed out; look at a window to get the ids of its controls"),
+            Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
+            Outcome::ok("(lines 1-1 of 1)\nfirst line"),
+            Outcome::ok("(lines 1-1 of 1)\nfirst line"),
+        ]);
+        let ev = e.handle_events("take my editor").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert_eq!(rec.desktop_calls.borrow().iter().filter(|a| **a == read).count(), 4, "every read reached the hand");
+        assert!(e.model.prompts.borrow().iter().all(|p| !p.user.contains("already failed")), "a desktop retry was rejected");
+    }
+
+    /// The exemption is the five window actions and nothing else: a command that failed with
+    /// nothing changed is still the 1d lesson it was.
+    #[test]
+    fn only_the_window_actions_escape_the_already_failed_rejection() {
+        for a in [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Save".into() },
+                  Action::Type { control: 1, text: "x".into(), replace: false },
+                  Action::Read { control: 1, from_line: None, lines: None },
+                  Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }] {
+            assert!(on_the_desktop(&a), "{a:?}");
+        }
+        for a in [run("ls"), write("a.py"), Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() },
+                  Action::MakeDir { path: "/data/x".into() }] {
+            assert!(!on_the_desktop(&a), "{a:?}");
+        }
+    }
+
+    /// The narrowing, through the front door. A window opening says nothing about a command the
+    /// sandbox refused, so 1d's lesson survives a mixed job: the command that failed is still
+    /// refused when it comes back unchanged, though a `look` succeeded in between.
+    #[test]
+    fn a_look_does_not_excuse_a_command_that_failed_in_the_sandbox() {
+        let bad = run("cat /nope");
+        let look = Action::Look { window: Some("Text Editor".into()), find: None };
+        let (mut e, rec, _) = engine_with(vec![
+            Move::Housekeep { goal: "read the note".into(), understood: "Reading it".into(), remember: None }, plan(),
+            act(1, bad.clone()),                 // fails in the sandbox
+            act(1, look.clone()),                // a window opens; the sandbox is where it was
+            act(1, bad.clone()),                 // the same command, unchanged -> still refused
+            done(look.clone()),
+        ], "look-does-not-clear-a-command");
+        rec.outcomes.borrow_mut().push_back(Outcome::err("cat: /nope: No such file or directory"));
+        rec.desktop_outcomes.borrow_mut().extend([
+            Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
+            Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
+        ]);
+        let ev = e.handle_events("read my note").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == bad).count(), 1, "the repeat reached the sandbox");
+        assert!(e.model.prompts.borrow().iter().any(|p| p.user.contains("rejected: that exact action already failed with: cat: /nope: No such file or directory")),
+                "the command was let through: {}", e.model.prompts.borrow().last().unwrap().user);
+    }
+
+    /// The other half of the same rule, narrowed by the review. A `read` proves nothing changed,
+    /// so it clears nothing. A window action changed only the window, so it clears only the
+    /// window actions' failures — a `run_command` that failed in the sandbox is untouched by a
+    /// `look`, and keeps 1d's memory in a job that does both. A blueprint write still clears all.
+    #[test]
+    fn a_window_action_clears_only_the_window_actions_failures() {
+        let key = |a: &Action| serde_json::to_string(a).unwrap();
+        let cleared = |s: &Action, f: &Action| Engine::<crate::model::FakeModel>::cleared_by(s, &key(f));
+        let desktop = [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Save".into() },
+                       Action::Type { control: 1, text: "x".into(), replace: false },
+                       Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }];
+        let elsewhere = [run("ls"), Action::MakeDir { path: "/data/x".into() }];
+        for s in &desktop {
+            for f in &desktop { assert!(cleared(s, f), "{s:?} should clear {f:?}"); }
+            for f in &elsewhere { assert!(!cleared(s, f), "{s:?} must not clear {f:?}"); }
+            // Its own half includes the `read` it does not itself clear anything for.
+            assert!(cleared(s, &Action::Read { control: 1, from_line: None, lines: None }), "{s:?}");
+        }
+        // A write or edit of the blueprint changed the disk every action reads: all of them.
+        for s in [write("BLUEPRINT.md"), Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() }] {
+            for f in desktop.iter().chain(elsewhere.iter()) { assert!(cleared(&s, f), "{s:?} should clear {f:?}"); }
+        }
+        // A `read` and a plain command change nothing anyone can see: they clear nothing.
+        for s in [Action::Read { control: 1, from_line: None, lines: None }, run("ls")] {
+            for f in desktop.iter().chain(elsewhere.iter()) { assert!(!cleared(&s, f), "{s:?} must not clear {f:?}"); }
+        }
     }
 
     #[test]
@@ -1958,6 +2219,32 @@ mod tests {
         let ev = events_of(&mut e, "make p");
         let Event::Failed { files, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
         assert!(files.iter().all(|f| !f.path.ends_with("LAST_RUN.md")), "{files:?}");
+    }
+
+    /// 2a §7: the windows a job worked are the ones it looked into, each once, from the steps
+    /// that succeeded — nothing is stored on the job for it. The `open_app` in the script is a
+    /// desktop-entry id, not a window name: listing it too named one window twice.
+    #[test]
+    fn done_lists_the_windows_the_job_looked_into() {
+        let look = |w: &str| Action::Look { window: Some(w.into()), find: None };
+        let (mut e, _, _) = engine_with(vec![
+            Move::Housekeep { goal: "take the editor".into(), understood: "Taking the editor".into(), remember: None }, plan(),
+            act(1, Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }),
+            act(1, look("Text Editor")), act(1, Action::Press { control: 1, name: "Save".into() }), act(1, look("Text Editor")),
+            act(1, look("")),   // "list the windows", written the 9B's way: not a window worked
+
+            done(Action::Read { control: 2, from_line: None, lines: None }),
+        ], "windows-worked");
+        let ev = e.handle_events("take my editor").unwrap();
+        let Event::Done { windows, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
+        assert_eq!(windows, &vec!["Text Editor".to_string()]);
+    }
+
+    #[test]
+    fn a_project_job_with_no_desktop_steps_lists_no_windows() {
+        let (mut e, _, _) = engine_with(happy_path(), "no-windows");
+        let ev = e.handle_events("make p").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { windows, .. } if windows.is_empty()), "{ev:?}");
     }
 
     #[test]

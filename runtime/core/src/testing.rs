@@ -15,6 +15,9 @@ pub struct Recorder {
     /// The privileged hand's own lists: a test can tell which lane ran an action.
     pub admin_calls: Rc<RefCell<Vec<Action>>>,
     pub admin_outcomes: Rc<RefCell<VecDeque<Outcome>>>,
+    /// The desktop hand's own lists, same shape.
+    pub desktop_calls: Rc<RefCell<Vec<Action>>>,
+    pub desktop_outcomes: Rc<RefCell<VecDeque<Outcome>>>,
     pub reversed: Rc<RefCell<Vec<UndoEntry>>>,
     /// Outcomes for `reverse`, in order; when empty every reversal succeeds. A failing
     /// reversal is the only way to test that undo reports it and still runs the rest.
@@ -77,12 +80,23 @@ impl Worker for AdminRecorder {
     }
 }
 
-/// Both lanes over one recorder, one pair per workspace the engine asks for.
+/// The desktop hand: records only — no bus in a unit test.
+pub struct DesktopRecorder(pub Recorder);
+
+impl Worker for DesktopRecorder {
+    fn run(&self, action: &Action) -> Outcome {
+        self.0.desktop_calls.borrow_mut().push(action.clone());
+        self.0.desktop_outcomes.borrow_mut().pop_front().unwrap_or(Outcome::ok("ok"))
+    }
+}
+
+/// All three lanes over one recorder, one triple per workspace the engine asks for.
 pub fn scripted_workers(rec: &Recorder) -> crate::engine::WorkerFactory {
     let rec = rec.clone();
     Box::new(move |ws| (
         Box::new(ScriptedWorker { rec: rec.clone(), ws: ws.to_path_buf() }) as Box<dyn Worker>,
         Box::new(AdminRecorder(rec.clone())) as Box<dyn Worker>,
+        Box::new(DesktopRecorder(rec.clone())) as Box<dyn Worker>,
     ))
 }
 
