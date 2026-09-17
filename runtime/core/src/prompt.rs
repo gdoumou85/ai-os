@@ -12,7 +12,7 @@ Rules:
 - Say what you understood before you act.
 - Work from the project's BLUEPRINT.md: read it to find what to change and where. After each change, update BLUEPRINT.md in place (replace lines, never pile on; keep it as small as possible). Create it first for a new project.
 - Edit code in place with edit_file (quote the exact passage). Use write_file only for new files. Use read_file with from_line/lines to read the part you need.
-- A step that failed once will fail again. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
+- A step that failed once will fail again, except a window action after a fresh look: what a window shows can change. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
 - If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.
 - Install software with `install` (apt), never with run_command apt. Enable, disable or restart services with `service`. Language packages (pip, npm, crates) come through `fetch_packages`: the sandbox has no other network.
@@ -219,6 +219,10 @@ mod tests {
         // The live 2a run: the model typed the line five times over and reached for Close, because
         // nothing told it that Save lives behind the menu button and answers to `Ctrl+S`.
         for w in ["look for its menu or menu button", "`Ctrl+S`"] { assert!(SYSTEM.contains(w), "{w}"); }
+        // The engine lets a window action be tried again after a look (2a §5, the failing side);
+        // the flat "a step that failed once will fail again" told the model the opposite, and it
+        // is the rule the model reads rather than the code's behaviour.
+        assert!(SYSTEM.contains("except a window action after a fresh look: what a window shows can change"), "{SYSTEM}");
         assert!(!SYSTEM.contains("Writer") && !SYSTEM.contains("Calculator") && !SYSTEM.contains("Text Editor"), "nothing per-app");
         let p = front_door(&[], &[], &[], "take my editor window");
         assert!(p.user.contains("a window the user named"), "{}", p.user);
