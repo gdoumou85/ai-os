@@ -83,6 +83,11 @@ fn role_name(role: u32) -> &'static str {
     }
 }
 
+/// Where `open_app` will look for a `.desktop` file. The system folders only: a launcher the AI
+/// could write to its own home (`/home/ai/.local/share/applications`) would run whatever it
+/// named, as user `ai`, outside the sandbox — `open_app` is the one action that starts a program.
+const APP_DIRS: [&str; 2] = ["/usr/share/applications", "/usr/local/share/applications"];
+
 const REGISTRY: &str = "org.a11y.atspi.Registry";
 const ROOT: &str = "/org/a11y/atspi/accessible/root";
 /// The walk's node bound, as the Phase 0 probe's. ponytail: one round-trip per node; the
@@ -311,17 +316,21 @@ impl DesktopWorker {
             Action::OpenApp { name, visible } => {
                 if !valid_app_name(name) { return Err(format!("invalid application name: {name}")); }
                 let entry = format!("{name}.desktop");
-                let dirs = ["/usr/share/applications", "/usr/local/share/applications", "/home/ai/.local/share/applications"];
-                if !dirs.iter().any(|d| std::path::Path::new(d).join(&entry).is_file()) {
-                    return Err(format!("no application called {name} is installed (no {entry} in the application folders)"));
+                if !APP_DIRS.iter().any(|d| std::path::Path::new(d).join(&entry).is_file()) {
+                    return Err(format!("no application called {name} is installed (no {entry} in the system application folders)"));
                 }
                 let display = if *visible { &displays.visible } else { &displays.invisible };
                 let conn = st.conn()?.clone();
                 let before = windows(&conn)?.len();
-                std::process::Command::new("gtk-launch").arg(name)
+                // `.status()`, not `.spawn()`: `gtk-launch` hands the app to the session and exits
+                // at once, so a spawned one is a zombie per launch for the life of the engine.
+                let ran = std::process::Command::new("gtk-launch").arg(name)
                     .env("WAYLAND_DISPLAY", display).env("GNOME_ACCESSIBILITY", "1").env_remove("DISPLAY")
                     .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-                    .spawn().map_err(|e| format!("could not launch {name}: {e}"))?;
+                    .status().map_err(|e| format!("could not launch {name}: {e}"))?;
+                if !ran.success() {
+                    return Err(format!("could not launch {name}: gtk-launch exited {}", ran.code().unwrap_or(-1)));
+                }
                 let t = Instant::now();
                 while t.elapsed() < Duration::from_secs(10) {
                     std::thread::sleep(Duration::from_millis(500));
@@ -451,6 +460,19 @@ mod tests {
             assert_eq!(out.detail, format!("invalid application name: {bad}"), "{bad}");
         }
         assert!(w.0.borrow().conn.is_none());
+    }
+
+    /// `open_app` is the one action that starts a program, and it starts whatever a `.desktop`
+    /// file in its search path says to. `/home/ai/.local/share/applications` was in that path:
+    /// the AI's own home, which an approved `write_file` reaches, so a launcher it wrote there
+    /// would run as user `ai` with nothing of the sandbox around it.
+    #[test]
+    fn a_desktop_entry_is_only_ever_read_out_of_a_folder_the_ai_cannot_write() {
+        assert_eq!(APP_DIRS, ["/usr/share/applications", "/usr/local/share/applications"]);
+        for d in APP_DIRS {
+            assert!(d.starts_with("/usr/"), "{d} is not a system folder");
+            assert!(!d.contains("/home/") && !d.contains(".local"), "{d} is somewhere the AI can write");
+        }
     }
 
     /// "look first" was true and useless: the model had just looked — at the window *list*, which
