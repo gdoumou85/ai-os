@@ -7,6 +7,7 @@ use aios_core::service;
 use aios_core::store::Store;
 use aios_proto::{Client, Event};
 use executor::admin::AdminWorker;
+use executor::atspi::{DesktopState, DesktopWorker};
 use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -21,9 +22,10 @@ fn start_service() -> PathBuf {
     let sock = dir.join("ai-os.sock");
     let listener = service::bind(&sock).unwrap();
     std::thread::spawn(move || service::run(listener, Box::new(|sink| {
+        // Built on the engine thread: the state is an `Rc`, so it never crosses one.
+        let desktop = DesktopState::for_model(8192);
         Engine::new(Store::open(DB).unwrap(), OllamaModel::local("qwen3.5:9b"), PathBuf::from("/data/projects"), Some(DB.into()),
-            // Task 5 puts the real hand here.
-            Box::new(|ws| (Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>, Box::new(AdminWorker) as Box<dyn Worker>, Box::new(executor::worker::FakeWorker::new(false)) as Box<dyn Worker>)),
+            Box::new(move |ws| (Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>, Box::new(AdminWorker) as Box<dyn Worker>, Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>)),
             PathBuf::from("/data/housekeeping"), PathBuf::from("/data/snapshots")).with_sink(sink)
     })));
     let t = Instant::now();

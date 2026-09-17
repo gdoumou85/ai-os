@@ -6,6 +6,7 @@ use aios_core::job::{Job, State};
 use aios_core::model::OllamaModel;
 use aios_core::store::Store;
 use executor::admin::AdminWorker;
+use executor::atspi::{DesktopState, DesktopWorker};
 use executor::log::ActionLog;
 use executor::worker::{SandboxWorker, Worker};
 use std::path::{Path, PathBuf};
@@ -16,12 +17,12 @@ const WORK: &str = "/data/work";
 
 fn engine() -> Engine<OllamaModel> {
     let store = Store::open(DB).unwrap();
+    let desktop = DesktopState::for_model(8192);
     Engine::new(store, OllamaModel::local("qwen3.5:9b"), PathBuf::from("/data/projects"), Some(DB.into()),
-        Box::new(|ws| (
+        Box::new(move |ws| (
             Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
             Box::new(AdminWorker) as Box<dyn Worker>,
-            // Task 5 puts the real hand here.
-            Box::new(executor::worker::FakeWorker::new(false)) as Box<dyn Worker>,
+            Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>,
         )),
         PathBuf::from("/data/housekeeping"),
         PathBuf::from("/data/snapshots"))

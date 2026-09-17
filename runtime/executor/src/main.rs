@@ -2,7 +2,8 @@ use executor::action::Action;
 use executor::executor::{ExecOutcome, Executor};
 use executor::log::ActionLog;
 use executor::admin::AdminWorker;
-use executor::worker::{FakeWorker, SandboxWorker, Worker};
+use executor::atspi::{DesktopState, DesktopWorker};
+use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 
 fn main() {
@@ -12,8 +13,8 @@ fn main() {
     std::fs::create_dir_all(&ws).ok();
     let sandbox: Box<dyn Worker> = Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.clone() });
     let admin: Box<dyn Worker> = Box::new(AdminWorker);
-    // Task 5 puts the real hand here.
-    let desktop: Box<dyn Worker> = Box::new(FakeWorker::new(false));
+    // Task 7 swaps the 8192 for the model's own context size.
+    let desktop: Box<dyn Worker> = Box::new(DesktopWorker(DesktopState::for_model(8192)));
     let log = ActionLog::open("/data/ai-os.db").expect("open log");
     let exec = Executor::new(sandbox, admin, desktop, log, ws);
     match exec.execute("demo", &action, false).expect("execute") {

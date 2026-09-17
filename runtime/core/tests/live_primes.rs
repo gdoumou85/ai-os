@@ -7,6 +7,7 @@ use aios_core::model::OllamaModel;
 use aios_core::store::Store;
 use executor::action::Action;
 use executor::admin::AdminWorker;
+use executor::atspi::{DesktopState, DesktopWorker};
 use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 
@@ -18,12 +19,12 @@ fn the_model_writes_and_proves_a_primes_script() {
     let _ = std::fs::remove_file(db);
     let _ = std::fs::remove_dir_all(root.join("primes"));
     let store = Store::open(db).unwrap();
+    let desktop = DesktopState::for_model(8192);
     let mut e = Engine::new(store, OllamaModel::local("qwen3.5:9b"), root.clone(), Some(db.into()),
-        Box::new(|ws| (
+        Box::new(move |ws| (
             Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
             Box::new(AdminWorker) as Box<dyn Worker>,
-            // Task 5 puts the real hand here.
-            Box::new(executor::worker::FakeWorker::new(false)) as Box<dyn Worker>,
+            Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>,
         )),
         PathBuf::from("/data/housekeeping"),
         PathBuf::from("/data/snapshots"));

@@ -4,6 +4,7 @@ use aios_core::model::OllamaModel;
 use aios_core::service;
 use aios_core::store::Store;
 use executor::admin::AdminWorker;
+use executor::atspi::{DesktopState, DesktopWorker};
 use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 
@@ -16,12 +17,14 @@ fn main() {
     eprintln!("ai-os-engine listening on {}", sock.display());
     service::run(listener, Box::new(move |sink| {
         let store = Store::open(&db).expect("open store");
+        // One state for the whole process: the accessibility bus connection and the id table
+        // outlive any one job. Task 7 swaps the 8192 for the model's own context size.
+        let desktop = DesktopState::for_model(8192);
         Engine::new(store, OllamaModel::local(&model), root, Some(db),
-            Box::new(|ws| (
+            Box::new(move |ws| (
                 Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
                 Box::new(AdminWorker) as Box<dyn Worker>,
-                // Task 5 puts the real hand here.
-                Box::new(executor::worker::FakeWorker::new(false)) as Box<dyn Worker>,
+                Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>,
             )),
             PathBuf::from(HOUSEKEEPING_DIR),
             PathBuf::from("/data/snapshots")).with_sink(sink)
