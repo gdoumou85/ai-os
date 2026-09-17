@@ -17,9 +17,13 @@ pub fn describe(action: &Action) -> String {
         Action::MakeDir { path } => format!("made folder {path}"),
         Action::FetchPackages { manager, packages } => format!("fetched {} with {}", packages.join(" "), match manager { Manager::Pip => "pip", Manager::Npm => "npm", Manager::Cargo => "cargo" }),
         Action::SetSetting { key, value } => format!("set {key} = {value}"),
-        Action::Look { window: None, .. } => "looked at the open windows".into(),
-        Action::Look { window: Some(w), find: None } => format!("looked at {w}"),
-        Action::Look { window: Some(w), find: Some(f) } => format!("looked for {f} in {w}"),
+        // A blank name is no window — the hand reads it as none — so the card must not say
+        // "looked at ", as the live 2a run's own Done check line did.
+        Action::Look { window, find } => match (window.as_deref().map(str::trim).filter(|w| !w.is_empty()), find) {
+            (None, _) => "looked at the open windows".into(),
+            (Some(w), None) => format!("looked at {w}"),
+            (Some(w), Some(f)) => format!("looked for {f} in {w}"),
+        },
         Action::Press { name, .. } => format!("pressed {name}"),
         Action::Type { text, control, .. } => format!("typed {} into control {control}", plural(text.lines().count().max(1), "line")),
         Action::Read { control, .. } => format!("read control {control}"),
@@ -59,6 +63,12 @@ mod tests {
         assert_eq!(describe(&Action::Press { control: 4, name: "Bold".into() }), "pressed Bold");
         assert_eq!(describe(&Action::Type { control: 2, text: "a\nb".into(), replace: false }), "typed 2 lines into control 2");
         assert_eq!(describe(&Action::Look { window: Some("Text Editor".into()), find: None }), "looked at Text Editor");
+        assert_eq!(describe(&Action::Look { window: None, find: None }), "looked at the open windows");
+        // The 9B writes `window: ""` for "list the windows" and the hand obliges, so the card
+        // must read like the one above, not "looked at ".
+        assert_eq!(describe(&Action::Look { window: Some(String::new()), find: None }), "looked at the open windows");
+        assert_eq!(describe(&Action::Look { window: Some("  ".into()), find: Some("save".into()) }), "looked at the open windows");
+        assert_eq!(describe(&Action::Look { window: Some("Calculator".into()), find: Some("save".into()) }), "looked for save in Calculator");
         assert_eq!(describe(&Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }), "opened org.gnome.Calculator");
     }
 
