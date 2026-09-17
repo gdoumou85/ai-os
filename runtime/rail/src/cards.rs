@@ -13,7 +13,7 @@ pub enum CardKind {
     Building { name: String, understood: String, steps: Vec<StepLine>, collapsed: bool },
     NeedsAnswer { questions: Vec<String> },
     NeedsOk { what: String, why: String },
-    Done { text: String, check: Option<String>, files: Vec<ChangedFile> },
+    Done { text: String, check: Option<String>, files: Vec<ChangedFile>, windows: Vec<String> },
     Failed { text: String, files: Vec<ChangedFile> },
     Stopped { text: String, files: Vec<ChangedFile> },
     Undone { lines: Vec<aios_proto::UndoLine>, notes: Vec<String> },
@@ -82,7 +82,12 @@ impl Cards {
             },
             Event::NeedsAnswer { job_id, questions } => self.push(Card { kind: CardKind::NeedsAnswer { questions: questions.clone() }, text: questions.join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
             Event::NeedsOk { job_id, what, why } => self.push(Card { kind: CardKind::NeedsOk { what: what.clone(), why: why.clone() }, text: format!("{what}\n{why}"), buttons: vec![btn("Yes", "yes"), btn("No", "no")], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
-            Event::Done { job_id, text, check, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Done { text: text.clone(), check: check.clone(), files: files.clone() }, text, files, job_id))); ch }
+            Event::Done { job_id, text, check, files, windows } => {
+                let mut ch = self.close_building();
+                let shown = match aios_proto::window_note(windows) { Some(n) => format!("{text}\n{n}"), None => text.clone() };
+                ch.extend(self.push(result_card(CardKind::Done { text: text.clone(), check: check.clone(), files: files.clone(), windows: windows.clone() }, &shown, files, job_id)));
+                ch
+            }
             Event::Failed { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Failed { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
             Event::Stopped { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Stopped { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
             Event::Undone { job_id, lines, notes, .. } => self.push(Card { kind: CardKind::Undone { lines: lines.clone(), notes: notes.clone() }, text: lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),

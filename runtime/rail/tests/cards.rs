@@ -29,11 +29,11 @@ fn a_whole_job_becomes_the_right_cards() {
     assert_eq!(cards.list.len(), 5, "said, then the OK asked again as a new card");
 
     let files = vec![ChangedFile { path: "/data/p/a.py".into(), kind: FileKind::Text, size: 3 }, ChangedFile { path: "/data/p/pic.png".into(), kind: FileKind::Image, size: 9 }];
-    cards.apply(&Event::Done { job_id: j(), text: "finished".into(), check: Some("ran python3 a.py: ok".into()), files: files.clone() });
+    cards.apply(&Event::Done { job_id: j(), text: "finished".into(), check: Some("ran python3 a.py: ok".into()), files: files.clone(), windows: vec![] });
     let CardKind::Building { collapsed, .. } = &cards.list[b].kind else { panic!() };
     assert!(collapsed);
     let done = cards.list.last().unwrap();
-    let CardKind::Done { text, check, files: f } = &done.kind else { panic!() };
+    let CardKind::Done { text, check, files: f, .. } = &done.kind else { panic!() };
     assert_eq!((text.as_str(), check.as_deref()), ("finished", Some("ran python3 a.py: ok")));
     assert_eq!(f, &files);
     assert_eq!(done.buttons, vec![Button { label: "Undo".into(), say: "undo".into() }]);
@@ -43,6 +43,17 @@ fn a_whole_job_becomes_the_right_cards() {
     cards.apply(&Event::Undone { job_id: j(), name: "p".into(), lines: vec![UndoLine { text: "put back a.py".into(), ok: true }, UndoLine { text: "could not".into(), ok: false }], notes: vec!["Not covered: x".into()] });
     let CardKind::Undone { lines, notes } = &cards.list.last().unwrap().kind else { panic!() };
     assert_eq!(lines.len(), 2); assert_eq!(notes, &vec!["Not covered: x".to_string()]);
+}
+
+#[test]
+fn a_window_job_done_card_names_the_window_and_says_it_cannot_undo() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::Understood { job_id: j(), name: "housekeeping".into(), text: "Taking your editor".into(), housekeeping: true });
+    cards.apply(&Event::Done { job_id: j(), text: "Added the line and saved.".into(), check: None, files: vec![], windows: vec!["Text Editor".into()] });
+    let c = cards.list.last().unwrap();
+    assert!(matches!(&c.kind, CardKind::Done { windows, .. } if windows == &vec!["Text Editor".to_string()]));
+    assert!(c.text.ends_with("What I did inside Text Editor can't be undone by me."), "{}", c.text);
+    assert!(c.opens.is_empty());
 }
 
 #[test]

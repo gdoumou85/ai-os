@@ -448,7 +448,7 @@ impl<M: Model> Engine<M> {
         let ev = match state {
             State::Done => {
                 let check = job.steps.last().map(|s| format!("{}: {}", describe(&s.action), if s.ok { "ok" } else { "failed" }));
-                Event::Done { job_id, text, check, files }
+                Event::Done { job_id, text, check, files, windows: vec![] }
             }
             State::Cancelled => Event::Stopped { job_id, text, files },
             // `finish` is only ever called with done/cancelled/failed; anything else ended badly.

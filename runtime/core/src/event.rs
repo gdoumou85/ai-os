@@ -33,8 +33,9 @@ fn plural(n: usize, w: &str) -> String { if n == 1 { format!("1 {w}") } else { f
 /// never showed steps, and the rail is what draws them.
 pub fn lines(event: &Event) -> Vec<String> {
     match event {
-        Event::Said { text } | Event::Understood { text, .. } | Event::Done { text, .. }
+        Event::Said { text } | Event::Understood { text, .. }
         | Event::Failed { text, .. } | Event::Stopped { text, .. } | Event::Busy { text, .. } => vec![text.clone()],
+        Event::Done { text, windows, .. } => { let mut v = vec![text.clone()]; v.extend(aios_proto::window_note(windows)); v }
         Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } => vec![],
         Event::NeedsAnswer { questions, .. } => questions.iter().map(|q| format!("Question: {q}")).collect(),
         Event::NeedsOk { why, .. } => vec![format!("Needs your OK: {why}. Say yes to allow it, no to refuse, or ask me about it.")],
@@ -59,5 +60,13 @@ mod tests {
         assert_eq!(describe(&Action::Type { control: 2, text: "a\nb".into(), replace: false }), "typed 2 lines into control 2");
         assert_eq!(describe(&Action::Look { window: Some("Text Editor".into()), find: None }), "looked at Text Editor");
         assert_eq!(describe(&Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }), "opened org.gnome.Calculator");
+    }
+
+    #[test]
+    fn the_terminal_prints_the_undo_note_after_a_window_job() {
+        let e = Event::Done { job_id: "j".into(), text: "done".into(), check: None, files: vec![], windows: vec!["Calculator".into()] };
+        assert_eq!(lines(&e), vec!["done".to_string(), "What I did inside Calculator can't be undone by me.".to_string()]);
+        let plain = Event::Done { job_id: "j".into(), text: "done".into(), check: None, files: vec![], windows: vec![] };
+        assert_eq!(lines(&plain), vec!["done".to_string()], "no windows, no note: 1d's lines unchanged");
     }
 }
