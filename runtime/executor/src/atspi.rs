@@ -220,6 +220,15 @@ fn renamed(id: u32, is_now: &str, echoed: &str, carries_it: Option<u32>) -> Stri
     }
 }
 
+/// The name decision behind `resolve`, on its own: the control the bus answers with has to be
+/// the one the model meant. The echoed name is what it meant when it gave one, and the table's
+/// stored name — what the id was handed out as — when it did not. `Err` carries the name that
+/// was wanted, for the refusal to point at.
+fn name_check<'a>(live: &str, echoed: Option<&'a str>, stored: &'a str) -> Result<(), &'a str> {
+    let wanted = echoed.unwrap_or(stored);
+    if live == wanted { Ok(()) } else { Err(wanted) }
+}
+
 /// The window a `look` actually asks for: none, or a name with something in it. The live run's
 /// 9B wrote `window: ""` when it meant "list the windows", and a blank name picks out nothing.
 fn asked_window(window: &Option<String>) -> Option<&str> {
@@ -274,16 +283,23 @@ impl DesktopWorker {
         }).map(|(id, _)| id)
     }
 
-    /// The object behind an id, after the echoed name (if any) and liveness are checked.
+    /// The object behind an id, after liveness and the name are checked — against the bus, not
+    /// the table. The toolkits recycle object paths, so an id the table still holds can point at
+    /// a live control that is not the one it was handed out for: the acceptance's run 6 watched
+    /// GNOME Calculator do it four times in one job, and a `press` named `4` landing on `Close`
+    /// is the same slip with the user's unsaved work behind it. `type` and `read` echo nothing,
+    /// so for those the name the id was handed out under is what the bus has to still say.
     fn resolve(st: &DesktopState, conn: &Connection, id: u32, echoed: Option<&str>) -> Result<Ref, String> {
         let e = st.ids.get(id).ok_or_else(|| never_handed_out(id))?;
-        if let Some(n) = echoed {
-            if n != e.name { return Err(renamed(id, &e.name, n, Self::named_now(st, conn, n))); }
-        }
         let r: Ref = (e.app.clone(), OwnedObjectPath::try_from(e.path.as_str()).map_err(|e| e.to_string())?);
-        match acc(conn, &r).ok().and_then(|a| a.get_role().ok()) {
-            Some(_) => Ok(r),
-            None => Err("that control is gone; look again".into()),
+        let a = acc(conn, &r).ok().filter(|a| a.get_role().is_ok())
+            .ok_or_else(|| "that control is gone; look again".to_string())?;
+        // `control_name`, the same helper `read_node` uses, so a nameless control is compared
+        // under the shortcut name the look handed the model.
+        let live = control_name(&a);
+        match name_check(&live, echoed, &e.name) {
+            Ok(()) => Ok(r),
+            Err(wanted) => Err(renamed(id, &live, wanted, Self::named_now(st, conn, wanted))),
         }
     }
 
@@ -466,6 +482,19 @@ mod tests {
         // Nothing carries that name: another id is a guess, so it is sent to `find` instead.
         assert_eq!(renamed(48, "5", "=", None), "control 48 is named 5 now, and no control called = has been handed out; look at the window again with find==");
         assert_eq!(renamed(7, "", "Save", None), "control 7 has no name now, and no control called Save has been handed out; look at the window again with find=Save");
+    }
+
+    /// The id table is not proof of what an id points at: object paths get recycled (run 6 of
+    /// the acceptance), so the live name is the only thing worth comparing against. A press
+    /// echoing the name the table still holds is exactly the case that used to slip through.
+    #[test]
+    fn a_control_is_checked_against_the_name_the_bus_gives_it_now() {
+        assert_eq!(name_check("4", Some("4"), "4"), Ok(()), "the echoed name is the live one");
+        assert_eq!(name_check("4", Some("4"), "0"), Ok(()), "the live name wins over a stale table row");
+        assert_eq!(name_check("Close", Some("4"), "4"), Err("4"), "the table says 4 and the bus says Close");
+        assert_eq!(name_check("first line", None, "first line"), Ok(()), "type and read echo nothing");
+        assert_eq!(name_check("Close", None, "first line"), Err("first line"), "a recycled id is not typed into");
+        assert_eq!(name_check("", None, ""), Ok(()), "a nameless control the look also found nameless");
     }
 
     /// `look` with `window: ""` is what the 9B wrote for "list the windows"; it used to be
