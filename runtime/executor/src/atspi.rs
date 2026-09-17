@@ -415,6 +415,22 @@ mod tests {
         assert!(!names_window(app, title, "  "), "an empty name picks out nothing, never everything");
     }
 
+    /// `classify` lets every `open_app` through, so the worker is the only thing standing between
+    /// a malformed name and `gtk-launch` — and it must refuse before it reaches for the bus, or
+    /// the refusal would depend on a session being up. No accessibility bus is touched here.
+    #[test]
+    fn the_worker_refuses_a_bad_app_name_before_it_opens_a_connection() {
+        let w = DesktopWorker(DesktopState::new(40, Displays { invisible: "wayland-ai".into(), visible: "wayland-0".into() }));
+        let out = w.run(&Action::OpenApp { name: "../x".into(), visible: false });
+        assert!(!out.ok && out.detail == "invalid application name: ../x", "{}", out.detail);
+        assert!(w.0.borrow().conn.is_none(), "it opened a connection to refuse a name");
+        for bad in ["", ".hidden", "org gnome Calculator", "org.gnome.Calculator; rm -rf /"] {
+            let out = w.run(&Action::OpenApp { name: bad.into(), visible: true });
+            assert_eq!(out.detail, format!("invalid application name: {bad}"), "{bad}");
+        }
+        assert!(w.0.borrow().conn.is_none());
+    }
+
     /// The wrapper refusal, the half the gated live check cannot pin headlessly.
     #[test]
     fn a_wrapper_refusal_says_which_control_does_have_the_action() {

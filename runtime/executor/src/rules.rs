@@ -226,7 +226,11 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
             Some(why) => Risk::NeedsConfirm(format!("press {name}: it {why}")),
             None => Risk::Auto,
         },
-        Action::OpenApp { name, .. } => if valid_app_name(name) { Risk::Auto } else { Risk::NeedsConfirm(format!("invalid application name: {name}")) },
+        // `Auto`, whatever the name is. A malformed name is a mistake to report, not a risk to
+        // weigh: the worker checks it (and the `.desktop` file) before it touches anything, so a
+        // yes could never make it work — and the live 2a run showed an unattended job stalling on
+        // exactly that OK after the model reached for an app by its window title.
+        Action::OpenApp { .. } => Risk::Auto,
     }
 }
 
@@ -409,11 +413,13 @@ mod tests {
     }
 
     #[test]
-    fn the_other_desktop_actions_are_free_and_open_app_checks_its_name() {
+    fn the_other_desktop_actions_are_free_and_the_worker_checks_an_app_name() {
         assert_eq!(classify(&Action::Look { window: None, find: None }, &ws()), Risk::Auto);
         assert_eq!(classify(&Action::Type { control: 1, text: "x".into(), replace: false }, &ws()), Risk::Auto);
         assert_eq!(classify(&Action::Read { control: 1, from_line: None, lines: None }, &ws()), Risk::Auto);
         assert_eq!(classify(&Action::OpenApp { name: "org.gnome.Calculator".into(), visible: true }, &ws()), Risk::Auto);
-        assert!(matches!(classify(&Action::OpenApp { name: "../x".into(), visible: false }, &ws()), Risk::NeedsConfirm(_)));
+        // A bad name is a failed step, not a question: the worker refuses it before it touches
+        // anything, so a yes could never make it work and an unattended job must not stop for one.
+        assert_eq!(classify(&Action::OpenApp { name: "../x".into(), visible: false }, &ws()), Risk::Auto);
     }
 }
