@@ -163,7 +163,11 @@ pub const DESTROYS_WORK: [&str; 7] = ["close", "quit", "discard", "don't save", 
 pub fn risky_press(name: &str) -> Option<&'static str> {
     // Curly apostrophes and case folded; then whole-word containment on a padded string.
     let folded: String = name.to_lowercase().replace(['’', '‘'], "'");
-    let words: Vec<&str> = folded.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).collect();
+    // The apostrophe stays inside a token so "don't save" survives the split, and comes off its
+    // ends so a quoted name does not: a control called `‘Send’` folded to the token `'send'`,
+    // which matched nothing at all and went through as Auto.
+    let words: Vec<&str> = folded.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .map(|w| w.trim_matches('\'')).filter(|w| !w.is_empty()).collect();
     let has = |phrase: &str| {
         let p: Vec<&str> = phrase.split(' ').collect();
         words.windows(p.len()).any(|w| w == p.as_slice())
@@ -402,10 +406,14 @@ mod tests {
         let press = |n: &str| Action::Press { control: 1, name: n.into() };
         assert_eq!(classify(&press("Bold"), &ws()), Risk::Auto);
         assert_eq!(classify(&press("File"), &ws()), Risk::Auto);
-        for n in ["Send", "send email", "Publish", "Upload", "Share", "Pay now", "Buy", "Submit", "Order"] {
+        // A quoted name is the same name: the apostrophes fold to `'` and come off the token's
+        // ends, or `‘Send’` reaches the word list as `'send'` and matches nothing.
+        for n in ["Send", "send email", "Publish", "Upload", "Share", "Pay now", "Buy", "Submit", "Order",
+                  "‘Send’", "'Send'", "Send ‘invoice’"] {
             assert!(matches!(classify(&press(n), &ws()), Risk::NeedsConfirm(r) if r.contains("leaves the machine")), "{n}");
         }
-        for n in ["Close", "Quit", "Discard", "Don't Save", "Don’t save", "Delete", "Revert", "Replace", "close window"] {
+        for n in ["Close", "Quit", "Discard", "Don't Save", "Don’t save", "Delete", "Revert", "Replace", "close window",
+                  "'Close'", "‘Don’t save’"] {
             assert!(matches!(classify(&press(n), &ws()), Risk::NeedsConfirm(r) if r.contains("unsaved work")), "{n}");
         }
         // A word inside another word is not the word: "Closed captions" is not Close.
