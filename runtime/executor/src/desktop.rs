@@ -36,6 +36,11 @@ impl IdTable {
         self.entries.len() as u32
     }
     pub fn get(&self, id: u32) -> Option<&Entry> { id.checked_sub(1).and_then(|i| self.entries.get(i as usize)) }
+    /// Every id handed out under this name, oldest first. GTK 4 lists one button twice — a
+    /// wrapper with no action and the real one behind it — so a refused press can say which.
+    pub fn named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = (u32, &'a Entry)> + 'a {
+        self.entries.iter().enumerate().filter(move |(_, e)| e.name == name).map(|(i, e)| (i as u32 + 1, e))
+    }
 }
 
 /// The context budget divided by 200, never below 20 (2a §4): 40 on the 8k workshop.
@@ -134,6 +139,10 @@ mod tests {
         assert_eq!(t.id_for(&a), 1, "same object, same id");
         assert_eq!(t.get(2).unwrap().name, "Save");
         assert!(t.get(3).is_none());
+        let mut twin = node("toggle button", "Save", true); twin.path = "/o/other".into();
+        assert_eq!(t.id_for(&twin), 3);
+        assert_eq!(t.named("Save").map(|(id, _)| id).collect::<Vec<_>>(), vec![2, 3], "both controls of that name");
+        assert_eq!(t.named("Nothing").count(), 0);
     }
 
     #[test]

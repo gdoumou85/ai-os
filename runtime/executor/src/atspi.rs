@@ -207,6 +207,20 @@ impl DesktopWorker {
         }
     }
 
+    /// The other control of this name that does have an action, if the bus knows one. GTK 4 lists
+    /// a menu button twice — a push-button wrapper with no action of its own and the toggle button
+    /// behind it that carries the real one — so a refusal that only says "no action" leaves the
+    /// model guessing, and the live run showed it guesses wrong (it invented key presses).
+    /// Only ever walked on the refusal path, so the extra calls cost a press that already failed.
+    fn pressable_twin(st: &DesktopState, conn: &Connection, control: u32, name: &str) -> Option<u32> {
+        st.ids.named(name).find(|(id, e)| *id != control && {
+            let Ok(path) = OwnedObjectPath::try_from(e.path.as_str()) else { return false };
+            ActionIfaceProxy::builder(conn).destination(e.app.clone()).and_then(|b| b.path(path))
+                .and_then(|b| b.cache_properties(zbus::proxy::CacheProperties::No).build())
+                .ok().and_then(|a| a.nactions().ok()).is_some_and(|n| n >= 1)
+        }).map(|(id, _)| id)
+    }
+
     /// The object behind an id, after the echoed name (if any) and liveness are checked.
     fn resolve(st: &DesktopState, conn: &Connection, id: u32, echoed: Option<&str>) -> Result<Ref, String> {
         let e = st.ids.get(id).ok_or_else(|| format!("control {id} was never handed out; look first"))?;
@@ -272,7 +286,10 @@ impl DesktopWorker {
                 // ever an answer the control gave.
                 match a.nactions() {
                     Ok(n) if n >= 1 => {}
-                    Ok(_) => return Err(format!("{name} has no action to press")),
+                    Ok(_) => return Err(match Self::pressable_twin(&st, &conn, *control, name) {
+                        Some(other) => format!("{name} has no action to press; the other control named {name} is {other} — press that one"),
+                        None => format!("{name} has no action to press"),
+                    }),
                     Err(e) => return Err(format!("could not ask {name} for its actions: {e}")),
                 }
                 a.do_action(0).map_err(|e| format!("press failed: {e}"))?;

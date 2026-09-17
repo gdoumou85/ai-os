@@ -37,9 +37,11 @@ fn opens_an_editor_looks_types_and_reads_back() {
         (id.parse().unwrap(), name.to_string())
     };
     let (wrapper, wrapper_name) = control("[push button]");
-    let dead = w.run(&Action::Press { control: wrapper, name: wrapper_name.clone() });
-    assert!(!dead.ok && dead.detail == format!("{wrapper_name} has no action to press"), "{}", dead.detail);
     let (id, name) = control("[toggle button]");
+    let dead = w.run(&Action::Press { control: wrapper, name: wrapper_name.clone() });
+    // The refusal names the one to press instead, or the model guesses (the live 2a run guessed
+    // key presses and gave up).
+    assert!(!dead.ok && dead.detail == format!("{wrapper_name} has no action to press; the other control named {wrapper_name} is {id} — press that one"), "{}", dead.detail);
     let pressed = w.run(&Action::Press { control: id, name: name.clone() });
     assert!(pressed.ok && pressed.detail == format!("pressed {name}"), "{}", pressed.detail);
     println!("{}", pressed.detail);
