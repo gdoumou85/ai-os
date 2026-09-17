@@ -1,0 +1,153 @@
+//! The desktop hand's pure half (2a design §3–§4): what a window's tree becomes for the model,
+//! and the id table. No bus here; `atspi.rs` fills `Node`s from the real one.
+
+/// One accessible object, as much of it as the hand reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Node {
+    pub app: String,
+    pub path: String,
+    pub role: String,
+    pub name: String,
+    pub showing: bool,
+    pub sensitive: bool,
+    pub editable: bool,
+    pub checked: bool,
+    pub focused: bool,
+    /// The first 60 characters of a text control's contents, when it has any.
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry { pub app: String, pub path: String, pub name: String }
+
+/// Short ids for the model, one per object for the life of the process; never reused, never
+/// cleared (2a §3: an id is only ever the object it was handed out for).
+#[derive(Debug, Default)]
+pub struct IdTable { entries: Vec<Entry> }
+
+impl IdTable {
+    pub fn new() -> Self { Self::default() }
+    pub fn id_for(&mut self, n: &Node) -> u32 {
+        if let Some(i) = self.entries.iter().position(|e| e.app == n.app && e.path == n.path) {
+            self.entries[i].name = n.name.clone();
+            return i as u32 + 1;
+        }
+        self.entries.push(Entry { app: n.app.clone(), path: n.path.clone(), name: n.name.clone() });
+        self.entries.len() as u32
+    }
+    pub fn get(&self, id: u32) -> Option<&Entry> { id.checked_sub(1).and_then(|i| self.entries.get(i as usize)) }
+}
+
+/// The context budget divided by 200, never below 20 (2a §4): 40 on the 8k workshop.
+pub fn look_cap(context_tokens: usize) -> usize { (context_tokens / 200).max(20) }
+
+/// The roles the model can do something with or learn something from.
+const INTERESTING: [&str; 21] = [
+    "push button", "toggle button", "button", "check box", "radio button", "menu", "menu item", "check menu item",
+    "radio menu item", "entry", "password text", "text", "paragraph", "document text", "combo box", "page tab",
+    "label", "spin button", "slider", "link", "list item",
+];
+
+/// Interactive and readable controls only, showing only, the focused one first, then tree order;
+/// `find` keeps those whose name or role contains it (case-insensitive). Long labels are furniture.
+pub fn select<'a>(nodes: &'a [Node], find: Option<&str>) -> Vec<&'a Node> {
+    let f = find.map(|s| s.to_lowercase());
+    let v: Vec<&'a Node> = nodes.iter().filter(|n| n.showing && INTERESTING.contains(&n.role.as_str()))
+        .filter(|n| n.role != "label" || n.name.chars().count() <= 80)
+        .filter(|n| f.as_ref().map_or(true, |f| n.name.to_lowercase().contains(f) || n.role.to_lowercase().contains(f)))
+        .collect();
+    // ponytail: stable partition keeps tree order within each half.
+    let (focused, rest): (Vec<&'a Node>, Vec<&'a Node>) = v.into_iter().partition(|n| n.focused);
+    focused.into_iter().chain(rest).collect()
+}
+
+/// The text the model reads for `look` on a window.
+pub fn render_look(window: &str, chosen: &[&Node], ids: &mut IdTable, cap: usize) -> String {
+    let mut out = format!("controls of {window}:\n");
+    for n in chosen.iter().take(cap) {
+        let id = ids.id_for(n);
+        let mut flags = vec![];
+        if n.checked { flags.push("checked"); }
+        if n.focused { flags.push("focused"); }
+        if n.editable { flags.push("editable"); }
+        if !n.sensitive { flags.push("disabled"); }
+        let flags = if flags.is_empty() { String::new() } else { format!(" ({})", flags.join(", ")) };
+        match &n.text {
+            Some(t) if n.name.is_empty() => out.push_str(&format!("{id} [{}] {:?}{flags}\n", n.role, t)),
+            Some(t) => out.push_str(&format!("{id} [{}] {} {:?}{flags}\n", n.role, n.name, t)),
+            None => out.push_str(&format!("{id} [{}] {}{flags}\n", n.role, n.name)),
+        }
+    }
+    if chosen.len() > cap { out.push_str(&format!("{} more, narrow with find\n", chosen.len() - cap)); }
+    out
+}
+
+/// Where `open_app` puts a window (2a §5): the invisible session unless the user asked to see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Displays { pub invisible: String, pub visible: String }
+
+impl Displays {
+    pub fn from_env() -> Self {
+        Self {
+            invisible: std::env::var("AI_OS_DISPLAY_INVISIBLE").unwrap_or_else(|_| "wayland-ai".into()),
+            visible: std::env::var("AI_OS_DISPLAY_VISIBLE").unwrap_or_else(|_| "wayland-0".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(role: &str, name: &str, showing: bool) -> Node {
+        Node { app: "app".into(), path: format!("/o/{role}/{name}"), role: role.into(), name: name.into(), showing, sensitive: true, editable: false, checked: false, focused: false, text: None }
+    }
+
+    #[test]
+    fn the_cap_follows_the_context_and_never_drops_below_twenty() {
+        assert_eq!(look_cap(8192), 40);
+        assert_eq!(look_cap(32768), 163);
+        assert_eq!(look_cap(1000), 20);
+    }
+
+    #[test]
+    fn select_keeps_controls_drops_furniture_and_puts_the_focused_one_first() {
+        let mut save = node("push button", "Save", true); save.focused = true;
+        let nodes = vec![node("panel", "", true), node("filler", "", true), node("push button", "Bold", true),
+                         node("menu item", "Paste", false), node("label", "1 word, 17 characters", true),
+                         node("label", &"x".repeat(200), true), save.clone(), node("text", "", true)];
+        let got: Vec<&str> = select(&nodes, None).iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(got, vec!["Save", "Bold", "1 word, 17 characters", ""], "focused first, then tree order; hidden menu item and long label dropped");
+        let found: Vec<&str> = select(&nodes, Some("bold")).iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(found, vec!["Bold"]);
+        let by_role: Vec<&str> = select(&nodes, Some("text")).iter().map(|n| n.role.as_str()).collect();
+        assert_eq!(by_role, vec!["text"], "find matches the role too");
+    }
+
+    #[test]
+    fn ids_are_stable_per_object_and_never_reused() {
+        let mut t = IdTable::new();
+        let a = node("push button", "Bold", true);
+        let b = node("push button", "Save", true);
+        assert_eq!(t.id_for(&a), 1);
+        assert_eq!(t.id_for(&b), 2);
+        assert_eq!(t.id_for(&a), 1, "same object, same id");
+        assert_eq!(t.get(2).unwrap().name, "Save");
+        assert!(t.get(3).is_none());
+    }
+
+    #[test]
+    fn render_caps_and_says_how_many_more() {
+        let mut t = IdTable::new();
+        let nodes: Vec<Node> = (0..5).map(|i| node("push button", &format!("B{i}"), true)).collect();
+        let chosen: Vec<&Node> = nodes.iter().collect();
+        let s = render_look("Editor", &chosen, &mut t, 3);
+        assert!(s.starts_with("controls of Editor:\n1 [push button] B0\n2 [push button] B1\n3 [push button] B2\n"), "{s}");
+        assert!(s.ends_with("2 more, narrow with find\n"), "{s}");
+        let mut checked = node("toggle button", "Bold", true); checked.checked = true; checked.focused = true;
+        let mut text = node("text", "", true); text.text = Some("hello world".into()); text.editable = true;
+        let s2 = render_look("Editor", &[&checked, &text], &mut t, 10);
+        assert!(s2.contains("[toggle button] Bold (checked, focused)"), "{s2}");
+        assert!(s2.contains(r#"[text] "hello world" (editable)"#), "{s2}");
+    }
+}
