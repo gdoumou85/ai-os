@@ -75,6 +75,7 @@ fn compact_action(action: &Action) -> String {
             let f: String = find.chars().take(60).collect();
             format!("edit_file {path} (find: {f})")
         }
+        Action::Type { control, text, .. } => format!("type into {control} ({} chars)", text.chars().count()),
         other => {
             let full = serde_json::to_string(other).unwrap_or_default();
             if full.chars().count() > 400 {

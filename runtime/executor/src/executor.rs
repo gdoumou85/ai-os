@@ -39,6 +39,8 @@ pub fn lane(action: &Action, workspace: &Path, approved: bool) -> Lane {
         // Listed, not `_`: a new action kind must fail to compile here rather than land
         // silently in the sandbox.
         Action::RunCommand { .. } | Action::HttpPost { .. } | Action::FetchPackages { .. } => Lane::Sandbox,
+        // Temporary: Task 2 gives the desktop hand its own lane.
+        Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. } => Lane::Sandbox,
     }
 }
 

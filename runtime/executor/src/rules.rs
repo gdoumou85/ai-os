@@ -199,6 +199,8 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
         }
         // A setting is a DB row, not a filesystem/process change — always reversible.
         Action::SetSetting { .. } => Risk::Auto,
+        // Temporary: Task 2 gives the desktop hand its real risk rule.
+        Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. } => Risk::Auto,
     }
 }
 

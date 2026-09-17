@@ -20,7 +20,12 @@ pub const MOVE_SCHEMA: &str = r##"{
       { "type":"object", "properties": { "kind": {"enum":["service"]}, "name": {"type":"string"}, "do": {"enum":["enable","disable","restart"]} }, "required":["kind","name","do"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["make_dir"]}, "path": {"type":"string"} }, "required":["kind","path"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["fetch_packages"]}, "manager": {"enum":["pip","npm","cargo"]}, "packages": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":10} }, "required":["kind","manager","packages"], "additionalProperties": false },
-      { "type":"object", "properties": { "kind": {"enum":["set_setting"]}, "key": {"enum":["projects_root"]}, "value": {"type":"string"} }, "required":["kind","key","value"], "additionalProperties": false }
+      { "type":"object", "properties": { "kind": {"enum":["set_setting"]}, "key": {"enum":["projects_root"]}, "value": {"type":"string"} }, "required":["kind","key","value"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["look"]}, "window": {"type":"string"}, "find": {"type":"string"} }, "required":["kind"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["press"]}, "control": {"type":"integer","minimum":1}, "name": {"type":"string"} }, "required":["kind","control","name"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["type"]}, "control": {"type":"integer","minimum":1}, "text": {"type":"string"}, "replace": {"type":"boolean"} }, "required":["kind","control","text"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["read"]}, "control": {"type":"integer","minimum":1}, "from_line": {"type":"integer","minimum":1}, "lines": {"type":"integer","minimum":1} }, "required":["kind","control"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["open_app"]}, "name": {"type":"string"}, "visible": {"type":"boolean"} }, "required":["kind","name"], "additionalProperties": false }
     ] }
   },
   "oneOf": [
@@ -75,6 +80,7 @@ mod tests {
         assert_eq!(kinds, [
             "run_command", "read_file", "write_file", "edit_file", "http_post",
             "install", "remove", "service", "make_dir", "fetch_packages", "set_setting",
+            "look", "press", "type", "read", "open_app",
         ]);
     }
 }
