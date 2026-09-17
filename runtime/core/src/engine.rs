@@ -619,15 +619,19 @@ impl<M: Model> Engine<M> {
         }
     }
 
-    /// A step that just succeeded and leaves the world different from the one an earlier action
-    /// failed in, so that action is worth another try: a write or edit (something changed on
-    /// disk), and on the desktop a `look` — the ids it hands out are the very thing "control 1
-    /// was never handed out" complained of — or anything that moves a window on. The live 2a run
-    /// typed before looking, looked, typed again, and was then told its own successful action had
-    /// already failed. A `read` changes nothing and clears nothing.
-    fn clears_earlier_failures(action: &Action) -> bool {
-        Self::is_blueprint(action).is_some()
-            || matches!(action, Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::OpenApp { .. })
+    /// Whether a step that just succeeded leaves `failed` — one key out of `failed_actions` —
+    /// worth another try, because the world it failed in is gone.
+    ///
+    /// A blueprint write or edit changed the disk, which every action reads, so it clears them
+    /// all. A window action changed only the window: the ids a `look` hands out are the very
+    /// thing "control 1 was never handed out" complained of, and a press or an `open_app` moves
+    /// a window on — but none of that says anything about a `run_command` that failed in the
+    /// sandbox, so those keep 1d's "that exact action already failed" memory in a mixed job.
+    /// A `read` changes nothing and clears nothing.
+    fn cleared_by(succeeded: &Action, failed: &str) -> bool {
+        if Self::is_blueprint(succeeded).is_some() { return true; }
+        if matches!(succeeded, Action::Read { .. }) || !on_the_desktop(succeeded) { return false; }
+        serde_json::from_str::<Action>(failed).is_ok_and(|f| on_the_desktop(&f))
     }
 
     /// True when the user's stop has landed: the job is finished as Cancelled and reported.
@@ -750,9 +754,9 @@ impl<M: Model> Engine<M> {
                             None => {}
                         }
                     }
-                    // The world is not the one the earlier failure happened in, so re-running the
-                    // same action is legitimate (spike finding).
-                    if Self::clears_earlier_failures(&action) { job.failed_actions.clear(); }
+                    // The world is not the one those failures happened in, so re-running them is
+                    // legitimate (spike finding) — but only the ones this step's world covers.
+                    job.failed_actions.retain(|k| !Self::cleared_by(&action, k));
                 } else {
                     // Recorded even for a check (only the identical-action *lookup* above is
                     // check-exempt): a later `act` proposing this same action must still see why
@@ -1564,17 +1568,57 @@ mod tests {
         }
     }
 
-    /// The other half of the same rule: a `read` proves nothing changed, so it clears nothing.
+    /// The narrowing, through the front door. A window opening says nothing about a command the
+    /// sandbox refused, so 1d's lesson survives a mixed job: the command that failed is still
+    /// refused when it comes back unchanged, though a `look` succeeded in between.
     #[test]
-    fn only_a_step_that_changes_the_world_clears_earlier_failures() {
-        for a in [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Save".into() },
-                  Action::Type { control: 1, text: "x".into(), replace: false },
-                  Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false },
-                  write("BLUEPRINT.md"), Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() }] {
-            assert!(Engine::<crate::model::FakeModel>::clears_earlier_failures(&a), "{a:?}");
+    fn a_look_does_not_excuse_a_command_that_failed_in_the_sandbox() {
+        let bad = run("cat /nope");
+        let look = Action::Look { window: Some("Text Editor".into()), find: None };
+        let (mut e, rec, _) = engine_with(vec![
+            Move::Housekeep { goal: "read the note".into(), understood: "Reading it".into(), remember: None }, plan(),
+            act(1, bad.clone()),                 // fails in the sandbox
+            act(1, look.clone()),                // a window opens; the sandbox is where it was
+            act(1, bad.clone()),                 // the same command, unchanged -> still refused
+            done(look.clone()),
+        ], "look-does-not-clear-a-command");
+        rec.outcomes.borrow_mut().push_back(Outcome::err("cat: /nope: No such file or directory"));
+        rec.desktop_outcomes.borrow_mut().extend([
+            Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
+            Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
+        ]);
+        let ev = e.handle_events("read my note").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == bad).count(), 1, "the repeat reached the sandbox");
+        assert!(e.model.prompts.borrow().iter().any(|p| p.user.contains("rejected: that exact action already failed with: cat: /nope: No such file or directory")),
+                "the command was let through: {}", e.model.prompts.borrow().last().unwrap().user);
+    }
+
+    /// The other half of the same rule, narrowed by the review. A `read` proves nothing changed,
+    /// so it clears nothing. A window action changed only the window, so it clears only the
+    /// window actions' failures — a `run_command` that failed in the sandbox is untouched by a
+    /// `look`, and keeps 1d's memory in a job that does both. A blueprint write still clears all.
+    #[test]
+    fn a_window_action_clears_only_the_window_actions_failures() {
+        let key = |a: &Action| serde_json::to_string(a).unwrap();
+        let cleared = |s: &Action, f: &Action| Engine::<crate::model::FakeModel>::cleared_by(s, &key(f));
+        let desktop = [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Save".into() },
+                       Action::Type { control: 1, text: "x".into(), replace: false },
+                       Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }];
+        let elsewhere = [run("ls"), Action::MakeDir { path: "/data/x".into() }];
+        for s in &desktop {
+            for f in &desktop { assert!(cleared(s, f), "{s:?} should clear {f:?}"); }
+            for f in &elsewhere { assert!(!cleared(s, f), "{s:?} must not clear {f:?}"); }
+            // Its own half includes the `read` it does not itself clear anything for.
+            assert!(cleared(s, &Action::Read { control: 1, from_line: None, lines: None }), "{s:?}");
         }
-        for a in [Action::Read { control: 1, from_line: None, lines: None }, run("ls")] {
-            assert!(!Engine::<crate::model::FakeModel>::clears_earlier_failures(&a), "{a:?}");
+        // A write or edit of the blueprint changed the disk every action reads: all of them.
+        for s in [write("BLUEPRINT.md"), Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() }] {
+            for f in desktop.iter().chain(elsewhere.iter()) { assert!(cleared(&s, f), "{s:?} should clear {f:?}"); }
+        }
+        // A `read` and a plain command change nothing anyone can see: they clear nothing.
+        for s in [Action::Read { control: 1, from_line: None, lines: None }, run("ls")] {
+            for f in desktop.iter().chain(elsewhere.iter()) { assert!(!cleared(&s, f), "{s:?} must not clear {f:?}"); }
         }
     }
 
