@@ -183,6 +183,12 @@ fn windows(conn: &Connection) -> Result<Vec<(String, String, Ref)>, String> {
     Ok(v)
 }
 
+/// The window a `look` actually asks for: none, or a name with something in it. The live run's
+/// 9B wrote `window: ""` when it meant "list the windows", and a blank name picks out nothing.
+fn asked_window(window: &Option<String>) -> Option<&str> {
+    window.as_deref().map(str::trim).filter(|w| !w.is_empty())
+}
+
 /// How a window is listed, and the one string a `look` on it is titled with.
 fn window_line(app: &str, title: &str) -> String { format!("{app} — {title}") }
 
@@ -264,14 +270,13 @@ impl DesktopWorker {
                 }
                 Ok(format!("opened {name}; no window appeared within 10 s, look again later"))
             }
-            Action::Look { window: None, .. } => {
+            Action::Look { window, find } => {
                 let conn = st.conn()?.clone();
-                let all = windows(&conn)?;
-                if all.is_empty() { return Ok("no windows are open".into()); }
-                Ok(format!("windows:\n{}", all.iter().map(|(a, t, _)| format!("- {}", window_line(a, t))).collect::<Vec<_>>().join("\n")))
-            }
-            Action::Look { window: Some(w), find } => {
-                let conn = st.conn()?.clone();
+                let Some(w) = asked_window(window) else {
+                    let all = windows(&conn)?;
+                    if all.is_empty() { return Ok("no windows are open".into()); }
+                    return Ok(format!("windows:\n{}", all.iter().map(|(a, t, _)| format!("- {}", window_line(a, t))).collect::<Vec<_>>().join("\n")));
+                };
                 let (title, frame) = Self::find_window(&conn, w)?;
                 let nodes = walk(&conn, &frame);
                 let chosen = select(&nodes, find.as_deref());
@@ -374,6 +379,16 @@ mod tests {
         assert!(names_window(app, title, "TEXT EDITOR"), "case does not matter");
         assert!(!names_window(app, title, "Calculator"));
         assert!(!names_window(app, title, "  "), "an empty name picks out nothing, never everything");
+    }
+
+    /// `look` with `window: ""` is what the 9B wrote for "list the windows"; it used to be
+    /// answered with "no window matches", and the model went off opening the app again.
+    #[test]
+    fn a_blank_window_name_is_no_window_at_all() {
+        assert_eq!(asked_window(&None), None);
+        assert_eq!(asked_window(&Some(String::new())), None);
+        assert_eq!(asked_window(&Some("   ".into())), None);
+        assert_eq!(asked_window(&Some(" Text Editor ".into())), Some("Text Editor"));
     }
 
     /// GTK 4's popover menu items carry no name, no description and no label child; the shortcut
