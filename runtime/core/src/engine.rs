@@ -79,15 +79,15 @@ pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
     out
 }
 
-/// The windows a job worked: those it looked into, in first-seen order, from the steps that
-/// succeeded (2a §7). Ids come only from a windowed look, so nothing is pressed, typed or read in
-/// a window that was never looked at — and an `open_app` desktop-entry id is not a window's name.
 /// The five actions that work a window (2a §3). Their world is the window, which moves on between
 /// steps, so neither the "just succeeded" guard nor the "already failed" one holds over them.
 fn on_the_desktop(action: &Action) -> bool {
     matches!(action, Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. })
 }
 
+/// The windows a job worked: those it looked into, in first-seen order, from the steps that
+/// succeeded (2a §7). Ids come only from a windowed look, so nothing is pressed, typed or read in
+/// a window that was never looked at — and an `open_app` desktop-entry id is not a window's name.
 pub(crate) fn windows_worked(job: &Job) -> Vec<String> {
     let mut v: Vec<String> = vec![];
     for s in job.steps.iter().filter(|s| s.ok) {
