@@ -808,29 +808,34 @@ impl<M: Model> Engine<M> {
                     }
                 }
                 (State::Working, Move::Plan { .. }) => Some("you already have a plan; use replan to change it".to_string()),
-                (State::Working, Move::Replan { steps, .. })
-                    if steps.iter().any(|s| serde_json::from_str::<Action>(s).is_ok()) =>
-                {
-                    // The live 2a run: a refused press, and the 9B answered with a replan whose
-                    // one step was `{"kind":"look","window":"gnome-calculator"}` — the action it
-                    // wanted to take, in the wrong move — five times, until the replan budget ran
-                    // out. A plan step is a sentence; an action goes in `act`.
-                    Some("that is an action, not a plan step; send it with act".to_string())
-                }
-                (State::Working, Move::Replan { steps, .. }) if steps == job.plan => {
-                    Some("that is the plan you already have; take its next step with act".to_string())
-                }
                 (State::Working, Move::Replan { steps, why }) => {
                     job.replans += 1;
                     if job.replans > Self::MAX_REPLANS {
                         let text = format!("I gave up on {}: the plan kept changing ({} replans) without progress.", display_name(&job), job.replans);
                         return self.finish(job, State::Failed, text);
                     }
-                    job.plan = steps; job.rejections = 0;
-                    job.note_to_model = Some(format!("plan revised because: {why}"));
-                    self.store.save_job(&job)?;
-                    self.emit(Event::Plan { job_id: job.id.clone(), steps: job.plan.clone() });
-                    None
+                    // Two replans that are not a change of plan, both seen in the live 2a run: one
+                    // carrying the action the model wanted to take — `{"kind":"look",…}` as its
+                    // single step — and one handing back the plan it already had. Each costs a
+                    // replan, like every other, and the note says which move it wanted; neither
+                    // becomes the plan. Not a rejection: that budget is two and fatal, and these
+                    // are a model one nudge away from the right move, not one answering illegally.
+                    let wrong_move = if steps.iter().any(|s| serde_json::from_str::<Action>(s).is_ok()) {
+                        Some("that is an action, not a plan step; send it with act")
+                    } else if steps == job.plan {
+                        Some("that is the plan you already have; take its next step with act")
+                    } else { None };
+                    if let Some(note) = wrong_move {
+                        job.note_to_model = Some(note.to_string());
+                        self.store.save_job(&job)?;
+                        None
+                    } else {
+                        job.plan = steps; job.rejections = 0;
+                        job.note_to_model = Some(format!("plan revised because: {why}"));
+                        self.store.save_job(&job)?;
+                        self.emit(Event::Plan { job_id: job.id.clone(), steps: job.plan.clone() });
+                        None
+                    }
                 }
                 (State::Working, Move::Act { step, action }) => {
                     if self.perform(&mut job, step, action, false, false)? { return Ok(()); }
@@ -1447,7 +1452,7 @@ mod tests {
 
     /// The live 2a run: a refused press, and the 9B replanned with the action it wanted to take
     /// as its one plan step, over and over, until the replan budget killed the job. It is told
-    /// what the move for that is, and the replan budget is not spent on it.
+    /// what the move for that is, and the plan it already had is left standing.
     #[test]
     fn a_replan_that_is_really_an_action_is_told_so_and_the_job_goes_on() {
         let look = Action::Look { window: Some("gnome-calculator".into()), find: None };
@@ -1461,6 +1466,10 @@ mod tests {
         assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
         let prompts = e.model.prompts.borrow();
         assert!(prompts.iter().any(|p| p.user.contains("that is an action, not a plan step; send it with act")), "{}", prompts.last().unwrap().user);
+        // Never a rejection: that budget is two and fatal, and the live run died of it the first
+        // time this was refused rather than noted. The plan the job had is untouched.
+        assert!(!prompts.iter().any(|p| p.user.contains("rejected")), "it was rejected, not noted");
+        assert_eq!(ev.iter().filter(|x| matches!(x, Event::Plan { .. })).count(), 1, "the plan never changed: {ev:?}");
     }
 
     /// The same budget, spent the other way: replanning to the plan already in hand.
@@ -1475,7 +1484,9 @@ mod tests {
         ], "replan-same-plan");
         let ev = e.handle_events("tidy up").unwrap();
         assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
-        assert!(e.model.prompts.borrow().iter().any(|p| p.user.contains("that is the plan you already have")), "no such note");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts.iter().any(|p| p.user.contains("that is the plan you already have")), "no such note");
+        assert!(!prompts.iter().any(|p| p.user.contains("rejected")), "it was rejected, not noted");
     }
 
     /// The other half of the same rule: a `read` proves nothing changed, so it clears nothing.
