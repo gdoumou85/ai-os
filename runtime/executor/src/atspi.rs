@@ -234,6 +234,14 @@ fn name_check<'a>(live: &str, echoed: Option<&'a str>, stored: &'a str) -> Resul
     if live == wanted { Ok(()) } else { Err(wanted) }
 }
 
+/// What a `look` says when its `find` kept nothing. An empty control list is a dead end: the
+/// acceptance's run 16 asked for `find=Save` four times over — Save is a nameless popover item
+/// listed under its shortcut, so nothing matches the word — read the blank answer as "the menu
+/// did not open", and spent its whole replan budget saying so. The way out is named here.
+fn nothing_matches(window: &str, find: &str) -> String {
+    format!("no control of {window} is called {find}; look at it again without find to see all of them — a control with no name of its own is listed under its keyboard shortcut")
+}
+
 /// The window a `look` actually asks for: none, or a name with something in it. The live run's
 /// 9B wrote `window: ""` when it meant "list the windows", and a blank name picks out nothing.
 fn asked_window(window: &Option<String>) -> Option<&str> {
@@ -352,7 +360,10 @@ impl DesktopWorker {
                 let (title, frame) = Self::find_window(&conn, w)?;
                 let nodes = walk(&conn, &frame);
                 let chosen = select(&nodes, find.as_deref());
-                Ok(render_look(&title, &chosen, &mut st.ids, cap))
+                match find.as_deref() {
+                    Some(f) if chosen.is_empty() => Ok(nothing_matches(&title, f)),
+                    _ => Ok(render_look(&title, &chosen, &mut st.ids, cap)),
+                }
             }
             Action::Press { control, name } => {
                 let conn = st.conn()?.clone();
@@ -513,6 +524,16 @@ mod tests {
         assert_eq!(name_check("first line", None, "first line"), Ok(()), "type and read echo nothing");
         assert_eq!(name_check("Close", None, "first line"), Err("first line"), "a recycled id is not typed into");
         assert_eq!(name_check("", None, ""), Ok(()), "a nameless control the look also found nameless");
+    }
+
+    /// A `find` that keeps nothing used to come back as a bare "controls of …:" and no lines.
+    /// Run 16 of the acceptance read that as "the menu did not open", asked for `find=Save` twice
+    /// more and died of its replan budget describing the empty answer to itself — while the item
+    /// it wanted was right there, listed as `Ctrl+S`, because it carries no name of its own.
+    #[test]
+    fn a_find_that_keeps_nothing_says_so_and_says_what_to_do() {
+        assert_eq!(nothing_matches("gnome-text-editor — notes.txt - Text Editor", "Save"),
+                   "no control of gnome-text-editor — notes.txt - Text Editor is called Save; look at it again without find to see all of them — a control with no name of its own is listed under its keyboard shortcut");
     }
 
     /// `look` with `window: ""` is what the 9B wrote for "list the windows"; it used to be
