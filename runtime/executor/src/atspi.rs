@@ -2,7 +2,7 @@
 //! one shared state the engine's worker factory captures, and the worker that performs the five
 //! actions. No app is named here.
 use crate::action::{valid_app_name, Action};
-use crate::desktop::{look_cap, render_look, select, Displays, IdTable, Node};
+use crate::desktop::{look_cap, read_window, render_look, select, Displays, IdTable, Node};
 use crate::worker::{Outcome, Worker};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -378,11 +378,7 @@ impl DesktopWorker {
                 let t = text_at(&conn, &r).map_err(|e| e.to_string())?;
                 let count = t.character_count().map_err(|_| "that control has no text".to_string())?;
                 let all = t.get_text(0, count).map_err(|e| e.to_string())?;
-                let v: Vec<&str> = all.lines().collect();
-                let from = from_line.unwrap_or(1).max(1);
-                let n = lines.unwrap_or(200).min(200);
-                let slice: Vec<&str> = v.iter().skip(from - 1).take(n).copied().collect();
-                Ok(format!("(lines {}-{} of {})\n{}", from, from + slice.len().saturating_sub(1), v.len(), slice.join("\n")))
+                Ok(read_window(&all, *from_line, *lines))
             }
             other => Err(format!("not a desktop action: {other:?}")),
         }

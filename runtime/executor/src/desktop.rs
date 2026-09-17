@@ -94,6 +94,25 @@ pub fn render_look(window: &str, chosen: &[&Node], ids: &mut IdTable, cap: usize
     out
 }
 
+/// What `read` gives back: the control's text windowed by line, then capped the way `read_file`
+/// caps an un-windowed read (§4 says `read` is "windowed like `read_file` and capped the same
+/// way"). A text view holds a whole document, and 200 of its lines are no bound at all on a file
+/// of long ones — without the cap one `read` can fill the model's context by itself. The header
+/// says when it was cut, so the model knows to ask for the rest by line.
+pub fn read_window(all: &str, from_line: Option<usize>, lines: Option<usize>) -> String {
+    let v: Vec<&str> = all.lines().collect();
+    let from = from_line.unwrap_or(1).max(1);
+    let n = lines.unwrap_or(200).min(200);
+    let slice: Vec<&str> = v.iter().skip(from - 1).take(n).copied().collect();
+    let body = slice.join("\n");
+    let shown = crate::worker::head(&body, READ_CAP);
+    let cut = if shown.len() < body.len() { format!(", cut at {READ_CAP} characters") } else { String::new() };
+    format!("(lines {}-{} of {}{cut})\n{shown}", from, from + slice.len().saturating_sub(1), v.len())
+}
+
+/// The same 2000 characters `worker::window` gives an un-windowed `read_file`.
+const READ_CAP: usize = 2000;
+
 /// Where `open_app` puts a window (2a §5): the invisible session unless the user asked to see it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Displays { pub invisible: String, pub visible: String }
@@ -113,6 +132,26 @@ mod tests {
 
     fn node(role: &str, name: &str, showing: bool) -> Node {
         Node { app: "app".into(), path: format!("/o/{role}/{name}"), role: role.into(), name: name.into(), showing, sensitive: true, editable: false, checked: false, focused: false, text: None }
+    }
+
+    /// §4: `read` is windowed like `read_file` and capped the same way. Without the cap, 200
+    /// lines of a real document is no bound — a text view holds the whole file, and one `read`
+    /// of a long-lined one fills the model's context by itself.
+    #[test]
+    fn a_read_is_windowed_by_line_and_then_capped_like_read_file() {
+        let long: String = (1..=300).map(|i| format!("line {i} {}\n", "x".repeat(80))).collect();
+        let all = read_window(&long, None, None);
+        let (header, body) = all.split_once('\n').unwrap();
+        assert_eq!(header, "(lines 1-200 of 300, cut at 2000 characters)", "the header says it was cut");
+        assert_eq!(body.chars().count(), 2000, "and it was");
+        assert!(body.starts_with("line 1 xxx"), "cut from the end, not the start");
+        // A window that fits says nothing about a cap, and the header is the one it always had.
+        let short = read_window("alpha\nbeta\ngamma\ndelta", Some(2), Some(2));
+        assert_eq!(short, "(lines 2-3 of 4)\nbeta\ngamma");
+        assert_eq!(read_window("one\ntwo", None, None), "(lines 1-2 of 2)\none\ntwo");
+        // Asking past the end is not an error, and `n` is still bounded at 200 lines.
+        assert_eq!(read_window("one\ntwo", Some(9), None), "(lines 9-9 of 2)\n");
+        assert_eq!(read_window(&long, Some(1), Some(9999)), all, "lines is capped at 200 either way");
     }
 
     #[test]
