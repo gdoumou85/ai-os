@@ -1,6 +1,6 @@
 # Phase 2a — the desktop hand
 
-Design agreed 2026-09-17 (three parts, each approved in conversation). Parent spec: `2026-09-15-ai-os-design.md` §2 decisions 8, 9 and 12, §4.4 (hands and senses, tier 2), §4.7 (the desktop worker), §5.1 (the workshop's two displays). Predecessors: `2026-09-16-phase1c-hands-and-undo-design.md` (the hands and the risk rule as code), `2026-09-16-phase1d-rail-design.md` (events, service, rail). Findings that shaped it: `../findings/phase0-findings.md` Task 4, and the probe in §9 below.
+Design agreed 2026-09-17 (three parts, each approved in conversation; then a complexity pass and a correctness audit against the code, folded in — §14). Parent spec: `2026-09-15-ai-os-design.md` §2 decisions 8, 9 and 12, §4.4 (hands and senses, tier 2), §4.7 (the desktop worker), §5.1 (the workshop's two displays). Predecessors: `2026-09-16-phase1c-hands-and-undo-design.md` (the hands and the risk rule as code), `2026-09-16-phase1d-rail-design.md` (events, service, rail). Findings that shaped it: `../findings/phase0-findings.md` Task 4, and the probe in §9 below.
 
 **His four calls that shaped this (2026-09-17):**
 1. Phase 2 is split: 2a is the desktop hand (this design), 2b is the screen fallback. Browsers through their own automation wait.
@@ -11,7 +11,7 @@ Design agreed 2026-09-17 (three parts, each approved in conversation). Parent sp
 ## 1. What 2a delivers
 
 - **The desktop worker** (parent §4.7): the model's third hand, operating program controls through the accessibility bus. Five actions: `look`, `press`, `type`, `read`, `open_app`. One protocol for every toolkit, no per-app code anywhere.
-- **The window job**: a third front-door move, `window`, for "take my Writer window and …". Any job may use the hand; a project job may open an app to check its own output.
+- **The window job**: "take my Writer window and …" is a `housekeep` job — a job with no project — whose goal names a window. No new move. Any job may use the hand; a project job may open an app to check its own output.
 - **Decision 9 for the hand, as code**: a press on a control whose name means leaving the machine or destroying unsaved work stops at Needs-your-OK.
 - **The invisible session as a unit** (`ai-os-desktop.service`), installed by a setup script like the engine's, in place of the Phase 0 hand-run script.
 - **The honest undo line** on any Done card of a job that used the hand.
@@ -20,13 +20,13 @@ Not in 2a: the screen fallback (2b: Mutter screencast and a pixel click); browse
 
 ## 2. The window job
 
-A third front-door move beside `start` and `housekeep`:
+A window job is the existing `housekeep` move: a job with no project, no blueprint, working in the housekeeping folder, carrying the user's words verbatim (1c). The front door's description of `housekeep` widens from "the machine's own layout" to "the machine's own layout, or a window the user named", and the housekeeping job prompt gains one sentence: a window named by the user is found with `look` first. No new move, no new job kind, no new field on the job: what a window job differs in is what its goal mentions.
 
 ```json
-{"move":"window","window":"Text Editor","goal":"add a line saying reviewed and save","understood":"Taking your Text Editor window to add a line and save"}
+{"move":"housekeep","goal":"take the Text Editor window, add a line saying reviewed and save","understood":"Taking your Text Editor window to add a line and save"}
 ```
 
-`window` is the user's words for it, matched against app names and window titles from `look`. A window job has no project folder and no blueprint, like housekeeping, and its working directory is the scratch folder. The user's words are carried verbatim on the job as since 1c. If no window matches or more than one does, rule 8 applies and the job asks before acting. The move joins `allowed_moves` and the front door's schema in the same way `housekeep` did; the discriminator key stays first (decision 13).
+The window is matched by the model against the app names and titles `look` reports. If none matches or more than one does, rule 8 applies: the job asks before acting.
 
 ## 3. The five actions
 
@@ -35,20 +35,20 @@ All five go through the accessibility bus (AT-SPI). None knows what any app is.
 | Action | Fields | What it does |
 |---|---|---|
 | `look` | `window?`, `find?` | Without `window`: the open windows, app name and title. With one: its controls — short `id`, role, name, state flags (checked, disabled, focused, showing), and a preview of any text or value. `find` keeps only controls whose name or role contains the word. Menus appear as names; press one and look again to see its items. |
-| `press` | `control` | The control's default accessibility action: a button clicks, a toggle flips, a menu opens, a menu item activates. |
+| `press` | `control`, `name` | The control's default accessibility action: a button clicks, a toggle flips, a menu opens, a menu item activates. `name` echoes the name `look` reported for that id; the worker refuses a press whose echoed name differs from its table ("look again"), so the risk rule in §6 reads a name the worker has verified. |
 | `type` | `control`, `text`, `replace?` | Inserts `text` at the end of the control's text through its editable-text interface. `replace: true` clears it first. |
 | `read` | `control`, `from_line?`, `lines?` | The control's full text, windowed by line like `read_file`, for documents too long for a preview. |
 | `open_app` | `name`, `visible?` | Launches a desktop application by its desktop-entry name (`org.gnome.TextEditor`, `libreoffice-writer`) in the invisible session, or on the visible display when `visible` is true. Name validated by its own rule, `^[A-Za-z0-9][A-Za-z0-9._-]*$` (desktop-entry ids carry dots and capitals), and resolved to an existing `.desktop` file under the standard application folders before anything runs. Never a shell string. |
 
-**Control ids.** Per job, the worker keeps a table from short integer ids to (application bus name, object path). Ids are handed out by `look` and stay valid for the job; a fresh `look` re-validates the table, and an id whose object is gone reports "that control is gone; look again" rather than acting on anything else. The model never sees a bus name or an object path.
+**Control ids.** The worker keeps one table from short integer ids to (application bus name, object path, name as last reported). It lives in the engine process for as long as it runs, ids are never reused, and `look` hands out new ones only for objects not already in the table. Every use of an id asks the object first; one that no longer answers reports "that control is gone; look again" rather than acting on anything else. Nothing is cleared per job: an id is only ever the object it was handed out for. The model never sees a bus name or an object path.
 
-**Which windows.** The probe (§9) confirmed that windows on the WSLg display and windows in the invisible session register on the same accessibility bus, so one worker sees both and `look` lists both. `open_app` decides where a new window appears: invisible unless the user asked to see it; the front door sets `visible` from the user's words ("show me", "open … for me"). On bare metal both display names are the same and the distinction disappears (parent §5.1).
+**Which windows.** The probe (§9) confirmed that windows on the WSLg display and windows in the invisible session register on the same accessibility bus, so one worker sees both and `look` lists both. `open_app` decides where a new window appears: invisible unless the user asked to see it, which is one prompt rule for the model's `visible` flag ("show me", "open … for me"). On bare metal both display names are the same and the distinction disappears (parent §5.1).
 
 ## 4. The budget
 
 `look` returns interactive and readable controls only: buttons, toggles, check boxes, radio buttons, menus and showing menu items, entries, text areas, combo boxes, page tabs, and short labels (a status bar's "1 word, 17 characters" is a label the model needs). It skips panels, fillers, separators, and anything not showing. Controls come in tree order with the focused one first.
 
-It stops at `look_cap` controls and ends with "N more, narrow with find". `look_cap` is a setting (`set_setting look_cap`) defaulting to the model's context budget divided by 200, never below 20: 40 on the 8k workshop, more on the deploy PC's full context. It is the one knob that lets a bigger model see more.
+It stops at a cap and ends with "N more, narrow with find". The cap is the model's context budget divided by 200, never below 20: 40 on the 8k workshop, more on the deploy PC's full context. `Model` gains `context_tokens()` (the Ollama connection's `num_ctx` literal moves behind it), and the worker is built with the cap. No setting: nobody would set it, and the number already follows the model.
 
 `read` is windowed like `read_file` and capped the same way; `type` text is summarised in the job record like a big `write_file` (1b's I4) so it cannot blow the prompt.
 
@@ -56,35 +56,36 @@ It stops at `look_cap` controls and ends with "N more, narrow with find". `look_
 
 - `DesktopWorker` in the `executor` crate, beside `SandboxWorker` and `AdminWorker`. A fourth `Lane::Desktop` in `executor::lane` for the five actions, listed and not `_`, so a sixth desktop action fails to compile until it is placed.
 - It runs **inside the engine process**. The engine already runs as user `ai` on the user bus; the accessibility bus address comes from `org.a11y.Bus.GetAddress` on that bus. No new process, no new privilege, no root.
-- **Dependencies:** `zbus` (blocking API) and the `atspi` crate (the Odilia screen-reader project's AT-SPI proxies, built on zbus). Named fallback if the crate's API proves unstable: hand-rolled zbus proxies for the five interfaces the hand uses — Accessible, Action, Text, EditableText, Component. Both are in-process; the choice changes nothing above the worker.
+- **Dependency: `zbus` alone, blocking API**, with hand-written proxies for the five AT-SPI interfaces the hand uses — Accessible, Action, Text, EditableText, Component — plus the a11y bus's `GetAddress`. The audit found the `atspi` crate is async-only (built on zbus's async-io feature, no blocking proxies), so what the design earlier named the fallback is the one blocking option and becomes the choice. Roles come as the strings AT-SPI's `GetRoleName` gives; states as the bit numbers of the five the hand reads (showing, sensitive, editable, checked, focused). The proxies are the size of the Phase 0 probe.
+- **How it is wired.** The engine builds its workers through a factory closure per action (`WorkerFactory`, engine.rs) and constructs a fresh `Executor` every step. The factory's pair becomes a triple. The desktop worker's bus connection and id table are one shared state the closure captures (`Rc<RefCell<DesktopState>>`), so they outlive any single `Executor`; the worker handed to each `Executor` is a thin handle onto it. The engine binary, `testing::scripted_workers` and `FakeWorker` follow.
 - Nothing is cached between looks except the id table. A `look` walks the window's tree fresh, bounded by node count as the Phase 0 probe was.
-- **Environment:** the worker reads `AI_OS_DISPLAY_INVISIBLE` (workshop: the headless shell's `wayland-N`) and `AI_OS_DISPLAY_VISIBLE` (workshop: `wayland-0`, WSLg) and sets `WAYLAND_DISPLAY` for what `open_app` launches. The setup script writes both into the engine unit's environment; on bare metal they are the same value.
-- `Executor::new` takes the third worker; `FakeWorker` serves it in tests as it does the other two.
+- **Environment:** the worker reads `AI_OS_DISPLAY_INVISIBLE` (workshop: `wayland-ai`, pinned in §8) and `AI_OS_DISPLAY_VISIBLE` (workshop: `wayland-0`, WSLg) and sets `WAYLAND_DISPLAY` for what `open_app` launches, through `gtk-launch <entry-id>` (present in the distro). Both are `Environment=` lines in the engine's unit file; on bare metal they are the same value.
+- **A second press of the same button is legal.** 1d's "that exact action just succeeded" refusal (engine.rs) exempts `press` and `type`: a repeated digit or a second Next is normal desktop work.
 
 ## 6. Decision 9 for the hand, as code
 
 `rules::classify` for the five actions:
 
 - `look`, `read`, `type`: `Auto`. `open_app`: `Auto` when the name passes its rule (§3), `NeedsConfirm` naming the bad name otherwise, as the package rules do.
-- `press`: `Auto`, unless the control's name (as `look` reported it, kept in the id table) contains a word from a fixed list, case-insensitive:
+- `press`: `Auto`, unless its `name` (echoed by the model, verified against the table by the worker before anything runs, §3) contains a word from a fixed list, case-insensitive — `classify` stays a pure function of the action:
   - **leaves the machine:** send, post, publish, upload, share, pay, buy, submit, order;
   - **destroys unsaved work:** close, quit, discard, don't save, delete, revert, replace.
-  Then `NeedsConfirm("press Close in Text Editor: it may throw away unsaved work")`, with the control and window named. A yes holds for that exact action for the rest of the job, a no wins over it, and neither outlives the job (1d).
+  Then `NeedsConfirm("press Close: it may throw away unsaved work")`, with the control named (the window is in the step wording the rail shows). A yes holds for that exact action for the rest of the job, a no wins over it, and neither outlives the job (1d).
 - Ceiling, stated: a button called "Go" or "OK" that sends is not caught. The list is the rule the executor can apply without asking the model whether its own action is risky (decision 9's last sentence). The list lives in `rules.rs` next to the path rules and is tested there.
 
 `open_app` does not close anything and no `close` action exists: the AI closes a window only through the app's own control, which the list catches.
 
 ## 7. Undo
 
-Nothing done inside a window is put back by the AI. Unsaved work has no snapshot (parent §4.8, limit), and desktop actions record no reverse. Files an app saves inside a project during a project job are covered by that job's snapshot as before; a window job has no project, so a file its app saves is not covered. Every Done card of a job that used the hand carries one line: "what I did inside Text Editor can't be undone by me". The `done` event gains an optional `windows: Vec<String>` (the windows the job worked) from which the rail and the terminal lines derive that sentence; no new event kind.
+Nothing done inside a window is put back by the AI. Unsaved work has no snapshot (parent §4.8, limit), and desktop actions record no reverse. Files an app saves inside a project during a project job are covered by that job's snapshot as before; a window job has no project, so a file its app saves is not covered. Every Done card of a job that used the hand carries one line: "what I did inside Text Editor can't be undone by me". The `done` event gains `windows: Vec<String>`, `#[serde(default)]` so an old service's `done` still parses in a new rail; the engine computes it at Done from the job's executed desktop actions (no new field on the job). The rail and the terminal lines derive the sentence from it; no new event kind.
 
 ## 8. The invisible session as a unit
 
 `ai-os-desktop.service`, a user unit for `ai`, installed by `trial/setup-desktop.sh` the way `setup-rail.sh` installs the engine's:
 
-- `gnome-shell --headless --virtual-monitor 1600x900 --wayland --no-x11`, `WantedBy=default.target`, `Restart=on-failure`.
+- `gnome-shell --headless --wayland-display wayland-ai --virtual-monitor 1600x900 --wayland --no-x11` (GNOME Shell 50 accepts `--wayland-display`, so the name is pinned), `WantedBy=default.target`, `Restart=on-failure`.
 - The environment work the Phase 0 script does by hand — `XDG_CURRENT_DESKTOP=GNOME`, `XDG_SESSION_TYPE=wayland`, the toolkit-accessibility setting, the activation environment for the portals, `graphical-session.target` raised — moves into the unit and an `ExecStartPost` script.
-- The shell's display name is read from its log after start and written to the engine unit's environment as `AI_OS_DISPLAY_INVISIBLE` (a drop-in), then the engine is restarted. `ai-os-engine.service` gets `After=ai-os-desktop.service`.
+- `ai-os-engine.service` gets `After=ai-os-desktop.service` and the two display `Environment=` lines. No log-scrape, no drop-in, no restart.
 - **Check in the plan:** both units must survive the launching shell's exit. Today's probe (§9) saw the user manager stop a minute after boot when the shell that started it closed, despite linger, taking the headless shell with it; the engine came back when the manager restarted. The setup script proves the units are still up sixty seconds after it exits, or the plan finds out why.
 
 ## 9. The probe that corrected Phase 0 (2026-09-17)
@@ -104,16 +105,15 @@ Throwaway, `trial/probes/text_probe.py` and `text_probe2.py`, run by `trial/run-
 
 ## 10. Changes to existing code (the ripples)
 
-- `executor::action::Action`: five new variants; `lane` and `classify` list them.
-- `executor::Executor`: a third worker field; `execute` routes `Lane::Desktop`.
-- `aios_core::moves`: `Move::Window { window, goal, understood, remember? }`; `allowed_moves`, the front-door schema and its key-order test.
-- `aios_core::job`: a job carries `window: Option<String>` and the list of windows it worked; `JobKind` gains the window kind with the scratch workspace.
-- `aios_core::prompt`: standing rules for the hand (§11); the housekeeping-style user prompt for a window job.
-- `aios_core::engine`: a `done` with `windows`; `describe`/`lines` wording for desktop steps ("pressed Bold in Writer", "typed two lines into Text Editor", "opened Calculator").
-- `aios_proto::Event::Done { windows }` (optional, default empty; old clients ignore it).
+- `executor::action::Action`: five new variants; `lane` and `classify` list them; `Press` carries `name`.
+- `executor::Executor`: a third worker field; `execute` routes `Lane::Desktop`; the worker refuses a press whose echoed name differs from its table, the way `wrong_hand` refuses today.
+- `executor::desktop`: the zbus blocking proxies, `DesktopState` (connection, id table, cap), `DesktopWorker`.
+- `aios_core::engine`: `WorkerFactory` returns a triple; the "just succeeded" refusal exempts `press` and `type`; `done` carries `windows` computed from the steps; `describe`/`lines` wording for desktop steps ("pressed Bold in Writer", "typed two lines into Text Editor", "opened Calculator").
+- `aios_core::model`: `context_tokens()` on `Model`; the engine binary computes the cap.
+- `aios_core::prompt`: standing rules for the hand (§11); the front door's `housekeep` description and the housekeeping job prompt widened by a sentence each.
+- `aios_proto::Event::Done { windows }` with `#[serde(default)]`.
 - `aios_rail::cards`: the Done card names the window instead of files when files are empty and windows are not; the undo line.
-- `set_setting look_cap`: the second setting v1 knows.
-- `trial/setup-desktop.sh`; `setup-rail.sh` gains the display environment.
+- `trial/ai-os-desktop.service`, `trial/setup-desktop.sh`; `trial/ai-os-engine.service` gains `After=` and the two display lines.
 
 ## 11. The prompt
 
@@ -121,8 +121,8 @@ Standing rules in the style of the other hands', short: look before you act and 
 
 ## 12. How 2a is proven
 
-1. **Executor unit tests**: `lane` for the five actions; `classify` for the word list, both halves, case-insensitive, and the free ones; the id table (hand-out, re-validation, "gone"); `look`'s filter, order and cap on a fake tree; `open_app` name validation (dots and capitals pass, slashes and spaces do not).
-2. **Engine unit tests**: the `window` move through the front door; a window job's workspace and no-blueprint rule; `done` carrying `windows`; the step wording.
+1. **Executor unit tests**: `lane` for the five actions; `classify` for the word list, both halves, case-insensitive, and the free ones; the id table (hand-out, no reuse, "gone"); a press with a wrong echoed name refused before anything runs; `look`'s filter, order and cap on a fake tree; `open_app` name validation (dots and capitals pass, slashes and spaces do not).
+2. **Engine unit tests**: a window goal through the front door as `housekeep`; `done` carrying `windows` computed from the steps; the second identical press allowed; the step wording.
 3. **Proto and rail tests**: `Done` with and without `windows` round-trips; the Done card for a window job.
 4. **Live acceptance** (`runtime/core/tests/live_2a.rs`, `AI_OS_LIVE=1`): real qwen3.5:9b, the service on a temp socket, no human, three scripts:
    1. **The user's window.** The test opens a text file in Text Editor on the visible display. "Take my Text Editor window, add a line saying reviewed and save it." Done, and the file on disk has the line.
@@ -141,3 +141,17 @@ Test commands as in 1d (inside the distro). `cargo test -p executor` and `-p aio
 - Telling a phantom insertion from a real one.
 - "Watch it work" on the Building card; pause and take-over.
 - A button with an innocent name that sends or destroys.
+
+## 14. The audit (2026-09-17)
+
+Two passes over the agreed design before the plan: a complexity pass and a correctness audit of its claims against the code and the platform. What changed:
+
+- **No `window` move, no job kind, no field on the job.** `housekeep` already is the job with no project; the audit also found no `JobKind` exists (jobs carry a `housekeeping` flag that five places key on) and that the front door's move list is its own. Reusing `housekeep` removes all of it.
+- **Workers are built per action.** The engine's factory constructs fresh workers and a fresh `Executor` every step, so the id table and the bus connection live in shared state the factory captures (§5). The table is per process, ids never reused, every use re-checked; nothing needs clearing per job.
+- **`classify` is pure on the action** and runs before any worker sees it, so a press carries the control's `name`, echoed by the model and verified by the worker (§3, §6).
+- **`atspi` is async-only.** zbus alone, blocking, five hand-written proxies (§5).
+- **A repeated press is normal**, so 1d's "just succeeded" refusal exempts `press` and `type` (§5).
+- **`Done { windows }` needs `#[serde(default)]`**; nothing in `Event` has it today (§7).
+- **The cap is not a setting**: `set_setting` is gated in three places for one key, and the engine does not know the context size, so `Model::context_tokens()` and a computed cap (§4).
+- **`--wayland-display` exists** on GNOME Shell 50: the display name is pinned in the unit, and the log-scrape, drop-in and engine restart go (§8). The engine's environment lines belong in its unit file, which has static `Environment=` lines, not in a setup script.
+- Confirmed as claimed: one accessibility bus for both displays; `gtk-launch` and `gio launch` present; the housekeeping folder and the no-blueprint rule as described.
