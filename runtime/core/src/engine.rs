@@ -610,6 +610,17 @@ impl<M: Model> Engine<M> {
         }
     }
 
+    /// A step that just succeeded and leaves the world different from the one an earlier action
+    /// failed in, so that action is worth another try: a write or edit (something changed on
+    /// disk), and on the desktop a `look` — the ids it hands out are the very thing "control 1
+    /// was never handed out" complained of — or anything that moves a window on. The live 2a run
+    /// typed before looking, looked, typed again, and was then told its own successful action had
+    /// already failed. A `read` changes nothing and clears nothing.
+    fn clears_earlier_failures(action: &Action) -> bool {
+        Self::is_blueprint(action).is_some()
+            || matches!(action, Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::OpenApp { .. })
+    }
+
     /// True when the user's stop has landed: the job is finished as Cancelled and reported.
     fn stopped(&mut self, job: &Job) -> Result<bool, EngineError> {
         if !self.stop.swap(false, Ordering::SeqCst) { return Ok(false); }
@@ -716,9 +727,9 @@ impl<M: Model> Engine<M> {
                             None => {}
                         }
                     }
-                    // Something changed on disk, so an earlier failure may now succeed:
-                    // re-running the same command after a fix is legitimate (spike finding).
-                    if Self::is_blueprint(&action).is_some() { job.failed_actions.clear(); }
+                    // The world is not the one the earlier failure happened in, so re-running the
+                    // same action is legitimate (spike finding).
+                    if Self::clears_earlier_failures(&action) { job.failed_actions.clear(); }
                 } else {
                     // Recorded even for a check (only the identical-action *lookup* above is
                     // check-exempt): a later `act` proposing this same action must still see why
@@ -1391,6 +1402,46 @@ mod tests {
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         let prompts = e.model.prompts.borrow();
         assert!(prompts[5].user.contains("rejected: that exact action already failed with: NameError: prnt"), "{}", prompts[5].user);
+    }
+
+    /// The live 2a run: the model typed before looking (refused — "control 1 was never handed
+    /// out"), looked, typed again and got it, then proposed that first type once more and was
+    /// told its own action had already failed. A look hands out the ids the refusal was about,
+    /// so the world it failed in is gone.
+    #[test]
+    fn a_look_clears_the_failures_that_happened_before_the_ids_existed() {
+        let typing = Action::Type { control: 1, text: "reviewed".into(), replace: false };
+        let (mut e, rec, _) = engine_with(vec![
+            Move::Housekeep { goal: "take the editor".into(), understood: "Taking it".into(), remember: None }, plan(),
+            act(1, typing.clone()),                                                  // fails: nothing looked at yet
+            act(1, Action::Look { window: Some("Text Editor".into()), find: None }),  // the ids exist now
+            act(1, typing.clone()),                                                  // the same action, and allowed
+            done(Action::Read { control: 1, from_line: None, lines: None }),
+        ], "look-clears-failures");
+        rec.desktop_outcomes.borrow_mut().extend([
+            Outcome::err("control 1 was never handed out; look first"),
+            Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
+            Outcome::ok("typed 8 characters into control 1"),
+            Outcome::ok("(lines 1-2 of 2)\nfirst line\nreviewed"),
+        ]);
+        let ev = e.handle_events("take my editor").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert_eq!(rec.desktop_calls.borrow().iter().filter(|a| **a == typing).count(), 2, "the second type reached the hand");
+        assert!(e.model.prompts.borrow().iter().all(|p| !p.user.contains("already failed")), "nothing was held against it");
+    }
+
+    /// The other half of the same rule: a `read` proves nothing changed, so it clears nothing.
+    #[test]
+    fn only_a_step_that_changes_the_world_clears_earlier_failures() {
+        for a in [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Save".into() },
+                  Action::Type { control: 1, text: "x".into(), replace: false },
+                  Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false },
+                  write("BLUEPRINT.md"), Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() }] {
+            assert!(Engine::<crate::model::FakeModel>::clears_earlier_failures(&a), "{a:?}");
+        }
+        for a in [Action::Read { control: 1, from_line: None, lines: None }, run("ls")] {
+            assert!(!Engine::<crate::model::FakeModel>::clears_earlier_failures(&a), "{a:?}");
+        }
     }
 
     #[test]
