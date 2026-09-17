@@ -82,6 +82,12 @@ pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
 /// The windows a job worked: those it looked into, in first-seen order, from the steps that
 /// succeeded (2a §7). Ids come only from a windowed look, so nothing is pressed, typed or read in
 /// a window that was never looked at — and an `open_app` desktop-entry id is not a window's name.
+/// The five actions that work a window (2a §3). Their world is the window, which moves on between
+/// steps, so neither the "just succeeded" guard nor the "already failed" one holds over them.
+fn on_the_desktop(action: &Action) -> bool {
+    matches!(action, Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. })
+}
+
 pub(crate) fn windows_worked(job: &Job) -> Vec<String> {
     let mut v: Vec<String> = vec![];
     for s in job.steps.iter().filter(|s| s.ok) {
@@ -662,7 +668,13 @@ impl<M: Model> Engine<M> {
         if !is_check && !repeatable && job.steps.last().is_some_and(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key) {
             return self.reject(job, "that exact action just succeeded — its result is in the steps above; move on to the next step");
         }
-        if !is_check && !approved && job.failed_actions.contains(&key) {
+        // The same exemption, for the same reason, on the failing side. A desktop action's world
+        // is the window, not the step list: it moves on between steps, so one that failed says
+        // little about the next time — the live 2a run's `read control 1` failed for want of a
+        // look and worked the moment one happened. Repeating it is an ordinary failed step, kept
+        // in hand by MAX_FAILS_PER_STEP; three runs died instead on this rejection, whose budget
+        // is two and fatal, one failed step into the job.
+        if !is_check && !approved && !on_the_desktop(&action) && job.failed_actions.contains(&key) {
             let earlier = job.steps.iter().rev().find(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).map(|s| s.detail.clone()).unwrap_or_default();
             return self.reject(job, &format!("that exact action already failed with: {earlier} — work around it or replan"));
         }
@@ -1487,6 +1499,50 @@ mod tests {
         let prompts = e.model.prompts.borrow();
         assert!(prompts.iter().any(|p| p.user.contains("that is the plan you already have")), "no such note");
         assert!(!prompts.iter().any(|p| p.user.contains("rejected")), "it was rejected, not noted");
+    }
+
+    /// Three live 2a runs died here. The model read a control before looking at a window, was
+    /// refused, and sent the same read again; the "already failed" rejection is fatal at two, so
+    /// the job was over one failed step in. A window moves on between steps — the same read works
+    /// the moment a look happens — so a desktop action may be tried again, as a failed step.
+    #[test]
+    fn a_desktop_action_that_failed_may_be_tried_again_and_is_never_rejected_for_it() {
+        let read = Action::Read { control: 1, from_line: None, lines: None };
+        let (mut e, rec, _) = engine_with(vec![
+            Move::Housekeep { goal: "take the editor".into(), understood: "Taking it".into(), remember: None }, plan(),
+            act(1, read.clone()),                                                    // no look yet
+            act(1, read.clone()),                                                    // again, with nothing changed
+            act(1, Action::Look { window: Some("Text Editor".into()), find: None }),
+            act(1, read.clone()),
+            done(read.clone()),
+        ], "desktop-retry");
+        rec.desktop_outcomes.borrow_mut().extend([
+            Outcome::err("control 1 was never handed out; look at a window to get the ids of its controls"),
+            Outcome::err("control 1 was never handed out; look at a window to get the ids of its controls"),
+            Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
+            Outcome::ok("(lines 1-1 of 1)\nfirst line"),
+            Outcome::ok("(lines 1-1 of 1)\nfirst line"),
+        ]);
+        let ev = e.handle_events("take my editor").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert_eq!(rec.desktop_calls.borrow().iter().filter(|a| **a == read).count(), 4, "every read reached the hand");
+        assert!(e.model.prompts.borrow().iter().all(|p| !p.user.contains("already failed")), "a desktop retry was rejected");
+    }
+
+    /// The exemption is the five window actions and nothing else: a command that failed with
+    /// nothing changed is still the 1d lesson it was.
+    #[test]
+    fn only_the_window_actions_escape_the_already_failed_rejection() {
+        for a in [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Save".into() },
+                  Action::Type { control: 1, text: "x".into(), replace: false },
+                  Action::Read { control: 1, from_line: None, lines: None },
+                  Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }] {
+            assert!(on_the_desktop(&a), "{a:?}");
+        }
+        for a in [run("ls"), write("a.py"), Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() },
+                  Action::MakeDir { path: "/data/x".into() }] {
+            assert!(!on_the_desktop(&a), "{a:?}");
+        }
     }
 
     /// The other half of the same rule: a `read` proves nothing changed, so it clears nothing.
