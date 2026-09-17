@@ -213,7 +213,10 @@ fn renamed(id: u32, is_now: &str, echoed: &str, carries_it: Option<u32>) -> Stri
     let was = if is_now.is_empty() { format!("control {id} has no name now") } else { format!("control {id} is named {is_now} now") };
     match carries_it {
         Some(other) => format!("{was}, not {echoed}; the control named {echoed} is {other} — press that one"),
-        None => format!("{was}, not {echoed}; look again"),
+        // Nothing any look handed out is called that, so another guess at an id cannot help: the
+        // live run's model guessed four in a row for the calculator's `=`, which the cap had cut
+        // off the end of its look. `find` is what reaches past the cap.
+        None => format!("{was}, and no control called {echoed} has been handed out; look at the window again with find={echoed}"),
     }
 }
 
@@ -460,8 +463,9 @@ mod tests {
     #[test]
     fn a_refused_press_says_where_that_name_is_now() {
         assert_eq!(renamed(58, "0", "4", Some(46)), "control 58 is named 0 now, not 4; the control named 4 is 46 — press that one");
-        assert_eq!(renamed(58, "0", "4", None), "control 58 is named 0 now, not 4; look again");
-        assert_eq!(renamed(7, "", "Save", None), "control 7 has no name now, not Save; look again");
+        // Nothing carries that name: another id is a guess, so it is sent to `find` instead.
+        assert_eq!(renamed(48, "5", "=", None), "control 48 is named 5 now, and no control called = has been handed out; look at the window again with find==");
+        assert_eq!(renamed(7, "", "Save", None), "control 7 has no name now, and no control called Save has been handed out; look at the window again with find=Save");
     }
 
     /// `look` with `window: ""` is what the 9B wrote for "list the windows"; it used to be
