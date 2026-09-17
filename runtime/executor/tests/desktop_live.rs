@@ -23,5 +23,25 @@ fn opens_an_editor_looks_types_and_reads_back() {
     assert!(again.detail.contains("hello from ai"), "{}", again.detail);
     let closes = w.run(&Action::Look { window: Some("Text Editor".into()), find: Some("close".into()) });
     println!("{}", closes.detail);
+    // Press, on the real bus, so `NActions` and `DoAction` are both proven. GTK 4 wraps a menu
+    // button in a push button that carries no action of its own, with the real one on the toggle
+    // button behind it — so this one look exercises both answers the guard can get.
+    let menus = w.run(&Action::Look { window: Some("Text Editor".into()), find: Some("menu".into()) });
+    assert!(menus.ok, "{}", menus.detail);
+    println!("{}", menus.detail);
+    let control = |role: &str| -> (u32, String) {
+        let line = menus.detail.lines().find(|l| l.contains(role)).unwrap_or_else(|| panic!("no {role}:\n{}", menus.detail));
+        let (id, rest) = line.split_once(' ').unwrap();
+        let name = rest.split_once("] ").unwrap().1;
+        let name = name.strip_suffix(')').and_then(|s| s.rsplit_once(" (")).map_or(name, |(n, _)| n);
+        (id.parse().unwrap(), name.to_string())
+    };
+    let (wrapper, wrapper_name) = control("[push button]");
+    let dead = w.run(&Action::Press { control: wrapper, name: wrapper_name.clone() });
+    assert!(!dead.ok && dead.detail == format!("{wrapper_name} has no action to press"), "{}", dead.detail);
+    let (id, name) = control("[toggle button]");
+    let pressed = w.run(&Action::Press { control: id, name: name.clone() });
+    assert!(pressed.ok && pressed.detail == format!("pressed {name}"), "{}", pressed.detail);
+    println!("{}", pressed.detail);
     let _ = std::process::Command::new("pkill").args(["-u", "ai", "-f", "gnome-text-editor"]).status();
 }

@@ -244,7 +244,13 @@ impl DesktopWorker {
                 let r = Self::resolve(&st, &conn, *control, Some(name))?;
                 let a = ActionIfaceProxy::builder(&conn).destination(r.0.clone()).and_then(|b| b.path(r.1.clone())).and_then(|b| b.cache_properties(zbus::proxy::CacheProperties::No).build())
                     .map_err(|e| e.to_string())?;
-                if a.nactions().unwrap_or(0) < 1 { return Err(format!("{name} has no action to press")); }
+                // A bus fault is never reported as a fact about the control: "no action" is only
+                // ever an answer the control gave.
+                match a.nactions() {
+                    Ok(n) if n >= 1 => {}
+                    Ok(_) => return Err(format!("{name} has no action to press")),
+                    Err(e) => return Err(format!("could not ask {name} for its actions: {e}")),
+                }
                 a.do_action(0).map_err(|e| format!("press failed: {e}"))?;
                 Ok(format!("pressed {name}"))
             }
