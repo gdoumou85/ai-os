@@ -34,7 +34,7 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(S
     let recent_txt = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
     let user = format!(
         "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk), start (new work: give project, new_project, description, goal, creative, understood), or \
-         housekeep (the machine itself: folders, settings, tools, or a window the user named; give goal, understood). \
+         housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked; give goal, understood). \
          Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself. \
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, recent_txt, message
@@ -222,6 +222,10 @@ mod tests {
         assert!(!SYSTEM.contains("Writer") && !SYSTEM.contains("Calculator") && !SYSTEM.contains("Text Editor"), "nothing per-app");
         let p = front_door(&[], &[], &[], "take my editor window");
         assert!(p.user.contains("a window the user named"), "{}", p.user);
+        // The live 2a run: "open the calculator and tell me what 12 times 34 is" was read as a new
+        // software project called calculator-task, blueprint and all, because housekeeping only
+        // offered a window the user already had open.
+        assert!(p.user.contains("or one you open yourself"), "{}", p.user);
         let job = Job::new_housekeeping("/data/housekeeping", "take the editor", "Taking it");
         let t = job_turn(&[], &job, None, None);
         assert!(t.user.contains("found with `look` first"), "{}", t.user);

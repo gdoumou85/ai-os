@@ -85,8 +85,11 @@ pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
 pub(crate) fn windows_worked(job: &Job) -> Vec<String> {
     let mut v: Vec<String> = vec![];
     for s in job.steps.iter().filter(|s| s.ok) {
+        // A blank name is the model's way of writing "list the windows" (the hand reads it as
+        // none), so it is not a window this job worked: the live run's Done card named one.
         let Action::Look { window: Some(w), .. } = &s.action else { continue };
-        if !v.contains(w) { v.push(w.clone()); }
+        if w.trim().is_empty() || v.contains(w) { continue; }
+        v.push(w.clone());
     }
     v
 }
@@ -2053,6 +2056,8 @@ mod tests {
             Move::Housekeep { goal: "take the editor".into(), understood: "Taking the editor".into(), remember: None }, plan(),
             act(1, Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }),
             act(1, look("Text Editor")), act(1, Action::Press { control: 1, name: "Save".into() }), act(1, look("Text Editor")),
+            act(1, look("")),   // "list the windows", written the 9B's way: not a window worked
+
             done(Action::Read { control: 2, from_line: None, lines: None }),
         ], "windows-worked");
         let ev = e.handle_events("take my editor").unwrap();
