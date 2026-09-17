@@ -663,10 +663,18 @@ impl<M: Model> Engine<M> {
         // repeat is caught, so re-running a command after something else has changed stays
         // legitimate, and a `done` check is exempt entirely: re-running one verbatim is its point.
         // A second press of the same button, or the same text typed again, is ordinary desktop
-        // work (a repeated digit, a second Next): exempt like a check is (2a §5).
-        let repeatable = matches!(action, Action::Press { .. } | Action::Type { .. });
-        if !is_check && !repeatable && job.steps.last().is_some_and(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key) {
-            return self.reject(job, "that exact action just succeeded — its result is in the steps above; move on to the next step");
+        // work (a repeated digit, a second Next): exempt like a check is (2a §5). *A second* is
+        // all §5 claims, and all this exempts: the live 2a run pressed Main Menu eight times in a
+        // row without looking once, toggling the one popover open and shut until the job ran out
+        // of replans, and every press answered "pressed Main Menu" as if it had got somewhere.
+        let trailing = job.steps.iter().rev().take_while(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key).count();
+        let repeatable = matches!(action, Action::Press { .. } | Action::Type { .. }) && trailing < 2;
+        if !is_check && !repeatable && trailing >= 1 {
+            return self.reject(job, if on_the_desktop(&action) {
+                "that exact action already worked; look at the window to see what it did, then take the next step"
+            } else {
+                "that exact action just succeeded — its result is in the steps above; move on to the next step"
+            });
         }
         // The same exemption, for the same reason, on the failing side. A desktop action's world
         // is the window, not the step list: it moves on between steps, so one that failed says
@@ -1324,9 +1332,11 @@ mod tests {
     }
 
     /// 2a §5: a repeated digit or a second Next is normal desktop work — 1d's "that exact action
-    /// just succeeded" refusal exempts `press` and `type`.
+    /// just succeeded" refusal exempts `press` and `type`. *A second* is what §5 claims and what
+    /// this exempts: a third identical press in a row is caught, because the live 2a run pressed
+    /// Main Menu eight times without looking once, toggling the same popover open and shut.
     #[test]
-    fn the_same_press_twice_in_a_row_runs_twice() {
+    fn the_same_press_twice_in_a_row_runs_twice_and_a_third_time_is_refused() {
         // Housekeeping jobs: no blueprint gate to satisfy, so the scripted moves are just the
         // two repeats and the check.
         let hk = |goal: &str| Move::Housekeep { goal: goal.into(), understood: "Pressing twice".into(), remember: None };
@@ -1338,6 +1348,15 @@ mod tests {
         let (mut e2, rec2, _) = engine_with(vec![hk("run twice"), plan(), act(1, run_twice.clone()), act(1, run_twice.clone()), done(run("python3"))], "run-twice");
         e2.handle("press twice").unwrap();
         assert_eq!(rec2.calls.borrow().iter().filter(|a| **a == run_twice).count(), 1, "a repeated command is still refused");
+        let (mut e3, rec3, _) = engine_with(vec![
+            hk("press thrice"), plan(), act(1, press.clone()), act(1, press.clone()), act(1, press.clone()),
+            act(1, Action::Look { window: Some("Calculator".into()), find: None }), act(1, press.clone()),
+            done(run("python3")),
+        ], "press-thrice");
+        e3.handle("press thrice").unwrap();
+        assert_eq!(rec3.desktop_calls.borrow().iter().filter(|a| **a == press).count(), 3, "the third was refused, the one after the look ran");
+        let prompts = e3.model.prompts.borrow();
+        assert!(prompts.iter().any(|p| p.user.contains("look at the window to see what it did")), "the refusal says to look: {}", prompts.last().unwrap().user);
     }
 
     #[test]
