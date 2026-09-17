@@ -322,3 +322,7 @@ The two 1b carry-forwards are closed. **Stop lands mid-job**: the word raises a 
 - One engine, one user: the socket is per-user by construction.
 - A stop that arrives in the same instant a job finishes on its own is queued and then means "no job to stop"; the engine answers that itself — "Nothing is running now.", a fixed word in every state, never a model call.
 - A yes now holds for the rest of the job it was given in, per exact action. A no still overrides it, and neither outlives the job.
+
+## Phase 2a design agreed (2026-09-17)
+
+**Phase 2 is split:** 2a the desktop hand, 2b the screen fallback; browsers through their own automation wait. Design: `2026-09-17-phase2a-desktop-hand-design.md` — five accessibility actions (`look`, `press`, `type`, `read`, `open_app`) with nothing per-app, a `window` front-door move, decision 9 for a press as a fixed word list in code, no undo inside a window said out loud on the Done card, the invisible session as a unit, and a `look_cap` setting that follows the context budget. **Two corrections from its probe:** free text through the accessibility interface does not need a seat (it commits in GTK widgets on any display; §4.4's seat claim and Phase 0's are wrong), and LibreOffice Writer's document body is the exception, a property of Writer, carried forward. LibreOffice UNO is out as a text route: it is per-app code, a Phase 3 skill if ever needed.
