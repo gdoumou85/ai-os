@@ -133,17 +133,22 @@ fn shortcut_name(attrs: &std::collections::HashMap<String, String>) -> Option<St
     Some(first.replace("Control+", "Ctrl+"))
 }
 
+/// The name the hand knows a control by: its accessible name, or its keyboard shortcut when it
+/// has none. The one place that decision is made, so a look and a refusal agree on the name.
+fn control_name(a: &AccessibleProxy<'_>) -> String {
+    let name = a.name().unwrap_or_default();
+    if !name.is_empty() { return name; }
+    a.get_attributes().ok().as_ref().and_then(shortcut_name).unwrap_or_default()
+}
+
 /// One node, read through the bus. `None` if the object does not answer (gone).
 fn read_node(conn: &Connection, r: &Ref, with_text: bool) -> Option<Node> {
     let a = acc(conn, r).ok()?;
     let role = role_name(a.get_role().ok()?).to_string();
     let state = a.get_state().ok()?;
-    let mut name = a.name().unwrap_or_default();
-    // Only for a role the model is shown at all: the containers in between are nameless by the
-    // hundred and asking each of them for its attributes would double the walk for nothing.
-    if name.is_empty() && role != "other" {
-        if let Some(s) = a.get_attributes().ok().as_ref().and_then(shortcut_name) { name = s; }
-    }
+    // The shortcut fallback only for a role the model is shown at all: the containers in between
+    // are nameless by the hundred and asking each for its attributes would double the walk.
+    let name = if role == "other" { a.name().unwrap_or_default() } else { control_name(&a) };
     let editable = has(&state, EDITABLE);
     let text = if with_text && matches!(role.as_str(), "text" | "entry" | "paragraph" | "document text" | "label") {
         text_at(conn, r).ok().and_then(|t| t.get_text(0, 60).ok()).filter(|s| !s.is_empty())
@@ -181,6 +186,17 @@ fn windows(conn: &Connection) -> Result<Vec<(String, String, Ref)>, String> {
         }
     }
     Ok(v)
+}
+
+/// The refusal for an id whose control is not the one the model echoed. Toolkit object paths are
+/// not stable — GNOME Calculator recycles its buttons' — so a stale id is the ordinary case, and
+/// "look again" costs a whole turn; when the bus still has that name, the refusal points at it.
+fn renamed(id: u32, is_now: &str, echoed: &str, carries_it: Option<u32>) -> String {
+    let was = if is_now.is_empty() { format!("control {id} has no name now") } else { format!("control {id} is named {is_now} now") };
+    match carries_it {
+        Some(other) => format!("{was}, not {echoed}; the control named {echoed} is {other} — press that one"),
+        None => format!("{was}, not {echoed}; look again"),
+    }
 }
 
 /// The window a `look` actually asks for: none, or a name with something in it. The live run's
@@ -227,11 +243,20 @@ impl DesktopWorker {
         }).map(|(id, _)| id)
     }
 
+    /// The id whose control answers to this name on the bus right now — asked of the bus, not of
+    /// the table, so the model is never sent at a control that has moved on too. Refusal path only.
+    fn named_now(st: &DesktopState, conn: &Connection, wanted: &str) -> Option<u32> {
+        st.ids.named(wanted).find(|(_, e)| {
+            let Ok(path) = OwnedObjectPath::try_from(e.path.as_str()) else { return false };
+            acc(conn, &(e.app.clone(), path)).is_ok_and(|a| control_name(&a) == wanted)
+        }).map(|(id, _)| id)
+    }
+
     /// The object behind an id, after the echoed name (if any) and liveness are checked.
     fn resolve(st: &DesktopState, conn: &Connection, id: u32, echoed: Option<&str>) -> Result<Ref, String> {
         let e = st.ids.get(id).ok_or_else(|| format!("control {id} was never handed out; look first"))?;
         if let Some(n) = echoed {
-            if n != e.name { return Err(format!("control {id} is named {} now, not {n}; look again", e.name)); }
+            if n != e.name { return Err(renamed(id, &e.name, n, Self::named_now(st, conn, n))); }
         }
         let r: Ref = (e.app.clone(), OwnedObjectPath::try_from(e.path.as_str()).map_err(|e| e.to_string())?);
         match acc(conn, &r).ok().and_then(|a| a.get_role().ok()) {
@@ -379,6 +404,16 @@ mod tests {
         assert!(names_window(app, title, "TEXT EDITOR"), "case does not matter");
         assert!(!names_window(app, title, "Calculator"));
         assert!(!names_window(app, title, "  "), "an empty name picks out nothing, never everything");
+    }
+
+    /// A stale id is ordinary — the toolkits recycle their objects' paths — so the refusal says
+    /// where that name went when the bus still has it. The live run spent a look and a replan on
+    /// every one of these.
+    #[test]
+    fn a_refused_press_says_where_that_name_is_now() {
+        assert_eq!(renamed(58, "0", "4", Some(46)), "control 58 is named 0 now, not 4; the control named 4 is 46 — press that one");
+        assert_eq!(renamed(58, "0", "4", None), "control 58 is named 0 now, not 4; look again");
+        assert_eq!(renamed(7, "", "Save", None), "control 7 has no name now, not Save; look again");
     }
 
     /// `look` with `window: ""` is what the 9B wrote for "list the windows"; it used to be
