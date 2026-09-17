@@ -808,6 +808,18 @@ impl<M: Model> Engine<M> {
                     }
                 }
                 (State::Working, Move::Plan { .. }) => Some("you already have a plan; use replan to change it".to_string()),
+                (State::Working, Move::Replan { steps, .. })
+                    if steps.iter().any(|s| serde_json::from_str::<Action>(s).is_ok()) =>
+                {
+                    // The live 2a run: a refused press, and the 9B answered with a replan whose
+                    // one step was `{"kind":"look","window":"gnome-calculator"}` — the action it
+                    // wanted to take, in the wrong move — five times, until the replan budget ran
+                    // out. A plan step is a sentence; an action goes in `act`.
+                    Some("that is an action, not a plan step; send it with act".to_string())
+                }
+                (State::Working, Move::Replan { steps, .. }) if steps == job.plan => {
+                    Some("that is the plan you already have; take its next step with act".to_string())
+                }
                 (State::Working, Move::Replan { steps, why }) => {
                     job.replans += 1;
                     if job.replans > Self::MAX_REPLANS {
@@ -1431,6 +1443,39 @@ mod tests {
         assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
         assert_eq!(rec.desktop_calls.borrow().iter().filter(|a| **a == typing).count(), 2, "the second type reached the hand");
         assert!(e.model.prompts.borrow().iter().all(|p| !p.user.contains("already failed")), "nothing was held against it");
+    }
+
+    /// The live 2a run: a refused press, and the 9B replanned with the action it wanted to take
+    /// as its one plan step, over and over, until the replan budget killed the job. It is told
+    /// what the move for that is, and the replan budget is not spent on it.
+    #[test]
+    fn a_replan_that_is_really_an_action_is_told_so_and_the_job_goes_on() {
+        let look = Action::Look { window: Some("gnome-calculator".into()), find: None };
+        let (mut e, _, _) = engine_with(vec![
+            Move::Housekeep { goal: "12 times 34".into(), understood: "Calculating".into(), remember: None }, plan(),
+            Move::Replan { steps: vec![serde_json::to_string(&look).unwrap()], why: "the press failed".into() },
+            act(1, look.clone()),
+            done(Action::Read { control: 1, from_line: None, lines: None }),
+        ], "replan-is-an-action");
+        let ev = e.handle_events("what is 12 times 34").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts.iter().any(|p| p.user.contains("that is an action, not a plan step; send it with act")), "{}", prompts.last().unwrap().user);
+    }
+
+    /// The same budget, spent the other way: replanning to the plan already in hand.
+    #[test]
+    fn a_replan_to_the_plan_it_already_has_is_told_to_act() {
+        let Move::Plan { steps } = plan() else { unreachable!() };
+        let (mut e, _, _) = engine_with(vec![
+            Move::Housekeep { goal: "tidy".into(), understood: "Tidying".into(), remember: None }, plan(),
+            Move::Replan { steps: steps.clone(), why: "starting over".into() },
+            act(1, Action::Look { window: None, find: None }),
+            done(Action::Look { window: None, find: None }),
+        ], "replan-same-plan");
+        let ev = e.handle_events("tidy up").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert!(e.model.prompts.borrow().iter().any(|p| p.user.contains("that is the plan you already have")), "no such note");
     }
 
     /// The other half of the same rule: a `read` proves nothing changed, so it clears nothing.
