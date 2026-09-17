@@ -21,6 +21,7 @@ trait Accessible {
     fn get_role(&self) -> zbus::Result<u32>;
     fn get_state(&self) -> zbus::Result<Vec<u32>>;
     fn get_children(&self) -> zbus::Result<Vec<Ref>>;
+    fn get_attributes(&self) -> zbus::Result<std::collections::HashMap<String, String>>;
 }
 
 #[proxy(interface = "org.a11y.atspi.Action", gen_async = false)]
@@ -124,12 +125,25 @@ fn text_at(conn: &Connection, r: &Ref) -> zbus::Result<TextProxy<'static>> {
         .cache_properties(zbus::proxy::CacheProperties::No).build()
 }
 
+/// The first of AT-SPI's `keyshortcuts` ("Control+S Alt+s"), written the way a person reads it.
+/// A GTK 4 popover menu item carries no accessible name, no description and no label child: its
+/// shortcut is the only thing that tells Save from Print, so the hand names it by that.
+fn shortcut_name(attrs: &std::collections::HashMap<String, String>) -> Option<String> {
+    let first = attrs.get("keyshortcuts")?.split_whitespace().next()?;
+    Some(first.replace("Control+", "Ctrl+"))
+}
+
 /// One node, read through the bus. `None` if the object does not answer (gone).
 fn read_node(conn: &Connection, r: &Ref, with_text: bool) -> Option<Node> {
     let a = acc(conn, r).ok()?;
     let role = role_name(a.get_role().ok()?).to_string();
     let state = a.get_state().ok()?;
-    let name = a.name().unwrap_or_default();
+    let mut name = a.name().unwrap_or_default();
+    // Only for a role the model is shown at all: the containers in between are nameless by the
+    // hundred and asking each of them for its attributes would double the walk for nothing.
+    if name.is_empty() && role != "other" {
+        if let Some(s) = a.get_attributes().ok().as_ref().and_then(shortcut_name) { name = s; }
+    }
     let editable = has(&state, EDITABLE);
     let text = if with_text && matches!(role.as_str(), "text" | "entry" | "paragraph" | "document text" | "label") {
         text_at(conn, r).ok().and_then(|t| t.get_text(0, 60).ok()).filter(|s| !s.is_empty())
@@ -169,17 +183,27 @@ fn windows(conn: &Connection) -> Result<Vec<(String, String, Ref)>, String> {
     Ok(v)
 }
 
+/// How a window is listed, and the one string a `look` on it is titled with.
+fn window_line(app: &str, title: &str) -> String { format!("{app} — {title}") }
+
+/// Whether `wanted` names this window: its app, its title, or the whole line the listing printed.
+/// The last one matters because that line is what the model reads and hands straight back.
+fn names_window(app: &str, title: &str, wanted: &str) -> bool {
+    let w = wanted.trim().to_lowercase();
+    !w.is_empty() && (app.to_lowercase().contains(&w) || title.to_lowercase().contains(&w)
+        || window_line(app, title).to_lowercase().contains(&w))
+}
+
 pub struct DesktopWorker(pub Rc<RefCell<DesktopState>>);
 
 impl DesktopWorker {
     fn find_window(conn: &Connection, wanted: &str) -> Result<(String, Ref), String> {
-        let w = wanted.to_lowercase();
         let all = windows(conn)?;
-        let hits: Vec<_> = all.iter().filter(|(app, title, _)| app.to_lowercase().contains(&w) || title.to_lowercase().contains(&w)).collect();
+        let hits: Vec<_> = all.iter().filter(|(app, title, _)| names_window(app, title, wanted)).collect();
         match hits.len() {
             0 => Err(format!("no window matches {wanted}; look with no window to see what is open")),
-            1 => Ok((format!("{} — {}", hits[0].0, hits[0].1), hits[0].2.clone())),
-            n => Err(format!("{n} windows match {wanted}: {}; say which", hits.iter().map(|(a, t, _)| format!("{a} — {t}")).collect::<Vec<_>>().join(", "))),
+            1 => Ok((window_line(&hits[0].0, &hits[0].1), hits[0].2.clone())),
+            n => Err(format!("{n} windows match {wanted}: {}; say which", hits.iter().map(|(a, t, _)| window_line(a, t)).collect::<Vec<_>>().join(", "))),
         }
     }
 
@@ -230,7 +254,7 @@ impl DesktopWorker {
                 let conn = st.conn()?.clone();
                 let all = windows(&conn)?;
                 if all.is_empty() { return Ok("no windows are open".into()); }
-                Ok(format!("windows:\n{}", all.iter().map(|(a, t, _)| format!("- {a} — {t}")).collect::<Vec<_>>().join("\n")))
+                Ok(format!("windows:\n{}", all.iter().map(|(a, t, _)| format!("- {}", window_line(a, t))).collect::<Vec<_>>().join("\n")))
             }
             Action::Look { window: Some(w), find } => {
                 let conn = st.conn()?.clone();
@@ -319,5 +343,31 @@ mod tests {
         }
         assert_eq!(role_name(61), "text", "the editor's text view is what the live check types into");
         assert_eq!(role_name(99), "other", "grouping is furniture");
+    }
+
+    /// The live run's first stumble: the model read `gnome-text-editor — notes.txt - Text Editor`
+    /// out of the window list, said it back, and was told no window matched.
+    #[test]
+    fn a_window_answers_to_the_line_the_listing_printed() {
+        let (app, title) = ("gnome-text-editor", "live-2a-notes.txt (/data/housekeeping) - Text Editor");
+        assert!(names_window(app, title, &window_line(app, title)), "the whole listed line");
+        assert!(names_window(app, title, "Text Editor"), "part of the title");
+        assert!(names_window(app, title, "gnome-text-editor"), "the app");
+        assert!(names_window(app, title, "gnome-text-editor — live-2a-notes.txt"), "the line's head");
+        assert!(names_window(app, title, "TEXT EDITOR"), "case does not matter");
+        assert!(!names_window(app, title, "Calculator"));
+        assert!(!names_window(app, title, "  "), "an empty name picks out nothing, never everything");
+    }
+
+    /// GTK 4's popover menu items carry no name, no description and no label child; the shortcut
+    /// is all there is, so Save can be told from Print (the live run's second stumble).
+    #[test]
+    fn a_nameless_control_is_named_by_its_shortcut() {
+        let attrs = |s: &str| std::collections::HashMap::from([("toolkit".to_string(), "GTK".to_string()), ("keyshortcuts".to_string(), s.to_string())]);
+        assert_eq!(shortcut_name(&attrs("Control+S Alt+s")).as_deref(), Some("Ctrl+S"));
+        assert_eq!(shortcut_name(&attrs("Shift+Control+S Alt+a")).as_deref(), Some("Shift+Ctrl+S"));
+        assert_eq!(shortcut_name(&attrs("F11")).as_deref(), Some("F11"));
+        assert_eq!(shortcut_name(&attrs("")), None, "no shortcut, no name");
+        assert_eq!(shortcut_name(&std::collections::HashMap::new()), None);
     }
 }
