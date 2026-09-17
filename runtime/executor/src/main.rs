@@ -13,7 +13,7 @@ fn main() {
     std::fs::create_dir_all(&ws).ok();
     let sandbox: Box<dyn Worker> = Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.clone() });
     let admin: Box<dyn Worker> = Box::new(AdminWorker);
-    // Task 7 swaps the 8192 for the model's own context size.
+    // The demo binary has no model to ask for a context size; 8192 is the workshop's.
     let desktop: Box<dyn Worker> = Box::new(DesktopWorker(DesktopState::for_model(8192)));
     let log = ActionLog::open("/data/ai-os.db").expect("open log");
     let exec = Executor::new(sandbox, admin, desktop, log, ws);
