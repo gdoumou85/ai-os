@@ -188,6 +188,13 @@ fn windows(conn: &Connection) -> Result<Vec<(String, String, Ref)>, String> {
     Ok(v)
 }
 
+/// The refusal for an id no look has handed out. It says *which* look, because the live run's 9B
+/// listed the windows, read "look first" as something it had already done, and sent the same
+/// action twice more until the job gave up on it.
+fn never_handed_out(id: u32) -> String {
+    format!("control {id} was never handed out; look at a window to get the ids of its controls — looking with no window only lists the windows")
+}
+
 /// The refusal for a control that carries no action; `twin` is the other id of that name that
 /// does, if there is one. GTK 4 lists a menu button twice — a push-button wrapper with no action
 /// and the toggle button behind it that has the real one — and "no action" on its own left the
@@ -266,7 +273,7 @@ impl DesktopWorker {
 
     /// The object behind an id, after the echoed name (if any) and liveness are checked.
     fn resolve(st: &DesktopState, conn: &Connection, id: u32, echoed: Option<&str>) -> Result<Ref, String> {
-        let e = st.ids.get(id).ok_or_else(|| format!("control {id} was never handed out; look first"))?;
+        let e = st.ids.get(id).ok_or_else(|| never_handed_out(id))?;
         if let Some(n) = echoed {
             if n != e.name { return Err(renamed(id, &e.name, n, Self::named_now(st, conn, n))); }
         }
@@ -429,6 +436,15 @@ mod tests {
             assert_eq!(out.detail, format!("invalid application name: {bad}"), "{bad}");
         }
         assert!(w.0.borrow().conn.is_none());
+    }
+
+    /// "look first" was true and useless: the model had just looked — at the window *list*, which
+    /// hands out no ids — so it read the refusal as already answered and repeated itself to death.
+    #[test]
+    fn an_id_no_look_handed_out_says_which_look_to_do() {
+        let m = never_handed_out(1);
+        assert_eq!(m, "control 1 was never handed out; look at a window to get the ids of its controls — looking with no window only lists the windows");
+        assert!(!m.ends_with("look first"), "the instruction a windows-list look already satisfies");
     }
 
     /// The wrapper refusal, the half the gated live check cannot pin headlessly.

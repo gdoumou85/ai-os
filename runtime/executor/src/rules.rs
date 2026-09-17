@@ -1,4 +1,4 @@
-use crate::action::{valid_app_name, valid_name, Action};
+use crate::action::{valid_name, Action};
 use std::path::{Path, PathBuf};
 
 /// The risky-actions verdict. `Auto` runs without asking; `NeedsConfirm` must be

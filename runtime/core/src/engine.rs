@@ -1434,7 +1434,7 @@ mod tests {
             done(Action::Read { control: 1, from_line: None, lines: None }),
         ], "look-clears-failures");
         rec.desktop_outcomes.borrow_mut().extend([
-            Outcome::err("control 1 was never handed out; look first"),
+            Outcome::err("control 1 was never handed out; look at a window to get the ids of its controls"),
             Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
             Outcome::ok("typed 8 characters into control 1"),
             Outcome::ok("(lines 1-2 of 2)\nfirst line\nreviewed"),
