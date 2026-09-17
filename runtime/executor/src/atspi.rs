@@ -188,6 +188,17 @@ fn windows(conn: &Connection) -> Result<Vec<(String, String, Ref)>, String> {
     Ok(v)
 }
 
+/// The refusal for a control that carries no action; `twin` is the other id of that name that
+/// does, if there is one. GTK 4 lists a menu button twice — a push-button wrapper with no action
+/// and the toggle button behind it that has the real one — and "no action" on its own left the
+/// live run's 9B inventing keyboard shortcuts.
+fn twin_hint(name: &str, twin: Option<u32>) -> String {
+    match twin {
+        Some(other) => format!("{name} has no action to press; the other control named {name} is {other} — press that one"),
+        None => format!("{name} has no action to press"),
+    }
+}
+
 /// The refusal for an id whose control is not the one the model echoed. Toolkit object paths are
 /// not stable — GNOME Calculator recycles its buttons' — so a stale id is the ordinary case, and
 /// "look again" costs a whole turn; when the bus still has that name, the refusal points at it.
@@ -243,8 +254,9 @@ impl DesktopWorker {
         }).map(|(id, _)| id)
     }
 
-    /// The id whose control answers to this name on the bus right now — asked of the bus, not of
-    /// the table, so the model is never sent at a control that has moved on too. Refusal path only.
+    /// The first id handed out under this name whose control still answers to it — the table says
+    /// which ids to consider, the bus says whether each one is still that control, so the model is
+    /// never sent at one that has moved on as well. Refusal path only.
     fn named_now(st: &DesktopState, conn: &Connection, wanted: &str) -> Option<u32> {
         st.ids.named(wanted).find(|(_, e)| {
             let Ok(path) = OwnedObjectPath::try_from(e.path.as_str()) else { return false };
@@ -316,10 +328,7 @@ impl DesktopWorker {
                 // ever an answer the control gave.
                 match a.nactions() {
                     Ok(n) if n >= 1 => {}
-                    Ok(_) => return Err(match Self::pressable_twin(&st, &conn, *control, name) {
-                        Some(other) => format!("{name} has no action to press; the other control named {name} is {other} — press that one"),
-                        None => format!("{name} has no action to press"),
-                    }),
+                    Ok(_) => return Err(twin_hint(name, Self::pressable_twin(&st, &conn, *control, name))),
                     Err(e) => return Err(format!("could not ask {name} for its actions: {e}")),
                 }
                 a.do_action(0).map_err(|e| format!("press failed: {e}"))?;
@@ -404,6 +413,13 @@ mod tests {
         assert!(names_window(app, title, "TEXT EDITOR"), "case does not matter");
         assert!(!names_window(app, title, "Calculator"));
         assert!(!names_window(app, title, "  "), "an empty name picks out nothing, never everything");
+    }
+
+    /// The wrapper refusal, the half the gated live check cannot pin headlessly.
+    #[test]
+    fn a_wrapper_refusal_says_which_control_does_have_the_action() {
+        assert_eq!(twin_hint("Main Menu", Some(10)), "Main Menu has no action to press; the other control named Main Menu is 10 — press that one");
+        assert_eq!(twin_hint("Main Menu", None), "Main Menu has no action to press");
     }
 
     /// A stale id is ordinary — the toolkits recycle their objects' paths — so the refusal says
