@@ -79,12 +79,13 @@ pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
     out
 }
 
-/// The windows a job worked: those it looked into or opened, in first-seen order, from the steps
-/// that succeeded (2a §7). Ids come from a look, so a job that pressed anything looked first.
+/// The windows a job worked: those it looked into, in first-seen order, from the steps that
+/// succeeded (2a §7). Ids come only from a windowed look, so nothing is pressed, typed or read in
+/// a window that was never looked at — and an `open_app` desktop-entry id is not a window's name.
 pub(crate) fn windows_worked(job: &Job) -> Vec<String> {
     let mut v: Vec<String> = vec![];
     for s in job.steps.iter().filter(|s| s.ok) {
-        let w = match &s.action { Action::Look { window: Some(w), .. } => w, Action::OpenApp { name, .. } => name, _ => continue };
+        let Action::Look { window: Some(w), .. } = &s.action else { continue };
         if !v.contains(w) { v.push(w.clone()); }
     }
     v
@@ -1991,10 +1992,11 @@ mod tests {
         assert!(files.iter().all(|f| !f.path.ends_with("LAST_RUN.md")), "{files:?}");
     }
 
-    /// 2a §7: the windows a job worked are the ones it looked into or opened, each once, from
-    /// the steps that succeeded — nothing is stored on the job for it.
+    /// 2a §7: the windows a job worked are the ones it looked into, each once, from the steps
+    /// that succeeded — nothing is stored on the job for it. The `open_app` in the script is a
+    /// desktop-entry id, not a window name: listing it too named one window twice.
     #[test]
-    fn done_lists_the_windows_the_job_looked_into_or_opened() {
+    fn done_lists_the_windows_the_job_looked_into() {
         let look = |w: &str| Action::Look { window: Some(w.into()), find: None };
         let (mut e, _, _) = engine_with(vec![
             Move::Housekeep { goal: "take the editor".into(), understood: "Taking the editor".into(), remember: None }, plan(),
@@ -2004,7 +2006,7 @@ mod tests {
         ], "windows-worked");
         let ev = e.handle_events("take my editor").unwrap();
         let Event::Done { windows, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
-        assert_eq!(windows, &vec!["org.gnome.Calculator".to_string(), "Text Editor".to_string()]);
+        assert_eq!(windows, &vec!["Text Editor".to_string()]);
     }
 
     #[test]
