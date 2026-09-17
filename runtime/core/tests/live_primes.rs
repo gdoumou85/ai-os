@@ -22,6 +22,8 @@ fn the_model_writes_and_proves_a_primes_script() {
         Box::new(|ws| (
             Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
             Box::new(AdminWorker) as Box<dyn Worker>,
+            // Task 5 puts the real hand here.
+            Box::new(executor::worker::FakeWorker::new(false)) as Box<dyn Worker>,
         )),
         PathBuf::from("/data/housekeeping"),
         PathBuf::from("/data/snapshots"));

@@ -17,6 +17,7 @@ pub enum ExecOutcome {
 pub enum Lane {
     Sandbox,
     Admin,
+    Desktop,
     Engine,
 }
 
@@ -39,21 +40,23 @@ pub fn lane(action: &Action, workspace: &Path, approved: bool) -> Lane {
         // Listed, not `_`: a new action kind must fail to compile here rather than land
         // silently in the sandbox.
         Action::RunCommand { .. } | Action::HttpPost { .. } | Action::FetchPackages { .. } => Lane::Sandbox,
-        // Temporary: Task 2 gives the desktop hand its own lane.
-        Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. } => Lane::Sandbox,
+        // The desktop hand (2a §6): its own lane, whatever the approval — the seat is the only
+        // place these actions mean anything, and no approval moves them elsewhere.
+        Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. } => Lane::Desktop,
     }
 }
 
 pub struct Executor<W: Worker> {
     sandbox: W,
     admin: W,
+    desktop: W,
     log: ActionLog,
     workspace: PathBuf,
 }
 
 impl<W: Worker> Executor<W> {
-    pub fn new(sandbox: W, admin: W, log: ActionLog, workspace: PathBuf) -> Self {
-        Self { sandbox, admin, log, workspace }
+    pub fn new(sandbox: W, admin: W, desktop: W, log: ActionLog, workspace: PathBuf) -> Self {
+        Self { sandbox, admin, desktop, log, workspace }
     }
 
     /// The one door. Classify, refuse unconfirmed risky actions, run the rest, log everything.
@@ -97,6 +100,7 @@ impl<W: Worker> Executor<W> {
                 let worker = match lane(action, &self.workspace, approved) {
                     Lane::Sandbox => &self.sandbox,
                     Lane::Admin => &self.admin,
+                    Lane::Desktop => &self.desktop,
                     // A programming error: the engine applies its own actions and records them
                     // with `log_only`. Nothing ran, so the log failing here is worth reporting.
                     Lane::Engine => {
@@ -154,6 +158,7 @@ mod tests {
 
     fn exec(ok: bool) -> Executor<FakeWorker> {
         Executor::new(
+            FakeWorker::new(ok),
             FakeWorker::new(ok),
             FakeWorker::new(ok),
             ActionLog::open_in_memory().unwrap(),
@@ -298,5 +303,29 @@ mod tests {
         e.log_text("j", "undo: Setting { .. }: ok: put back").unwrap();
         assert_eq!(e.log.count_for_job("j").unwrap(), 1);
         assert!(e.admin.reversed.borrow().is_empty() && e.sandbox.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn desktop_actions_take_the_desktop_lane() {
+        let ws = PathBuf::from("/data/jobs/j1");
+        for a in [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Bold".into() },
+                  Action::Type { control: 1, text: "x".into(), replace: false }, Action::Read { control: 1, from_line: None, lines: None },
+                  Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }] {
+            assert_eq!(lane(&a, &ws, false), Lane::Desktop, "{a:?}");
+            assert_eq!(lane(&a, &ws, true), Lane::Desktop, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn a_press_runs_on_the_desktop_worker_and_a_risky_one_is_blocked_until_approved() {
+        let e = exec(true);
+        let ok = Action::Press { control: 1, name: "Bold".into() };
+        assert!(matches!(e.execute("j", &ok, false).unwrap(), ExecOutcome::Ran(o) if o.ok));
+        assert_eq!(e.desktop.calls.borrow().as_slice(), &[ok.clone()]);
+        assert!(e.sandbox.calls.borrow().is_empty() && e.admin.calls.borrow().is_empty());
+        let close = Action::Press { control: 2, name: "Close".into() };
+        assert!(matches!(e.execute("j", &close, false).unwrap(), ExecOutcome::Blocked(r) if r.contains("Close")));
+        assert!(matches!(e.execute("j", &close, true).unwrap(), ExecOutcome::Ran(_)));
+        assert_eq!(e.desktop.calls.borrow().len(), 2);
     }
 }

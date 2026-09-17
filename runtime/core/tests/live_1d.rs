@@ -22,7 +22,8 @@ fn start_service() -> PathBuf {
     let listener = service::bind(&sock).unwrap();
     std::thread::spawn(move || service::run(listener, Box::new(|sink| {
         Engine::new(Store::open(DB).unwrap(), OllamaModel::local("qwen3.5:9b"), PathBuf::from("/data/projects"), Some(DB.into()),
-            Box::new(|ws| (Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>, Box::new(AdminWorker) as Box<dyn Worker>)),
+            // Task 5 puts the real hand here.
+            Box::new(|ws| (Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>, Box::new(AdminWorker) as Box<dyn Worker>, Box::new(executor::worker::FakeWorker::new(false)) as Box<dyn Worker>)),
             PathBuf::from("/data/housekeeping"), PathBuf::from("/data/snapshots")).with_sink(sink)
     })));
     let t = Instant::now();

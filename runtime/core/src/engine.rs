@@ -14,8 +14,8 @@ use executor::worker::{Outcome, Worker};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
-/// One project folder in, the two hands that serve it out: (sandbox, admin).
-pub type WorkerFactory = Box<dyn Fn(&Path) -> (Box<dyn Worker>, Box<dyn Worker>)>;
+/// One project folder in, the three hands that serve it out: (sandbox, admin, desktop).
+pub type WorkerFactory = Box<dyn Fn(&Path) -> (Box<dyn Worker>, Box<dyn Worker>, Box<dyn Worker>)>;
 
 /// The scratch folder a housekeeping job works in — the machine's own jobs have no project.
 pub const HOUSEKEEPING_DIR: &str = "/data/housekeeping";
@@ -213,8 +213,8 @@ impl<M: Model> Engine<M> {
     pub(crate) fn executor_for(&self, job: &Job) -> Result<Executor<Box<dyn Worker>>, EngineError> {
         let ws = self.workspace(job);
         let log = match &self.log_path { Some(p) => ActionLog::open(p)?, None => ActionLog::open_in_memory()? };
-        let (sandbox, admin) = (self.workers)(&ws);
-        Ok(Executor::new(sandbox, admin, log, ws))
+        let (sandbox, admin, desktop) = (self.workers)(&ws);
+        Ok(Executor::new(sandbox, admin, desktop, log, ws))
     }
 
     pub(crate) fn read_blueprint(&self, job: &Job) -> Option<String> {

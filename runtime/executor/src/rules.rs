@@ -1,4 +1,4 @@
-use crate::action::{valid_name, Action};
+use crate::action::{valid_app_name, valid_name, Action};
 use std::path::{Path, PathBuf};
 
 /// The risky-actions verdict. `Auto` runs without asking; `NeedsConfirm` must be
@@ -153,6 +153,26 @@ fn names_ok(ns: &[String]) -> Risk {
     }
 }
 
+/// Decision 9 for a press, as code: a control whose name means leaving the machine or
+/// destroying unsaved work is asked about first. Whole words, case-insensitive, so "Closed
+/// captions" is not "Close". Ceiling, stated in the design: a button called "Go" that sends
+/// is not caught — this is the rule the executor can apply without asking the model.
+pub const LEAVES_MACHINE: [&str; 9] = ["send", "post", "publish", "upload", "share", "pay", "buy", "submit", "order"];
+pub const DESTROYS_WORK: [&str; 7] = ["close", "quit", "discard", "don't save", "delete", "revert", "replace"];
+
+pub fn risky_press(name: &str) -> Option<&'static str> {
+    // Curly apostrophes and case folded; then whole-word containment on a padded string.
+    let folded: String = name.to_lowercase().replace(['’', '‘'], "'");
+    let words: Vec<&str> = folded.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).collect();
+    let has = |phrase: &str| {
+        let p: Vec<&str> = phrase.split(' ').collect();
+        words.windows(p.len()).any(|w| w == p.as_slice())
+    };
+    if LEAVES_MACHINE.iter().any(|p| has(p)) { return Some("leaves the machine"); }
+    if DESTROYS_WORK.iter().any(|p| has(p)) { return Some("may throw away unsaved work"); }
+    None
+}
+
 pub fn classify(action: &Action, workspace: &Path) -> Risk {
     match action {
         // Auto: unprivileged, network-isolated, and (since Phase 1b) filesystem-jailed to the
@@ -199,8 +219,14 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
         }
         // A setting is a DB row, not a filesystem/process change — always reversible.
         Action::SetSetting { .. } => Risk::Auto,
-        // Temporary: Task 2 gives the desktop hand its real risk rule.
-        Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. } => Risk::Auto,
+        // The desktop hand (2a §6). `look`, `read` and `type` change nothing the user has not
+        // already put in front of a program; a press is judged by the name the worker verifies.
+        Action::Look { .. } | Action::Type { .. } | Action::Read { .. } => Risk::Auto,
+        Action::Press { name, .. } => match risky_press(name) {
+            Some(why) => Risk::NeedsConfirm(format!("press {name}: it {why}")),
+            None => Risk::Auto,
+        },
+        Action::OpenApp { name, .. } => if valid_app_name(name) { Risk::Auto } else { Risk::NeedsConfirm(format!("invalid application name: {name}")) },
     }
 }
 
@@ -365,5 +391,29 @@ mod tests {
     fn fetch_and_set_setting_are_auto() {
         assert_eq!(classify(&Action::FetchPackages { manager: Manager::Npm, packages: vec!["left-pad".into()] }, &ws()), Risk::Auto);
         assert_eq!(classify(&Action::SetSetting { key: "projects_root".into(), value: "/data/work".into() }, &ws()), Risk::Auto);
+    }
+
+    #[test]
+    fn a_press_is_free_unless_its_name_means_leaving_or_destroying() {
+        let press = |n: &str| Action::Press { control: 1, name: n.into() };
+        assert_eq!(classify(&press("Bold"), &ws()), Risk::Auto);
+        assert_eq!(classify(&press("File"), &ws()), Risk::Auto);
+        for n in ["Send", "send email", "Publish", "Upload", "Share", "Pay now", "Buy", "Submit", "Order"] {
+            assert!(matches!(classify(&press(n), &ws()), Risk::NeedsConfirm(r) if r.contains("leaves the machine")), "{n}");
+        }
+        for n in ["Close", "Quit", "Discard", "Don't Save", "Don’t save", "Delete", "Revert", "Replace", "close window"] {
+            assert!(matches!(classify(&press(n), &ws()), Risk::NeedsConfirm(r) if r.contains("unsaved work")), "{n}");
+        }
+        // A word inside another word is not the word: "Closed captions" is not Close.
+        assert_eq!(classify(&press("Closed captions"), &ws()), Risk::Auto);
+    }
+
+    #[test]
+    fn the_other_desktop_actions_are_free_and_open_app_checks_its_name() {
+        assert_eq!(classify(&Action::Look { window: None, find: None }, &ws()), Risk::Auto);
+        assert_eq!(classify(&Action::Type { control: 1, text: "x".into(), replace: false }, &ws()), Risk::Auto);
+        assert_eq!(classify(&Action::Read { control: 1, from_line: None, lines: None }, &ws()), Risk::Auto);
+        assert_eq!(classify(&Action::OpenApp { name: "org.gnome.Calculator".into(), visible: true }, &ws()), Risk::Auto);
+        assert!(matches!(classify(&Action::OpenApp { name: "../x".into(), visible: false }, &ws()), Risk::NeedsConfirm(_)));
     }
 }
