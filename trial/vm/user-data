@@ -18,22 +18,37 @@ package_update: true
 packages:
   - virtualbox-guest-utils
   - btrfs-progs
+# The repo share cannot be mounted on the boot cloud-init runs in: twenty tries over a hundred
+# seconds were all refused, while the very next boot mounted the same fstab line with nothing else
+# changed (first and second builds, 2026-09-18). So this boot only lays the ground and reboots, and
+# the unit below does the work on the boot that can see the share, then takes itself out.
+write_files:
+  - path: /etc/systemd/system/ai-os-setup.service
+    permissions: '0644'
+    content: |
+      # WORKSHOP ONLY: runs the desktop edition's setup once, on the first boot after cloud-init.
+      [Unit]
+      Description=AI OS desktop edition setup
+      Requires=mnt-repo.mount
+      After=mnt-repo.mount network-online.target
+      Wants=network-online.target
+      ConditionPathExists=/mnt/repo/trial/vm/setup-vm.sh
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      TimeoutStartSec=infinity
+      ExecStart=/bin/bash -c 'set -o pipefail; bash /mnt/repo/trial/vm/setup-vm.sh 2>&1 | tee -a /var/log/ai-os-setup.log'
+      ExecStartPost=/bin/sh -c 'systemctl disable ai-os-setup.service; systemctl reboot'
+
+      [Install]
+      WantedBy=multi-user.target
 runcmd:
   - mkdir -p /mnt/repo
   - echo 'repo /mnt/repo vboxsf uid=1000,gid=1000,nofail 0 0' >> /etc/fstab
-  # The share is not mountable the moment cloud-init arrives here: apt has just touched
-  # virtualbox-guest-utils and the guest additions are still restarting, so the first mount is
-  # refused (first build, 2026-09-18 — it mounted on the next boot with no other change). It comes
-  # up within a few seconds of a retry. The message goes to the setup log, which ai can read;
-  # cloud-init's own log is root-only and a VM with no sudo cannot show it.
-  - |
-    modprobe vboxguest || true
-    modprobe vboxsf || true
-    systemctl daemon-reload
-    i=0
-    while [ $i -lt 20 ] && ! mountpoint -q /mnt/repo; do
-      mount /mnt/repo || sleep 5
-      i=$((i + 1))
-    done
-    mountpoint -q /mnt/repo || echo 'the repo share never mounted' | tee /var/log/ai-os-setup.log
-  - [bash, -c, "set -o pipefail; bash /mnt/repo/trial/vm/setup-vm.sh 2>&1 | tee -a /var/log/ai-os-setup.log && reboot"]
+  - systemctl daemon-reload
+  - systemctl enable ai-os-setup.service
+power_state:
+  mode: reboot
+  message: rebooting into the boot that can mount the repo share
+  condition: true
