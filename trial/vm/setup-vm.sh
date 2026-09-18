@@ -14,8 +14,8 @@ done
 
 echo "== /data on the second disk"
 disk=/dev/sdb
-[ -b $disk ] || { echo "no second disk at $disk" >&2; exit 1; }
-blkid $disk >/dev/null 2>&1 || mkfs.btrfs -q -L ai-os-data $disk
+[ -b "$disk" ] || { echo "no second disk at $disk" >&2; exit 1; }
+blkid "$disk" >/dev/null 2>&1 || mkfs.btrfs -q -L ai-os-data "$disk"
 install -d /data
 grep -q ' /data ' /etc/fstab || echo 'LABEL=ai-os-data /data btrfs noatime,compress=zstd 0 0' >>/etc/fstab
 mountpoint -q /data || mount /data

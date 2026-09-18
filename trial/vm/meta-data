@@ -1,2 +1,3 @@
+# WORKSHOP ONLY: cloud-init NoCloud meta-data for the desktop edition VM.
 instance-id: ai-os-desktop-1
 local-hostname: ai-os

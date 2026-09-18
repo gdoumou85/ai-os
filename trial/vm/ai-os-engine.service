@@ -1,3 +1,4 @@
+# WORKSHOP ONLY: the engine's user unit for the desktop edition VM (desktop design §3 step 6).
 [Unit]
 Description=AI OS engine (desktop edition)
 
