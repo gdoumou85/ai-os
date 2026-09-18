@@ -6,6 +6,9 @@ ExecStart=/usr/local/bin/ai-os-engine
 Environment=AI_OS_DB=/data/ai-os.db
 Environment=AI_OS_MODEL=@MODEL@
 Environment=AI_OS_PROJECTS=/data/projects
+# Both name the one compositor a real desktop has, so the windows the AI opens for itself appear
+# on the person's screen too; the invisible session of the 2a design exists only where a second
+# compositor does.
 Environment=AI_OS_DISPLAY_INVISIBLE=wayland-0
 Environment=AI_OS_DISPLAY_VISIBLE=wayland-0
 @MODEL_URL_LINE@

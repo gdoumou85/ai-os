@@ -25,4 +25,8 @@ curl -fsS --max-time 5 "$url/api/tags" >/dev/null || fail "the model runner does
 if [ $session -eq 1 ]; then
   busctl --user call org.a11y.Bus /org/a11y/bus org.a11y.Bus GetAddress >/dev/null 2>&1 || fail "no accessibility bus in this session"
 fi
-echo "AI OS ready"
+if [ -f /usr/local/share/ai-os/VERSION ]; then
+  echo "AI OS ready ($(cat /usr/local/share/ai-os/VERSION))"
+else
+  echo "AI OS ready"
+fi

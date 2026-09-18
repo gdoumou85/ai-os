@@ -1,44 +1,46 @@
 # Builds the programs where they will run: inside Ubuntu 26.04 (the rail needs GTK 4.18, which the
 # hosted runner's own Ubuntu does not have). Every push to master leaves the tarball as an artifact;
-# a v* tag also publishes it as a release, which is what install/get.sh downloads.
+# a v* tag also publishes it as a release, which is what install/get.sh downloads. The release is a
+# separate job on the plain runner, where gh is already installed and only that job can write.
 name: build
 on:
   push:
     branches: [master]
     tags: ['v*']
   workflow_dispatch:
-permissions:
-  contents: write
 jobs:
   package:
     runs-on: ubuntu-latest
     container: ubuntu:26.04
+    permissions:
+      contents: read
     steps:
       - name: Tools
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git ca-certificates curl build-essential pkg-config cargo libgtk-4-dev gh
+            git ca-certificates curl build-essential pkg-config cargo libgtk-4-dev
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Package
         run: bash install/make-release.sh
+      - name: Check the shipped scripts and the tarball
+        run: |
+          for f in install/*.sh runtime/admin/ai-os-admin runtime/admin/test-admin.sh; do bash -n "$f"; done
+          tar -tzf dist/ai-os-linux-amd64.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: ai-os-linux-amd64
           path: dist/ai-os-linux-amd64.tar.gz
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/ai-os-linux-amd64.tar.gz --title "$GITHUB_REF_NAME" --generate-notes
   test:
     # Not a gate for the package: the suite was written for the workshop machine, and what it
     # assumes of one (a user, /data, sudo) is still being found out here.
     runs-on: ubuntu-latest
     container: ubuntu:26.04
+    permissions:
+      contents: read
     steps:
       - name: Tools
         run: |
@@ -48,3 +50,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Unit tests
         run: cd runtime && cargo test --workspace
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-os-linux-amd64
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" ai-os-linux-amd64.tar.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes || gh release upload "$GITHUB_REF_NAME" ai-os-linux-amd64.tar.gz --repo "$GITHUB_REPOSITORY" --clobber

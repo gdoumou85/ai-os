@@ -23,7 +23,7 @@ sudo -v
 echo "== packages"
 sudo env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y btrfs-progs libgtk-4-1 curl gnome-text-editor \
-  python3-venv npm cargo
+  python3-venv npm cargo at-spi2-core
 
 echo "== /data (btrfs, where the AI works and what undo covers)"
 if ! mountpoint -q /data; then
@@ -43,7 +43,9 @@ if ! mountpoint -q /data; then
   # there but empty, and the next run has to finish the job rather than mount nothing.
   sudo blkid /var/lib/ai-os/data.img >/dev/null 2>&1 || sudo mkfs.btrfs -q -L ai-os-data /var/lib/ai-os/data.img
   # nofail: a missing or broken image must not drop the desktop into an emergency shell at boot.
-  grep -q ' /data ' /etc/fstab || echo '/var/lib/ai-os/data.img /data btrfs loop,noatime,compress=zstd,nofail 0 0' | sudo tee -a /etc/fstab >/dev/null
+  # The leading newline is the point: an /etc/fstab whose last line has no newline of its own
+  # would otherwise swallow this one, and the mount would never be read.
+  grep -q ' /data ' /etc/fstab || printf '\n%s\n' '/var/lib/ai-os/data.img /data btrfs loop,noatime,compress=zstd,nofail 0 0' | sudo tee -a /etc/fstab >/dev/null
   sudo mount /data
 fi
 [ "$(findmnt -no FSTYPE /data)" = btrfs ] || { echo "/data is mounted but is not btrfs — unmount it (and take its line out of /etc/fstab) and run this again" >&2; exit 1; }
@@ -70,8 +72,14 @@ sudo mv -f /etc/sudoers.d/ai-os-admin.tmp /etc/sudoers.d/ai-os-admin
 
 echo "== programs"
 for b in ai-os-engine ai-os-chat ai-os-rail; do sudo install -m 0755 -o root -g root "$here/bin/$b" /usr/local/bin/$b; done
+# Which build this is, for check.sh and for anyone reporting a problem. Older tarballs have none.
+if [ -f "$here/VERSION" ]; then
+  sudo install -d /usr/local/share/ai-os
+  sudo install -m 0644 "$here/VERSION" /usr/local/share/ai-os/VERSION
+fi
 sudo install -m 0644 "$here/org.aios.Rail.desktop" /usr/share/applications/org.aios.Rail.desktop
 sudo install -d /etc/xdg/autostart
+# Machine-wide, not per user: this edition assumes one person per machine.
 sudo install -m 0644 "$here/org.aios.Rail.desktop" /etc/xdg/autostart/org.aios.Rail.desktop
 # A tarball unpacked from a machine that rewrote line endings would leave `#!/usr/bin/env bash\r`
 # in the wrapper and a stray \r in every desktop-entry value.
@@ -100,7 +108,7 @@ else
   sudo systemctl daemon-reload; sudo systemctl enable --now ollama; sudo systemctl restart ollama
   for _ in $(seq 30); do curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done
   ollama pull "$model" || {      # several GB, once
-    echo "the model did not download — run this command again when the network is better" >&2; exit 1; }
+    echo "the model $model did not download — check the name and the network, then run this command again" >&2; exit 1; }
   sudo -v      # the download can outlast sudo's timestamp, and the rest of this still needs root
   # Captured rather than piped into grep, for the same reason as the tags check above.
   gpu=$(lspci 2>/dev/null || true)

@@ -186,7 +186,9 @@ elsewhere (his VM: `http://10.0.2.2:11434`, the Windows Ollama); without it — 
 install, his words: "that command should also install the ollama linux version and any other
 dependencies we need" — the installer installs Ollama, gives its service the two Phase 0 settings
 (flash attention, q8_0 KV cache), pulls `qwen3.5:9b`, and says so plainly when it finds no GPU driver.
-Written, and untested until a machine with a GPU runs it. It ends by running `install/check.sh`, which prints `AI OS ready` or the first failure.
+Written, and untested until a machine with a GPU runs it. It ends by running `install/check.sh`, which prints `AI OS ready` or the first failure. The engine's two display variables both
+name the one compositor a real desktop has, so the windows the AI opens for itself appear on the
+person's screen too; the invisible session of the 2a design exists only where a second compositor does.
 Uninstall is not in this round.
 
 **9.3 Distribution** — one tarball, `ai-os-linux-amd64.tar.gz`: `install.sh`, `check.sh`, the three
