@@ -1,15 +1,14 @@
-# WORKSHOP ONLY: the engine's user unit for the desktop edition VM (desktop design §3 step 6).
 [Unit]
-Description=AI OS engine (desktop edition)
+Description=AI OS engine
 
 [Service]
 ExecStart=/usr/local/bin/ai-os-engine
 Environment=AI_OS_DB=/data/ai-os.db
-Environment=AI_OS_MODEL=qwen3.5:9b
-Environment=AI_OS_MODEL_URL=http://10.0.2.2:11434
+Environment=AI_OS_MODEL=@MODEL@
 Environment=AI_OS_PROJECTS=/data/projects
 Environment=AI_OS_DISPLAY_INVISIBLE=wayland-0
 Environment=AI_OS_DISPLAY_VISIBLE=wayland-0
+@MODEL_URL_LINE@
 Restart=on-failure
 RestartSec=2
 
