@@ -209,9 +209,20 @@ if [ -n "$model_url" ]; then
   else echo "warning: $model_url did not answer with $model — the AI will say so until it does" >&2; fi
   url_line="Environment=AI_OS_MODEL_URL=$model_url"
 else
-  # Untested until a machine with a GPU runs it (desktop design §9.2).
+  # A native install: the runner lives on this machine. Untested until a machine with a GPU runs it
+  # (desktop design §9.2). The two settings are Phase 0's measurement: they are what keeps an 8k
+  # context fully on an 8 GB GPU.
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y zstd     # Ollama's installer unpacks with it
   command -v ollama >/dev/null || curl -fsSL https://ollama.com/install.sh | sh
-  ollama pull "$model"
+  sudo install -d /etc/systemd/system/ollama.service.d
+  printf '[Service]
+Environment=OLLAMA_FLASH_ATTENTION=1
+Environment=OLLAMA_KV_CACHE_TYPE=q8_0
+' | sudo tee /etc/systemd/system/ollama.service.d/ai-os.conf >/dev/null
+  sudo systemctl daemon-reload; sudo systemctl enable --now ollama; sudo systemctl restart ollama
+  for _ in $(seq 30); do curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done
+  ollama pull "$model"      # several GB, once
+  command -v nvidia-smi >/dev/null || lspci 2>/dev/null | grep -qiE 'vga.*(amd|radeon)'     || echo "note: no NVIDIA or AMD graphics driver found — the model will run on the processor, slowly. On NVIDIA: sudo ubuntu-drivers install, then restart." >&2
   url_line=""
 fi
 

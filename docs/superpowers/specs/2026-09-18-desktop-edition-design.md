@@ -182,9 +182,11 @@ at most 50 GB — a hand-installed Ubuntu has one disk); `ai-sandbox` and the `/
 `<owner>:ai-sandbox`; the wrapper and the one sudoers line, validated by `visudo`; the three binaries;
 the engine as the owner's user unit with linger; the rail's desktop entry in the app grid and in XDG
 autostart; `toolkit-accessibility` on. **The model:** `--model-url URL` points the engine at a runner
-elsewhere (his VM: `http://10.0.2.2:11434`, the Windows Ollama); without it the installer installs
-Ollama on the machine and pulls `qwen3.5:9b` — written, and untested until a machine with a GPU runs
-it. It ends by running `install/check.sh`, which prints `AI OS ready` or the first failure.
+elsewhere (his VM: `http://10.0.2.2:11434`, the Windows Ollama); without it — a native Ubuntu
+install, his words: "that command should also install the ollama linux version and any other
+dependencies we need" — the installer installs Ollama, gives its service the two Phase 0 settings
+(flash attention, q8_0 KV cache), pulls `qwen3.5:9b`, and says so plainly when it finds no GPU driver.
+Written, and untested until a machine with a GPU runs it. It ends by running `install/check.sh`, which prints `AI OS ready` or the first failure.
 Uninstall is not in this round.
 
 **9.3 Distribution** — one tarball, `ai-os-linux-amd64.tar.gz`: `install.sh`, `check.sh`, the three
