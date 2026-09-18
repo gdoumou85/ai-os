@@ -200,3 +200,24 @@ for his word on public or private.
 a name that is not `ai`, the tarball installed with `--model-url`, `check.sh` green minus the desktop
 session, the wrapper's own test suite green as that user; then the distro is unregistered. His Ubuntu
 is the acceptance (§6's last item, unchanged).
+
+## 10. WSL is gone (2026-09-18, 17:21, his call): GitHub builds it
+
+He uninstalled WSL from the laptop — the hypervisor layer it kept switched on was what starved the
+VirtualBox guest, and the parent spec always ended with the laptop back on plain Windows (§5.1
+"Removal"). With it went the only machine that could build or test the programs: Windows cannot (Linux
+crates, and the rail needs GTK 4.18, which only Ubuntu 26.04 ships). So §9.3's "built in the WSL
+workshop" and §9.4's fresh-distro proof are replaced:
+
+- **`.github/workflows/build.yml`** builds inside an `ubuntu:26.04` container on GitHub's runners
+  (`install/make-release.sh`): every push to `master` leaves the tarball as an artifact, a `v*` tag
+  publishes it as a release, and `install/get.sh` downloads the latest release. A second job runs the
+  unit tests; it does not gate the package, because what the suite assumes of the workshop machine (a
+  user, `/data`, sudo) is still being found out there.
+- **The repo is public** — `gdoumou85/ai-os` (his word, 17:23): his commit email is rewritten to
+  GitHub's private address before the first push; **no licence for now**, so the code is readable but
+  all rights are reserved until he picks one.
+- **The proof of the installer is his own Ubuntu VM.** Two desk reviews walked `install.sh` line by line
+  in five scenarios instead (they found that `/data` stayed root's, so the engine could not have made
+  its database — fixed before anyone ran it). Development and the live acceptances continue inside his
+  Ubuntu from here.
