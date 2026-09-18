@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# ai-os-admin: the ONLY thing user `ai` may run as root. Fixed menu, validated arguments, no shell strings.
+# ai-os-admin: the ONLY thing the owner's engine may run as root. Fixed menu, validated arguments, no shell strings.
 # Workshop transport for Phase 1c; replaced by the privileged executor daemon at packaging.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 refuse(){ echo "refused: $*" >&2; exit 3; }
+# The owner is whoever sudo says ran this. The sudoers line grants exactly one user and sudo sets
+# SUDO_USER itself, so the caller cannot name someone else (desktop design §9.1).
+owner=${SUDO_USER:-}
+{ [ -n "$owner" ] && [ "$owner" != root ]; } || refuse "run through sudo by the owner"
+home=$(getent passwd "$owner" | cut -d: -f6) || true
+{ [ -n "$home" ] && [ "$home" != / ] && [ -d "$home" ]; } || refuse "owner has no home: $owner"
+ogroup=$(id -gn "$owner")
 # A trailing - is apt's "remove this instead" suffix, so a name may never end in one.
 # A trailing + is apt's "install this instead" suffix, which is what install already does,
 # and real packages end in it: g++, libstdc++6.
@@ -24,19 +31,19 @@ lexnorm(){ local IFS=/ c; local -a parts=() out=(); read -ra parts <<< "$1"
 # realpath alone is NOT enough to decide the roots: the caller owns the folders under /data, so
 # it can plant `p -> /etc/cron.d` there, and `/data/…/p/x` would resolve INTO an allowed root and
 # be written as root. So the resolved path must equal the lexical one — any intermediate symlink
-# makes the two differ and is refused. /data, /home/ai and /etc are real directories, so nothing
-# legitimate changes. (`nolink` below still catches the leaf on paths that never reach here.)
+# makes the two differ and is refused. /data, the owner's home and /etc are real directories, so
+# nothing legitimate changes. (`nolink` below still catches the leaf on paths that never reach here.)
 under(){ local p l; [[ "$1" = /* ]] || refuse "relative path: $1"; p=$(realpath -m -- "$1"); l=$(lexnorm "$1")
   [ "$p" = "$l" ] || refuse "path goes through a symlink: $1"
   for r in "${@:2}"; do [[ "$p" == "$r" || "$p" == "$r/"* ]] && { echo "$p"; return; }; done; refuse "path outside allowed roots: $1"; }
 not_refused_file(){ case "$1" in /etc/sudoers|/etc/sudoers.d|/etc/sudoers.d/*|/etc/passwd|/etc/shadow|/etc/group|/etc/gshadow) refuse "protected file: $1";; esac; }
-# A new directory under /data belongs to the sandbox, not to root; one under /home/ai to `ai`.
-# Nothing else is handed over: an approved `write-file /etc/foo/bar.conf` creates /etc/foo, and
-# chowning THAT to ai:ai would let the sandbox user drop files into a root-read directory
-# afterwards, without an approval. Outside the two AI roots a new directory stays root's.
+# A new directory under /data belongs to the sandbox, not to root; one under the owner's home to
+# the owner. Nothing else is handed over: an approved `write-file /etc/foo/bar.conf` creates
+# /etc/foo, and chowning THAT to the owner would let the sandbox user drop files into a root-read
+# directory afterwards, without an approval. Outside the two AI roots a new directory stays root's.
 own_dir(){ case "$1" in
-  /data/*)    chown ai:ai-sandbox -- "$1"; chmod 2770 -- "$1" ;;
-  /home/ai/*) chown ai:ai -- "$1" ;;
+  /data/*)    chown "$owner":ai-sandbox -- "$1"; chmod 2770 -- "$1" ;;
+  "$home"/*)  chown "$owner:$ogroup" -- "$1" ;;
 esac; }
 verb=${1:-}; shift || true
 case "$verb" in
@@ -64,14 +71,14 @@ case "$verb" in
       *) refuse "unknown service action: $2" ;;
     esac ;;
   read-file)  [ $# -eq 1 ] || refuse "read-file <path>"; nonempty "${1:-}"; nolink "$1"
-    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"
+    p=$(under "$1" /etc /data "$home"); not_refused_file "$p"; nolink "$p"
     # A FIFO under /data is the caller's to create, and `cat` on one blocks forever — as root,
     # holding the executor's call open with it. Only a regular file is ever read.
     [ -f "$p" ] || refuse "not a regular file: $p"
     cat -- "$p" ;;
   # mkdir, never install -d: install -d resets an existing directory's mode (2770 -> 755).
   write-file) [ $# -eq 1 ] || refuse "write-file <path>"; nonempty "${1:-}"; nolink "$1"
-    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"
+    p=$(under "$1" /etc /data "$home"); not_refused_file "$p"; nolink "$p"
     if [ -d "$p" ]; then refuse "is a directory: $p"; fi
     # An existing file keeps its own mode and owner: rewriting a 0600 /etc file must not leave
     # it world-readable. Only a file this call creates gets the defaults further down.
@@ -89,29 +96,29 @@ case "$verb" in
     if [ -f "$p" ] && ! [ -L "$p" ]; then
       if [ -n "$keep" ]; then chmod "${keep%% *}" -- "$p"; chown "${keep#* }" -- "$p"
       else case "$p" in
-        /data/*)    chown ai:ai-sandbox -- "$p"; chmod 0660 -- "$p" ;;
-        /home/ai/*) chown ai:ai -- "$p"; chmod 0644 -- "$p" ;;
+        /data/*)    chown "$owner":ai-sandbox -- "$p"; chmod 0660 -- "$p" ;;
+        "$home"/*)  chown "$owner:$ogroup" -- "$p"; chmod 0644 -- "$p" ;;
         *)          chmod 0644 -- "$p" ;;
       esac; fi
     else refuse "not a regular file after write: $p"; fi
     [ -z "$newdir" ] || own_dir "$newdir" ;;
   remove-file) [ $# -eq 1 ] || refuse "remove-file <path>"; nonempty "${1:-}"; nolink "$1"
-    p=$(under "$1" /etc /data /home/ai); not_refused_file "$p"; nolink "$p"; rm -f -- "$p" ;;
+    p=$(under "$1" /etc /data "$home"); not_refused_file "$p"; nolink "$p"; rm -f -- "$p" ;;
   make-dir)   [ $# -eq 1 ] || refuse "make-dir <path>"; nonempty "${1:-}"; nolink "$1"
-    p=$(under "$1" /data /home/ai); [ -d "$(dirname -- "$p")" ] || refuse "parent directory missing: $p"
+    p=$(under "$1" /data "$home"); [ -d "$(dirname -- "$p")" ] || refuse "parent directory missing: $p"
     # Only a directory this call creates is handed to the sandbox. `make-dir` on one that is
     # already there is a no-op, never a re-owning: an existing root-owned folder under /data
     # must not become writable by the sandbox just because the AI named it.
     if [ -d "$p" ]; then exit 0; fi
     mkdir -p -- "$p"; own_dir "$p" ;;
   remove-dir) [ $# -eq 1 ] || refuse "remove-dir <path>"; nonempty "${1:-}"; nolink "$1"
-    p=$(under "$1" /data /home/ai); rmdir -- "$p" ;;
+    p=$(under "$1" /data "$home"); rmdir -- "$p" ;;
   sandbox-run)
     net=none; cwd=""; envs=()
     while [ $# -gt 0 ]; do case "$1" in
       --net=*) net=${1#--net=};; --cwd=*) cwd=${1#--cwd=};; --env=*) envs+=("--setenv=${1#--env=}");;
       --) shift; break;; *) refuse "bad sandbox-run option: $1";; esac; shift; done
-    [ $# -gt 0 ] || refuse "no command"; [ -n "$cwd" ] || refuse "no cwd"; cwd=$(under "$cwd" /data /home/ai)
+    [ $# -gt 0 ] || refuse "no command"; [ -n "$cwd" ] || refuse "no cwd"; cwd=$(under "$cwd" /data "$home")
     netprops=(--property=PrivateNetwork=yes)
     if [ "$net" != none ]; then
       netprops=(--property=IPAddressDeny=any)
