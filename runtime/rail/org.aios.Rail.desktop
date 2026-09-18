@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=AI OS
+Comment=Tell the AI what you want
+Exec=ai-os-rail
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
