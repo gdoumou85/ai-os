@@ -154,3 +154,72 @@ user-data password handling is workshop-only; the product installer sets it.
   tool. Checked in Task 1.
 - **Guest additions from Ubuntu's package** (`virtualbox-guest-utils`) rather than VirtualBox's ISO:
   they lag VirtualBox by a version but the share and the guest properties are old, stable interfaces.
+
+## 9. Change of approach (2026-09-18, his call): he installs Ubuntu, one command adds the AI OS
+
+Three automated builds in (the cloud image's first boot cannot mount the VirtualBox share; the setup
+moved to a one-shot unit on the next boot and then worked; the guest's vCPUs were starved for 200 s at
+6 vCPUs under the Windows hypervisor layer) he stopped it: **"I install the Ubuntu myself, as any other
+user would. And then we use an install command to add the AI layer as any future user would."** And:
+**"I will create my own user name for my Ubuntu."** §3 (the cloud image, the seed, `make-vm`) and
+`trial/vm/` are withdrawn; §1's decisions on the hypervisor, the model runner and the two-disk split are
+his machine's business now, not the product's. What replaces them:
+
+**9.1 The owner is whoever installs it.** Nothing in the product names the user `ai` any more.
+- The root wrapper takes its owner from `SUDO_USER`, which sudo sets itself and the caller cannot forge;
+  the sudoers line grants exactly one user, so the owner is the only one who can arrive there. The
+  owner's home comes from `getent passwd`. Every `/home/ai` becomes that home, every `ai:` that owner.
+  No `SUDO_USER`, `root`, or a home that is empty, `/` or not a directory: refused before any verb.
+- The job prompt's one mention of `/home/ai` becomes the engine's own `$HOME`.
+- The sandbox account stays `ai-sandbox` (a system account the installer makes).
+- The installer does **not** take the owner out of the `sudo` group: the workshop did that because its
+  `ai` was the AI's account; here it is a person. The engine still reaches root only through
+  `sudo -n <wrapper>`, the single NOPASSWD grant; everything else asks for a password no engine has.
+
+**9.2 The install command** — `install/install.sh`, product, run by the owner (not as root; it calls
+`sudo` for the root steps): runtime packages; `/data` as a sparse btrfs loop file (half the free space,
+at most 50 GB — a hand-installed Ubuntu has one disk); `ai-sandbox` and the `/data` folders owned
+`<owner>:ai-sandbox`; the wrapper and the one sudoers line, validated by `visudo`; the three binaries;
+the engine as the owner's user unit with linger; the rail's desktop entry in the app grid and in XDG
+autostart; `toolkit-accessibility` on. **The model:** `--model-url URL` points the engine at a runner
+elsewhere (his VM: `http://10.0.2.2:11434`, the Windows Ollama); without it — a native Ubuntu
+install, his words: "that command should also install the ollama linux version and any other
+dependencies we need" — the installer installs Ollama, gives its service the two Phase 0 settings
+(flash attention, q8_0 KV cache), pulls `qwen3.5:9b`, and says so plainly when it finds no GPU driver.
+Written, and untested until a machine with a GPU runs it. It ends by running `install/check.sh`, which prints `AI OS ready` or the first failure. The engine's two display variables both
+name the one compositor a real desktop has, so the windows the AI opens for itself appear on the
+person's screen too; the invisible session of the 2a design exists only where a second compositor does.
+Uninstall is not in this round.
+
+**9.3 Distribution** — one tarball, `ai-os-linux-amd64.tar.gz`: `install.sh`, `check.sh`, the three
+binaries, the wrapper, the desktop entry, `VERSION`. `install/make-release.sh` builds it in the WSL
+workshop (binaries are built on Ubuntu 26.04 and promise nothing on older releases). It is attached to
+a GitHub release of the project's repo; `install/get.sh` is the one line a user runs: download the
+latest tarball, unpack, run `install.sh` with the same arguments. Creating the repo and publishing wait
+for his word on public or private.
+
+**9.4 Proof before his VM** — a fresh Ubuntu 26.04 WSL distro imported beside the workshop, a user with
+a name that is not `ai`, the tarball installed with `--model-url`, `check.sh` green minus the desktop
+session, the wrapper's own test suite green as that user; then the distro is unregistered. His Ubuntu
+is the acceptance (§6's last item, unchanged).
+
+## 10. WSL is gone (2026-09-18, 17:21, his call): GitHub builds it
+
+He uninstalled WSL from the laptop — the hypervisor layer it kept switched on was what starved the
+VirtualBox guest, and the parent spec always ended with the laptop back on plain Windows (§5.1
+"Removal"). With it went the only machine that could build or test the programs: Windows cannot (Linux
+crates, and the rail needs GTK 4.18, which only Ubuntu 26.04 ships). So §9.3's "built in the WSL
+workshop" and §9.4's fresh-distro proof are replaced:
+
+- **`.github/workflows/build.yml`** builds inside an `ubuntu:26.04` container on GitHub's runners
+  (`install/make-release.sh`): every push to `master` leaves the tarball as an artifact, a `v*` tag
+  publishes it as a release, and `install/get.sh` downloads the latest release. A second job runs the
+  unit tests; it does not gate the package, because what the suite assumes of the workshop machine (a
+  user, `/data`, sudo) is still being found out there.
+- **The repo is public** — `gdoumou85/ai-os` (his word, 17:23): his commit email is rewritten to
+  GitHub's private address before the first push; **no licence for now**, so the code is readable but
+  all rights are reserved until he picks one.
+- **The proof of the installer is his own Ubuntu VM.** Two desk reviews walked `install.sh` line by line
+  in five scenarios instead (they found that `/data` stayed root's, so the engine could not have made
+  its database — fixed before anyone ran it). Development and the live acceptances continue inside his
+  Ubuntu from here.

@@ -79,7 +79,7 @@ pub fn socket_path() -> std::path::PathBuf {
         .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok())
         .unwrap_or_else(|| {
             use std::os::unix::fs::MetadataExt;
-            let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(1000);
+            let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
             format!("/run/user/{uid}")
         });
     Path::new(&dir).join("ai-os.sock")

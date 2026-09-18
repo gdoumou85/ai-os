@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Machine test for ai-os-admin. Run as user ai inside the ai-os distro after trial/setup-admin.sh.
+# Machine test for ai-os-admin. Run as the owner (the workshop's is ai) after the wrapper is installed.
 set -u
 A="sudo -n /usr/local/libexec/ai-os-admin"
 fail=0; ok(){ echo "PASS $1"; }; bad(){ echo "FAIL $1"; fail=1; }
@@ -47,12 +47,17 @@ $A service ollama state | grep -q '^enabled active' && ok "service state" || bad
 echo hello | $A write-file /data/housekeeping/t1c.txt && [ "$($A read-file /data/housekeeping/t1c.txt)" = hello ] && ok "write/read file" || bad "write/read file"
 $A remove-file /data/housekeeping/t1c.txt && [ ! -e /data/housekeeping/t1c.txt ] && ok "remove-file" || bad "remove-file"
 echo one | $A write-file /data/housekeeping/m600-t1c && chmod 600 /data/housekeeping/m600-t1c && echo two | $A write-file /data/housekeeping/m600-t1c
-[ "$(stat -c '%a %U:%G' /data/housekeeping/m600-t1c 2>&1)" = "600 ai:ai-sandbox" ] && ok "existing mode kept" || bad "existing mode kept: $(stat -c '%a %U:%G' /data/housekeeping/m600-t1c 2>&1)"
+[ "$(stat -c '%a %U:%G' /data/housekeeping/m600-t1c 2>&1)" = "600 $(id -un):ai-sandbox" ] && ok "existing mode kept" || bad "existing mode kept: $(stat -c '%a %U:%G' /data/housekeeping/m600-t1c 2>&1)"
 $A remove-file /data/housekeeping/m600-t1c
-echo hi | $A write-file /data/housekeeping/nd-t1c/f.txt && [ "$(stat -c '%U:%G %a' /data/housekeeping/nd-t1c)" = "ai:ai-sandbox 2770" ] && ok "new parent dir owner" || bad "new parent dir owner: $(stat -c '%U:%G %a' /data/housekeeping/nd-t1c 2>&1)"
+echo hi | $A write-file /data/housekeeping/nd-t1c/f.txt && [ "$(stat -c '%U:%G %a' /data/housekeeping/nd-t1c)" = "$(id -un):ai-sandbox 2770" ] && ok "new parent dir owner" || bad "new parent dir owner: $(stat -c '%U:%G %a' /data/housekeeping/nd-t1c 2>&1)"
 $A remove-file /data/housekeeping/nd-t1c/f.txt; $A remove-dir /data/housekeeping/nd-t1c
-$A make-dir /data/t1c-dir && [ "$(stat -c '%U:%G %a' /data/t1c-dir)" = "ai:ai-sandbox 2770" ] && ok "make-dir owner" || bad "make-dir owner: $(stat -c '%U:%G %a' /data/t1c-dir)"
+$A make-dir /data/t1c-dir && [ "$(stat -c '%U:%G %a' /data/t1c-dir)" = "$(id -un):ai-sandbox 2770" ] && ok "make-dir owner" || bad "make-dir owner: $(stat -c '%U:%G %a' /data/t1c-dir)"
 $A remove-dir /data/t1c-dir && [ ! -e /data/t1c-dir ] && ok "remove-dir" || bad "remove-dir"
+# The owner's home is a root too, and what the wrapper creates there belongs to the owner, not root.
+echo hi | $A write-file "$HOME/f-t1c.txt" && [ "$(stat -c '%U:%G %a' "$HOME/f-t1c.txt" 2>&1)" = "$(id -un):$(id -gn) 644" ] && ok "home file owner" || bad "home file owner: $(stat -c '%U:%G %a' "$HOME/f-t1c.txt" 2>&1)"
+$A remove-file "$HOME/f-t1c.txt"; [ ! -e "$HOME/f-t1c.txt" ] || bad "home file left behind"
+$A make-dir "$HOME/d-t1c" && [ "$(stat -c '%U:%G' "$HOME/d-t1c" 2>&1)" = "$(id -un):$(id -gn)" ] && ok "home dir owner" || bad "home dir owner: $(stat -c '%U:%G' "$HOME/d-t1c" 2>&1)"
+$A remove-dir "$HOME/d-t1c"; [ ! -e "$HOME/d-t1c" ] || bad "home dir left behind"
 # make-dir on a folder that is already there changes nothing — it must never re-own or re-mode
 # a directory it did not create.
 $A make-dir /data/housekeeping/keep-t1c && chmod 700 /data/housekeeping/keep-t1c
@@ -77,5 +82,15 @@ code=$($A sandbox-run --net=$resolver,$pypi --cwd=/data/housekeeping -- curl -sS
 [ "$code" = 200 ] && ok "allowlist reaches pypi" || bad "allowlist pypi code=$code"
 $A sandbox-run --net=$resolver,$pypi --cwd=/data/housekeeping -- curl -sS -m 8 -o /dev/null https://example.com 2>/dev/null && bad "allowlist leaks to example.com" || ok "allowlist blocks example.com"
 $A sandbox-run --net=none --cwd=/data/housekeeping -- python3 -m venv /data/housekeeping/.venv-t1c && ok "venv works in jail" || bad "venv in jail"; rm -rf /data/housekeeping/.venv-t1c
+# The owner comes from sudo, never from the caller (desktop design §9.1). Run unprivileged and
+# without sudo, the wrapper must refuse before it reaches any verb.
+out=$(env -u SUDO_USER bash /usr/local/libexec/ai-os-admin pkg-list 2>&1 >/dev/null); st=$?
+{ [ $st -eq 3 ] && echo "$out" | grep -q '^refused: run through sudo'; } && ok "no SUDO_USER refused" || bad "no SUDO_USER: exit $st: $out"
+out=$(SUDO_USER=root bash /usr/local/libexec/ai-os-admin pkg-list 2>&1 >/dev/null); st=$?
+{ [ $st -eq 3 ] && echo "$out" | grep -q '^refused: run through sudo'; } && ok "root as owner refused" || bad "root as owner: exit $st: $out"
+out=$(SUDO_USER=no-such-user-t1 bash /usr/local/libexec/ai-os-admin pkg-list 2>&1 >/dev/null); st=$?
+{ [ $st -eq 3 ] && echo "$out" | grep -q '^refused: owner has no home'; } && ok "unknown owner refused" || bad "unknown owner: exit $st: $out"
+out=$(SUDO_USER=0 bash /usr/local/libexec/ai-os-admin pkg-list 2>&1 >/dev/null); st=$?
+{ [ $st -eq 3 ] && echo "$out" | grep -q '^refused: run through sudo'; } && ok "root by uid refused" || bad "root by uid: exit $st: $out"
 rm -f /tmp/err
 exit $fail

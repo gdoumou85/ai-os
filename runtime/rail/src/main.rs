@@ -11,7 +11,11 @@ use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 
 fn socket_path() -> PathBuf {
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
+        format!("/run/user/{uid}")
+    });
     PathBuf::from(dir).join("ai-os.sock")
 }
 

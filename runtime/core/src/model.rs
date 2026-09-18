@@ -44,6 +44,12 @@ pub struct OllamaModel { pub url: String, pub model: String }
 
 impl OllamaModel {
     pub fn local(model: &str) -> Self { Self { url: "http://127.0.0.1:11434".into(), model: model.into() } }
+    /// `AI_OS_MODEL_URL` when set (the desktop edition points it at the host's runner), else local.
+    pub fn from_env(model: &str) -> Self {
+        let mut m = Self::local(model);
+        if let Ok(url) = std::env::var("AI_OS_MODEL_URL") { m.url = url; }
+        m
+    }
 }
 
 /// Narrow `format.oneOf` to the moves legal for this call (decision 13): the model physically
@@ -220,5 +226,17 @@ mod tests {
         let mv = m.next_move(&prompt).unwrap();
         eprintln!("{mv:?}");
         assert!(matches!(mv, Move::Reply { .. }));
+    }
+
+    /// The desktop edition's engine reaches a runner on another machine (desktop design §4): one
+    /// environment setting, read in one place. Only this test touches the variable.
+    #[test]
+    fn the_model_address_comes_from_the_environment() {
+        std::env::remove_var("AI_OS_MODEL_URL");
+        assert_eq!(OllamaModel::from_env("m").url, "http://127.0.0.1:11434");
+        std::env::set_var("AI_OS_MODEL_URL", "http://10.0.2.2:11434");
+        let m = OllamaModel::from_env("qwen3.5:9b");
+        std::env::remove_var("AI_OS_MODEL_URL");
+        assert_eq!((m.url.as_str(), m.model.as_str()), ("http://10.0.2.2:11434", "qwen3.5:9b"));
     }
 }
