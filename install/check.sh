@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Is the AI OS installed and alive for this user? Prints "AI OS ready" or the first failure.
-#   bash check.sh [--no-session]     --no-session skips what needs a logged-in desktop
+#   ai-os-check [--no-session]     the installer puts it at /usr/local/bin/ai-os-check; inside
+#                                 the unpacked tarball it is `bash check.sh`
+#   --no-session skips what needs a logged-in desktop
 session=1
 case "${1:-}" in
   "") ;;

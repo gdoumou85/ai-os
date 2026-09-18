@@ -77,14 +77,16 @@ if [ -f "$here/VERSION" ]; then
   sudo install -d /usr/local/share/ai-os
   sudo install -m 0644 "$here/VERSION" /usr/local/share/ai-os/VERSION
 fi
+# The check outlives the unpacked tarball, which get.sh deletes on its way out.
+sudo install -m 0755 "$here/check.sh" /usr/local/bin/ai-os-check
 sudo install -m 0644 "$here/org.aios.Rail.desktop" /usr/share/applications/org.aios.Rail.desktop
 sudo install -d /etc/xdg/autostart
 # Machine-wide, not per user: this edition assumes one person per machine.
 sudo install -m 0644 "$here/org.aios.Rail.desktop" /etc/xdg/autostart/org.aios.Rail.desktop
 # A tarball unpacked from a machine that rewrote line endings would leave `#!/usr/bin/env bash\r`
 # in the wrapper and a stray \r in every desktop-entry value.
-sudo sed -i 's/\r$//' /usr/local/libexec/ai-os-admin /usr/share/applications/org.aios.Rail.desktop \
-  /etc/xdg/autostart/org.aios.Rail.desktop
+sudo sed -i 's/\r$//' /usr/local/libexec/ai-os-admin /usr/local/bin/ai-os-check \
+  /usr/share/applications/org.aios.Rail.desktop /etc/xdg/autostart/org.aios.Rail.desktop
 
 echo "== the model"
 if [ -n "$model_url" ]; then
