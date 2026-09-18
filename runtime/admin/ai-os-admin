@@ -6,11 +6,16 @@ export DEBIAN_FRONTEND=noninteractive
 refuse(){ echo "refused: $*" >&2; exit 3; }
 # The owner is whoever sudo says ran this. The sudoers line grants exactly one user and sudo sets
 # SUDO_USER itself, so the caller cannot name someone else (desktop design §9.1).
+# A symlinked home is deliberately unsupported: `under` refuses every path that goes through a
+# symlink, so such a home would simply have no reachable paths.
 owner=${SUDO_USER:-}
 { [ -n "$owner" ] && [ "$owner" != root ]; } || refuse "run through sudo by the owner"
 home=$(getent passwd "$owner" | cut -d: -f6) || true
+home=${home%/}   # a trailing slash would match nothing below; a home of / becomes empty and is refused
 { [ -n "$home" ] && [ "$home" != / ] && [ -d "$home" ]; } || refuse "owner has no home: $owner"
-ogroup=$(id -gn "$owner")
+# The name is not the whole check: `SUDO_USER=0` is root's passwd entry under another spelling.
+[ "$(id -u "$owner")" != 0 ] || refuse "run through sudo by the owner"
+ogroup=$(id -gn "$owner") || refuse "owner has no group: $owner"
 # A trailing - is apt's "remove this instead" suffix, so a name may never end in one.
 # A trailing + is apt's "install this instead" suffix, which is what install already does,
 # and real packages end in it: g++, libstdc++6.

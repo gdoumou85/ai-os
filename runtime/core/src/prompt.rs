@@ -105,8 +105,11 @@ pub fn summarise_steps(job: &Job) -> String {
     if out.is_empty() { "(nothing done yet)".into() } else { out }
 }
 
-/// The owner's home as the engine sees it; the wrapper accepts exactly this root (design §9.1).
-fn home() -> String { std::env::var("HOME").unwrap_or_else(|_| "/home/ai".into()) }
+/// The owner's home as the engine sees it, named beside /data as a root the wrapper accepts
+/// (design §9.1). No home, no invented one: the header then promises only /data.
+fn home_clause(home: Option<String>) -> String {
+    match home { Some(h) if !h.is_empty() => format!(" and {h}"), _ => String::new() }
+}
 
 pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, last_run: Option<&str>) -> Prompt {
     let answers = if job.answers.is_empty() { "(none)".into() } else {
@@ -116,7 +119,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
     let (header, bp_block) = if job.housekeeping {
-        (format!("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data and {}, and a check out there reports what the sandbox cannot see, not what is not there. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) make_dir the folder, 2) set_setting projects_root=<that absolute path>, 3) done with make_dir (or run_command ls) as the check, and that job is not done until the setting is set. A window the user named is found with `look` first; nothing inside a window is a file of yours.", home()), String::new())
+        (format!("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data{}, and a check out there reports what the sandbox cannot see, not what is not there. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) make_dir the folder, 2) set_setting projects_root=<that absolute path>, 3) done with make_dir (or run_command ls) as the check, and that job is not done until the setting is set. A window the user named is found with `look` first; nothing inside a window is a file of yours.", home_clause(std::env::var("HOME").ok())), String::new())
     } else {
         let bp = match blueprint {
             Some(b) => b.chars().take(3000).collect::<String>(),
@@ -267,11 +270,14 @@ mod tests {
         assert!(p.user.contains("cannot see outside the scratch folder"), "{}", p.user);
     }
 
-    /// The housekeeping header names the home of whoever runs the engine, not a fixed user.
+    /// The housekeeping header names the home of whoever runs the engine, not a fixed user —
+    /// and names no home at all rather than invent one when the engine has no HOME.
     #[test]
     fn the_housekeeping_header_names_the_owners_home() {
-        let h = home();
-        assert!(!h.is_empty());
+        assert_eq!(home_clause(Some("/home/sam".into())), " and /home/sam");
+        assert_eq!(home_clause(None), "");
+        assert_eq!(home_clause(Some(String::new())), "");
+        let h = std::env::var("HOME").expect("the engine always runs with a HOME");
         let mut job = Job::new("scratch", "/data/projects/scratch", "tidy", false, "Tidying");
         job.housekeeping = true;
         let p = job_turn(&[], &job, None, None);
