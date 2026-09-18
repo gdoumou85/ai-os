@@ -19,7 +19,7 @@ fn main() {
         let store = Store::open(&db).expect("open store");
         // One state for the whole process: the accessibility bus connection and the id table
         // outlive any one job. The look cap follows the model's own context (2a §4).
-        let llm = OllamaModel::local(&model);
+        let llm = OllamaModel::from_env(&model);
         let desktop = DesktopState::for_model(llm.context_tokens());
         Engine::new(store, llm, root, Some(db),
             Box::new(move |ws| (
