@@ -1,0 +1,27 @@
+#cloud-config
+# WORKSHOP ONLY: the desktop edition's first boot (desktop design §3). make-vm.ps1 replaces
+# @PASSWORD@ and packs this into seed.iso; the seed is never committed.
+hostname: ai-os
+users:
+  - name: ai
+    uid: "1000"
+    shell: /bin/bash
+    lock_passwd: false
+chpasswd:
+  expire: false
+  users:
+    - name: ai
+      password: "@PASSWORD@"
+      type: text
+ssh_pwauth: false
+package_update: true
+packages:
+  - virtualbox-guest-utils
+  - btrfs-progs
+runcmd:
+  - modprobe vboxguest
+  - modprobe vboxsf
+  - mkdir -p /mnt/repo
+  - echo 'repo /mnt/repo vboxsf uid=1000,gid=1000,nofail 0 0' >> /etc/fstab
+  - mount /mnt/repo
+  - [bash, -c, "set -o pipefail; bash /mnt/repo/trial/vm/setup-vm.sh 2>&1 | tee /var/log/ai-os-setup.log && reboot"]
