@@ -36,6 +36,9 @@ pub struct Job {
     pub state: State,
     pub answers: Vec<(String, String)>,
     pub pending_questions: Vec<String>,
+    /// The buttons offered with each pending question; a job saved before them has none.
+    #[serde(default)]
+    pub pending_options: Vec<Vec<String>>,
     pub plan: Vec<String>,
     pub steps: Vec<StepRecord>,
     pub pending_action: Option<(usize, Action)>,
@@ -113,7 +116,7 @@ impl Job {
             id: format!("{project}-{millis}-{counter}"),
             project: project.into(), goal: goal.into(), creative, understood: understood.into(),
             state: if creative { State::Planning } else { State::Asking },
-            answers: vec![], pending_questions: vec![], plan: vec![], steps: vec![],
+            answers: vec![], pending_questions: vec![], pending_options: vec![], plan: vec![], steps: vec![],
             pending_action: None, pending_reason: String::new(), failed_actions: vec![],
             declined_actions: vec![], approved_actions: vec![], rejections: 0, replans: 0,
             note_to_model: None, last_code_change: 0, last_blueprint_update: 0,

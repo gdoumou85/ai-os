@@ -50,7 +50,7 @@ impl Shared {
             Event::Understood { job_id, name, text, housekeeping } => *m = Some(JobState { id: job_id.clone(), name: name.clone(), housekeeping: *housekeeping, understood: text.clone(), plan: vec![], steps: vec![], waiting: Waiting::None }),
             Event::Plan { steps, .. } => if let Some(j) = m.as_mut() { j.plan = steps.clone(); j.waiting = Waiting::None; },
             Event::Step { plan_step, text, ok, .. } => if let Some(j) = m.as_mut() { j.steps.push(StepView { plan_step: *plan_step, text: text.clone(), ok: *ok }); j.waiting = Waiting::None; },
-            Event::NeedsAnswer { questions, .. } => if let Some(j) = m.as_mut() { j.waiting = Waiting::Answer { questions: questions.clone() }; },
+            Event::NeedsAnswer { questions, options, .. } => if let Some(j) = m.as_mut() { j.waiting = Waiting::Answer { questions: questions.clone(), options: options.clone() }; },
             Event::NeedsOk { what, why, .. } => if let Some(j) = m.as_mut() { j.waiting = Waiting::Ok { what: what.clone(), why: why.clone() }; },
             Event::Done { .. } | Event::Failed { .. } | Event::Stopped { .. } => *m = None,
             _ => {}

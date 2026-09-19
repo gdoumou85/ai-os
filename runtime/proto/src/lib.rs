@@ -33,7 +33,7 @@ pub struct StepView { pub plan_step: usize, pub text: String, pub ok: bool }
 /// What the open job is waiting for. `"none"` on the wire when nothing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Waiting { None, Answer { questions: Vec<String> }, Ok { what: String, why: String } }
+pub enum Waiting { None, Answer { questions: Vec<String>, #[serde(default)] options: Vec<Vec<String>> }, Ok { what: String, why: String } }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobState {
@@ -56,7 +56,8 @@ pub enum Event {
     Understood { job_id: String, name: String, text: String, housekeeping: bool },
     Plan { job_id: String, steps: Vec<String> },
     Step { job_id: String, plan_step: usize, text: String, ok: bool },
-    NeedsAnswer { job_id: String, questions: Vec<String> },
+    /// `options[i]`: the answers to offer as buttons for `questions[i]`, maybe none.
+    NeedsAnswer { job_id: String, questions: Vec<String>, #[serde(default)] options: Vec<Vec<String>> },
     NeedsOk { job_id: String, what: String, why: String },
     Done { job_id: String, text: String, check: Option<String>, files: Vec<ChangedFile>, #[serde(default)] windows: Vec<String> },
     Failed { job_id: String, text: String, files: Vec<ChangedFile> },
@@ -156,7 +157,7 @@ mod tests {
             Event::Understood { job_id: "j".into(), name: "p".into(), text: "Starting p".into(), housekeeping: false },
             Event::Plan { job_id: "j".into(), steps: vec!["a".into()] },
             Event::Step { job_id: "j".into(), plan_step: 1, text: "wrote a".into(), ok: true },
-            Event::NeedsAnswer { job_id: "j".into(), questions: vec!["?".into()] },
+            Event::NeedsAnswer { job_id: "j".into(), questions: vec!["?".into()], options: vec![vec!["a".into(), "b".into()]] },
             Event::NeedsOk { job_id: "j".into(), what: "http post to x".into(), why: "network".into() },
             Event::Done { job_id: "j".into(), text: "done".into(), check: Some("ran true".into()), files: vec![ChangedFile { path: "/a".into(), kind: FileKind::Text, size: 1 }], windows: vec![] },
             Event::Failed { job_id: "j".into(), text: "gave up".into(), files: vec![] },

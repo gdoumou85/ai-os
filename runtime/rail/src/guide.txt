@@ -19,7 +19,7 @@ The AI does not remember the chat itself. What is worth keeping it writes down: 
 
 • <b>Building</b>: a job in progress, with a tick next to each step as it finishes.
 • <b>Needs your OK</b> (orange): the AI wants to do something that could hurt, like changing a system file or pressing Delete in a program. Nothing happens until you press Yes.
-• <b>A question</b> (blue): type your answer in the box.
+• <b>A question</b> (blue): click one of the answers under it, or type your own in the box. When it asks several questions, your clicks gather in the box and go once each question has one.
 • <b>Done</b> (green): the job is finished and proved. The files it changed are listed with an Open button, and Undo is underneath.
 • <b>Failed</b> (red): what went wrong, in plain words.
 

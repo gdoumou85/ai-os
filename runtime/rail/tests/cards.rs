@@ -62,19 +62,19 @@ fn busy_is_a_line_not_a_card_and_state_rebuilds_a_job() {
     assert_eq!(cards.apply(&Event::Busy { job_id: j(), text: "working".into() }), vec![Change::Line("working".into())]);
     assert!(cards.list.is_empty());
     let st = JobState { id: j(), name: "p".into(), housekeeping: false, understood: "Starting p".into(), plan: vec!["a".into(), "b".into()],
-        steps: vec![StepView { plan_step: 1, text: "wrote a".into(), ok: true }], waiting: Waiting::Answer { questions: vec!["which?".into()] } };
+        steps: vec![StepView { plan_step: 1, text: "wrote a".into(), ok: true }], waiting: Waiting::Answer { questions: vec!["which?".into()], options: vec![] } };
     cards.apply(&Event::State { job: Some(st) });
     assert_eq!(cards.list.len(), 2);
     let CardKind::Building { steps, .. } = &cards.list[0].kind else { panic!() };
     assert!(steps[0].done && !steps[1].done);
-    assert!(matches!(&cards.list[1].kind, CardKind::NeedsAnswer { questions } if questions == &vec!["which?".to_string()]));
+    assert!(matches!(&cards.list[1].kind, CardKind::NeedsAnswer { questions, .. } if questions == &vec!["which?".to_string()]));
     assert_eq!(cards.apply(&Event::State { job: None }), vec![], "an empty state changes nothing");
 }
 
 #[test]
 fn a_reconnect_refills_the_open_job_instead_of_opening_a_second_one() {
     let st = |steps: Vec<StepView>| JobState { id: j(), name: "p".into(), housekeeping: false, understood: "Starting p".into(),
-        plan: vec!["a".into(), "b".into()], steps, waiting: Waiting::Answer { questions: vec!["which?".into()] } };
+        plan: vec!["a".into(), "b".into()], steps, waiting: Waiting::Answer { questions: vec!["which?".into()], options: vec![] } };
     let mut cards = Cards::default();
     cards.apply(&Event::State { job: Some(st(vec![StepView { plan_step: 1, text: "wrote a".into(), ok: true }])) });
     assert_eq!(cards.list.len(), 2, "the Building card and the question");
@@ -102,7 +102,7 @@ fn clear_keeps_only_the_running_job_and_what_it_waits_on() {
 
     cards.apply(&Event::You { text: "make p".into() });
     cards.apply(&Event::Understood { job_id: j(), name: "p".into(), text: "Starting p".into(), housekeeping: false });
-    cards.apply(&Event::NeedsAnswer { job_id: j(), questions: vec!["which one?".into()] });
+    cards.apply(&Event::NeedsAnswer { job_id: j(), questions: vec!["which one?".into()], options: vec![] });
     cards.apply(&Event::You { text: "the first".into() });
     cards.apply(&Event::Said { text: "noted".into() });
     cards.apply(&Event::NeedsOk { job_id: j(), what: "http post to x".into(), why: "network".into() });
@@ -130,4 +130,15 @@ fn the_spinner_runs_from_your_message_until_the_turn_comes_back() {
     assert_eq!(busy_after(&Event::Said { text: "hi".into() }), Some(false));
     assert_eq!(busy_after(&Event::Error { text: "bad".into() }), Some(false));
     assert_eq!(busy_after(&Event::State { job: None }), None);
+}
+
+#[test]
+fn clicked_answers_are_sent_once_every_question_has_one() {
+    use aios_rail::cards::answer;
+    let one = vec!["Which language?".to_string()];
+    assert_eq!(answer(&one, &[Some("Python".into())]), ("Python".into(), true), "one question: the click is the answer");
+    assert_eq!(answer(&one, &[None]), (String::new(), false));
+    let two = vec!["Which language?".to_string(), "Its name?".to_string()];
+    assert_eq!(answer(&two, &[Some("Rust".into()), None]), ("Which language? Rust.".into(), false), "the name is still to type");
+    assert_eq!(answer(&two, &[Some("Rust".into()), Some("primes".into())]), ("Which language? Rust. Its name? primes.".into(), true));
 }
