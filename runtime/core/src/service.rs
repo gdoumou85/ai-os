@@ -114,7 +114,19 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         // Everything a client thread reads is now set: clients may arrive, and they watch the
         // resumed job go by like any other.
         let _ = ready.send(engine.stop_flag());
-        if let Err(e) = engine.resume() { eprintln!("engine: resume failed: {e}"); }
+        // At boot the engine starts before the network does (the owner's VM, 2026-09-19: "Network
+        // is unreachable", and the open job left where it was). A resume the model runner could not
+        // answer is tried again for a minute; anything else is reported once.
+        for attempt in 1.. {
+            match engine.resume() {
+                Err(e) if attempt < 12 && e.to_string().contains("model http") => {
+                    eprintln!("engine: resume waiting for the model runner ({e}); trying again in 5 s");
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                Err(e) => { eprintln!("engine: resume failed: {e}"); break }
+                Ok(_) => break,
+            }
+        }
         sh.running.store(false, Ordering::SeqCst);
         engine.stop_flag().swap(false, Ordering::SeqCst);
         for cmd in rx {
