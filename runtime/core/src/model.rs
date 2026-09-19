@@ -103,11 +103,11 @@ impl RemoteModel {
     }
 }
 
-/// How long one answer may take: 10 minutes, or `AI_OS_MODEL_TIMEOUT` seconds. Three minutes was
+/// How long one answer may take: 30 minutes, or `AI_OS_MODEL_TIMEOUT` seconds. Three minutes was
 /// too short for the owner's bigger LM Studio model on a long job (2026-09-19): a model that must
 /// load first, or a machine with no graphics card, can take several minutes over one answer.
 fn answer_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(std::env::var("AI_OS_MODEL_TIMEOUT").ok().and_then(|s| s.parse().ok()).filter(|s| *s > 0).unwrap_or(600))
+    std::time::Duration::from_secs(std::env::var("AI_OS_MODEL_TIMEOUT").ok().and_then(|s| s.parse().ok()).filter(|s| *s > 0).unwrap_or(1800))
 }
 
 /// The reason in a runner's error body: Ollama's `{"error":"…"}`, OpenAI's `{"error":{"message":"…"}}`,
