@@ -149,7 +149,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     // carry none, and then the line is simply not there.
     let verbatim = if job.request.is_empty() { String::new() } else { format!("The user asked (verbatim): {}\n", job.request) };
     let user = format!(
-        "Machine: Ubuntu Linux (python3, no `python`; apt via install; pip/npm/cargo via fetch_packages).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
+        "Machine: Ubuntu Linux (python3, no `python`; apt via install; pip/npm/cargo via fetch_packages; pip ones go into the working directory's .venv, so run them from there: .venv/bin/python, .venv/bin/django-admin).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
         join_instructions(instructions), header, job.goal, verbatim, mode, job.understood, answers, plan, bp_block, last, summarise_steps(job), note, hint
     );
     Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job), image: None }
@@ -244,6 +244,14 @@ mod tests {
         let job = Job::new_housekeeping("/data/housekeeping", "take the editor", "Taking it");
         let t = job_turn(&[], &job, None, None);
         assert!(t.user.contains("found with `look` first"), "{}", t.user);
+    }
+
+    #[test]
+    fn the_job_turn_says_where_pip_packages_land() {
+        // The owner's Django job (2026-09-19): fetched with pip, then checked with the system
+        // python3, which cannot see the project's .venv, so a working install read as a failure.
+        let j = Job::new("p", "/data/projects/p", "g", false, "u");
+        assert!(job_turn(&[], &j, None, None).user.contains(".venv/bin/python"));
     }
 
     #[test]
