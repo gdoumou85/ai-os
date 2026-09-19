@@ -466,7 +466,7 @@ impl<M: Model> Engine<M> {
         }
     }
 
-    const MAX_STEPS: usize = 25;
+    const MAX_STEPS: usize = 200;
     const MAX_FAILS_PER_STEP: usize = 3;
     const MAX_REJECTIONS: u32 = 2;
     /// `done` moves the blueprint gate may hold back before the job gives up (see `Job::done_gated`).
