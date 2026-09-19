@@ -110,13 +110,20 @@ impl Cards {
         }
     }
 
-    /// The Clear button: every card goes but the running job's, and whatever came after it — its
-    /// Stop button and a Yes/No still waiting on the person must stay reachable.
+    /// The Clear button: every card goes but the running job's own and the question still waiting
+    /// on the person, if the last card is one. Keeping everything after the job's card kept a long
+    /// job's whole back-and-forth, and Clear looked broken (the owner's run, 2026-09-19).
     pub fn clear(&mut self) {
-        let from = self.building.unwrap_or(self.list.len());
-        self.list.drain(..from);
-        self.building = self.building.map(|_| 0);
+        let Some(b) = self.building else { self.list.clear(); return };
+        let waiting = self.list.len() - 1 > b
+            && matches!(self.list.last().map(|c| &c.kind), Some(CardKind::NeedsAnswer { .. } | CardKind::NeedsOk { .. }));
+        let kept: Vec<Card> = std::iter::once(self.list[b].clone()).chain(waiting.then(|| self.list.last().cloned()).flatten()).collect();
+        self.list = kept;
+        self.building = Some(0);
     }
+
+    /// A job is on screen and still running: the title bar's Stop shows.
+    pub fn running(&self) -> bool { self.building.is_some() }
 
     /// A reopened rail: the open job as one Building card (steps ticked so far) plus its
     /// waiting card, if any. Earlier finished jobs are not replayed (1d §4.2).

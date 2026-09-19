@@ -180,6 +180,11 @@ fn main() {
         let clear = gtk::Button::with_label("Clear");
         clear.set_tooltip_text(Some("Clear the chat (a task still running stays)"));
         header.pack_start(&clear);
+        // Stop where it can always be reached while a job runs, not on a card scrolled out of view.
+        let stop = gtk::Button::with_label("Stop");
+        stop.add_css_class("destructive-action");
+        stop.set_visible(false);
+        header.pack_end(&stop);
         win.set_titlebar(Some(&header));
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&column).build();
@@ -211,6 +216,8 @@ fn main() {
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
 
+        let s_stop = say.clone();
+        stop.connect_clicked(move |_| { let _ = s_stop.send("stop".into()); });
         let (cards3, widgets3, column3, say3) = (cards.clone(), widgets.clone(), column.clone(), say.clone());
         clear.connect_clicked(move |_| {
             cards3.borrow_mut().clear();
@@ -221,7 +228,7 @@ fn main() {
         let s = say.clone();
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(t); e.set_text(""); } });
 
-        let (cards2, widgets2, column2, status2, say2, spinner2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone());
+        let (cards2, widgets2, column2, status2, say2, spinner2, stop2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone());
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
                 match msg {
@@ -243,6 +250,7 @@ fn main() {
                                 Change::Line(t) => status2.set_text(&t),
                             }
                         }
+                        stop2.set_visible(cards2.borrow().running());
                     }
                 }
             }
