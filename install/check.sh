@@ -21,8 +21,17 @@ sudo -n /usr/local/libexec/ai-os-admin service ai-os-none state >/dev/null 2>&1 
 [ "$(stat -c %U:%G /data/projects)" = "$owner:ai-sandbox" ] || fail "/data/projects is not $owner:ai-sandbox"
 systemctl --user is-active ai-os-engine.service >/dev/null || fail "the engine service is not running (journalctl --user -u ai-os-engine)"
 [ -S "$XDG_RUNTIME_DIR/ai-os.sock" ] || fail "the engine's socket is missing"
-url=$(systemctl --user show ai-os-engine.service -p Environment | tr ' ' '\n' | sed -n 's/^AI_OS_MODEL_URL=//p'); url=${url:-http://127.0.0.1:11434}
-curl -fsS --max-time 5 "$url/api/tags" >/dev/null || fail "the model runner does not answer at $url"
+env=$(systemctl --user show ai-os-engine.service -p Environment | tr ' ' '\n')
+url=$(sed -n 's/^AI_OS_MODEL_URL=//p' <<<"$env"); url=${url:-http://127.0.0.1:11434}
+kind=$(sed -n 's/^AI_OS_MODEL_KIND=//p' <<<"$env")
+if [ "$kind" = openai ]; then
+  key=$(sed -n 's/^AI_OS_MODEL_KEY=//p' "$HOME/.config/ai-os/model.env" 2>/dev/null)
+  # The key as a header file, not an argument: a command line is readable by everyone through ps.
+  curl -fsS --max-time 5 -H @<(printf 'Authorization: Bearer %s\n' "$key") "$url/v1/models" >/dev/null \
+    || fail "LM Studio does not answer at $url — is its server on, reachable from the network, and the key still valid?"
+else
+  curl -fsS --max-time 5 "$url/api/tags" >/dev/null || fail "the model runner does not answer at $url"
+fi
 [ -f /etc/xdg/autostart/org.aios.Rail.desktop ] || fail "the chat window is not set to open with the session"
 if [ $session -eq 1 ]; then
   busctl --user call org.a11y.Bus /org/a11y/bus org.a11y.Bus GetAddress >/dev/null 2>&1 || fail "no accessibility bus in this session"

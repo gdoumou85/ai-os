@@ -3,7 +3,7 @@
 //   AI_OS_LIVE=1 cargo test -p aios-core --test live_primes -- --nocapture
 use aios_core::engine::Engine;
 use aios_core::job::{Job, State};
-use aios_core::model::{Model, OllamaModel};
+use aios_core::model::{Model, RemoteModel};
 use aios_core::store::Store;
 use executor::action::Action;
 use executor::admin::AdminWorker;
@@ -19,7 +19,7 @@ fn the_model_writes_and_proves_a_primes_script() {
     let _ = std::fs::remove_file(db);
     let _ = std::fs::remove_dir_all(root.join("primes"));
     let store = Store::open(db).unwrap();
-    let llm = OllamaModel::local("qwen3.5:9b");
+    let llm = RemoteModel::local("qwen3.5:9b");
     let desktop = DesktopState::for_model(llm.context_tokens());
     let mut e = Engine::new(store, llm, root.clone(), Some(db.into()),
         Box::new(move |ws| (

@@ -198,3 +198,46 @@ pub fn engine_with_snapshots(moves: Vec<crate::moves::Move>, tag: &str, snap: &F
     let (e, rec, root) = engine_with(moves, tag);
     (e.with_snapshotter(Box::new(snap.clone())), rec, root)
 }
+
+/// A fake HTTP server on an ephemeral 127.0.0.1 port: answers the next `times` connections with
+/// `response` verbatim. Each request is read to the end of its body (by Content-Length), so a big
+/// POST is never cut short by a reset; a connection that sends nothing (a port probe) still counts.
+pub fn serve(response: String, times: usize) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for _ in 0..times {
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let mut received = Vec::new();
+            let mut buf = [0u8; 4096];
+            let mut want = usize::MAX;
+            while received.len() < want {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => received.extend_from_slice(&buf[..n]),
+                }
+                if want == usize::MAX {
+                    if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4) {
+                        let head = String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
+                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                        want = end + len;
+                    }
+                }
+            }
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    addr
+}
+
+/// An HTTP/1.1 response with `status` (e.g. "200 OK") and a JSON body.
+pub fn json_response(status: &str, body: &str) -> String {
+    format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+}
+
+/// A 127.0.0.1 port nothing listens on: bound, then let go.
+pub fn closed_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}

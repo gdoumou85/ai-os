@@ -22,11 +22,21 @@ One command, run as yourself (it asks for your password when it needs root):
 curl -fsSL https://raw.githubusercontent.com/gdoumou85/ai-os/master/install/get.sh | bash
 ```
 
-To use a model runner on another machine instead of installing one here:
+It looks for Ollama and LM Studio on your home network and lists every model it finds, with one
+more choice: install Ollama on this machine. You type the number of the one to use. An LM Studio
+that asks for its API key gets it typed in once. The key is kept in `~/.config/ai-os/model.env`,
+which only you can read. Load an LM Studio model with a context length of at least 8192.
+
+If the machine's runner is not listed, check that it accepts connections from the network: for
+Ollama, `OLLAMA_HOST=0.0.0.0`; for LM Studio, "Serve on Local Network". Then check that its firewall
+lets them in. If you already know the answer, you can skip the questions:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/gdoumou85/ai-os/master/install/get.sh | bash -s -- --model-url http://HOST:11434
+curl -fsSL https://raw.githubusercontent.com/gdoumou85/ai-os/master/install/get.sh | bash -s -- --model-url http://HOST:PORT --model NAME
 ```
+
+If the runner's address changes later (a router handing out a new one), the AI OS looks for the
+same model on the network and carries on.
 
 ## What it changes on your machine
 
