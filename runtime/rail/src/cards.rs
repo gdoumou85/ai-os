@@ -33,6 +33,19 @@ pub struct Card {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change { Added(usize), Updated(usize), Line(String) }
 
+/// Whether the AI is busy after this event, for the spinner (the owner, 2026-09-19: "there is not
+/// any sort of sign that the AI is processing or it's stopped"). Your own message and any step of
+/// a job mean it is working; anything that hands the turn back to the person means it is not.
+/// `None`: this event says nothing either way.
+pub fn busy_after(ev: &Event) -> Option<bool> {
+    match ev {
+        Event::You { .. } | Event::Understood { .. } | Event::Plan { .. } | Event::Step { .. } => Some(true),
+        Event::Said { .. } | Event::NeedsAnswer { .. } | Event::NeedsOk { .. } | Event::Done { .. } | Event::Failed { .. }
+        | Event::Stopped { .. } | Event::Undone { .. } | Event::Error { .. } => Some(false),
+        Event::Busy { .. } | Event::State { .. } => None,
+    }
+}
+
 #[derive(Default)]
 pub struct Cards { pub list: Vec<Card>, building: Option<usize> }
 
@@ -97,13 +110,20 @@ impl Cards {
         }
     }
 
-    /// The Clear button: every card goes but the running job's, and whatever came after it — its
-    /// Stop button and a Yes/No still waiting on the person must stay reachable.
+    /// The Clear button: every card goes but the running job's own and the question still waiting
+    /// on the person, if the last card is one. Keeping everything after the job's card kept a long
+    /// job's whole back-and-forth, and Clear looked broken (the owner's run, 2026-09-19).
     pub fn clear(&mut self) {
-        let from = self.building.unwrap_or(self.list.len());
-        self.list.drain(..from);
-        self.building = self.building.map(|_| 0);
+        let Some(b) = self.building else { self.list.clear(); return };
+        let waiting = self.list.len() - 1 > b
+            && matches!(self.list.last().map(|c| &c.kind), Some(CardKind::NeedsAnswer { .. } | CardKind::NeedsOk { .. }));
+        let kept: Vec<Card> = std::iter::once(self.list[b].clone()).chain(waiting.then(|| self.list.last().cloned()).flatten()).collect();
+        self.list = kept;
+        self.building = Some(0);
     }
+
+    /// A job is on screen and still running: the title bar's Stop shows.
+    pub fn running(&self) -> bool { self.building.is_some() }
 
     /// A reopened rail: the open job as one Building card (steps ticked so far) plus its
     /// waiting card, if any. Earlier finished jobs are not replayed (1d §4.2).

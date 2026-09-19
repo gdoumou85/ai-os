@@ -1,5 +1,5 @@
 use aios_proto::*;
-use aios_rail::cards::{Button, CardKind, Cards, Change};
+use aios_rail::cards::{busy_after, Button, CardKind, Cards, Change};
 
 fn j() -> String { "j1".into() }
 
@@ -102,7 +102,11 @@ fn clear_keeps_only_the_running_job_and_what_it_waits_on() {
 
     cards.apply(&Event::You { text: "make p".into() });
     cards.apply(&Event::Understood { job_id: j(), name: "p".into(), text: "Starting p".into(), housekeeping: false });
+    cards.apply(&Event::NeedsAnswer { job_id: j(), questions: vec!["which one?".into()] });
+    cards.apply(&Event::You { text: "the first".into() });
+    cards.apply(&Event::Said { text: "noted".into() });
     cards.apply(&Event::NeedsOk { job_id: j(), what: "http post to x".into(), why: "network".into() });
+    assert!(cards.running());
     cards.clear();
     assert!(matches!(cards.list[0].kind, CardKind::Building { .. }));
     assert!(matches!(cards.list[1].kind, CardKind::NeedsOk { .. }));
@@ -112,4 +116,18 @@ fn clear_keeps_only_the_running_job_and_what_it_waits_on() {
     cards.apply(&Event::Done { job_id: j(), text: "finished".into(), check: None, files: vec![], windows: vec![] });
     let CardKind::Building { collapsed, .. } = &cards.list[0].kind else { panic!() };
     assert!(collapsed);
+    assert!(!cards.running(), "the job ended: no Stop in the title bar");
+    cards.apply(&Event::You { text: "hi".into() });
+    cards.clear();
+    assert!(cards.list.is_empty(), "nothing running: everything goes");
+}
+
+#[test]
+fn the_spinner_runs_from_your_message_until_the_turn_comes_back() {
+    assert_eq!(busy_after(&Event::You { text: "make p".into() }), Some(true));
+    assert_eq!(busy_after(&Event::Step { job_id: j(), plan_step: 1, text: "wrote a".into(), ok: true }), Some(true));
+    assert_eq!(busy_after(&Event::NeedsOk { job_id: j(), what: "x".into(), why: "y".into() }), Some(false));
+    assert_eq!(busy_after(&Event::Said { text: "hi".into() }), Some(false));
+    assert_eq!(busy_after(&Event::Error { text: "bad".into() }), Some(false));
+    assert_eq!(busy_after(&Event::State { job: None }), None);
 }
