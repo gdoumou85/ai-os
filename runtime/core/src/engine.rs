@@ -94,7 +94,7 @@ fn on_the_desktop(action: &Action) -> bool {
 /// the same question and never an install. The machine asks for a yes itself (decision 9), so
 /// the model is sent back to take the step. Whole words, so "look to" is not "ok to".
 fn asks_permission(q: &str) -> bool {
-    let words: String = q.to_lowercase().chars().map(|c| if c.is_alphanumeric() || c == ''' { c } else { ' ' }).collect();
+    let words: String = q.to_lowercase().chars().map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' }).collect();
     let padded = format!(" {} ", words.split_whitespace().collect::<Vec<_>>().join(" "));
     ["okay to", "ok to", "all right to", "alright to", "may i", "shall i go", "go ahead", "your permission",
      "should i proceed", "can i proceed", "shall i proceed", "want me to proceed", "should i go ahead"]
