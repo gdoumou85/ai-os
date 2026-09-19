@@ -91,3 +91,25 @@ fn a_reconnect_refills_the_open_job_instead_of_opening_a_second_one() {
     assert!(steps[0].done && steps[1].done, "the second step ticked in place");
     assert_eq!(cards.list[0].buttons, vec![Button { label: "Stop".into(), say: "stop".into() }], "still stoppable");
 }
+
+#[test]
+fn clear_keeps_only_the_running_job_and_what_it_waits_on() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::You { text: "hi".into() });
+    cards.apply(&Event::Said { text: "hello".into() });
+    cards.clear();
+    assert!(cards.list.is_empty(), "nothing running: everything goes");
+
+    cards.apply(&Event::You { text: "make p".into() });
+    cards.apply(&Event::Understood { job_id: j(), name: "p".into(), text: "Starting p".into(), housekeeping: false });
+    cards.apply(&Event::NeedsOk { job_id: j(), what: "http post to x".into(), why: "network".into() });
+    cards.clear();
+    assert!(matches!(cards.list[0].kind, CardKind::Building { .. }));
+    assert!(matches!(cards.list[1].kind, CardKind::NeedsOk { .. }));
+    assert_eq!(cards.list.len(), 2);
+    // The job carries on in the cleared list: its steps and its end land on the kept card.
+    assert_eq!(cards.apply(&Event::Plan { job_id: j(), steps: vec!["write".into()] }), vec![Change::Updated(0)]);
+    cards.apply(&Event::Done { job_id: j(), text: "finished".into(), check: None, files: vec![], windows: vec![] });
+    let CardKind::Building { collapsed, .. } = &cards.list[0].kind else { panic!() };
+    assert!(collapsed);
+}

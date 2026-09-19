@@ -140,7 +140,14 @@ fn main() {
     app.connect_activate(|app| {
         let css = gtk::CssProvider::new(); css.load_from_string(CSS);
         gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-        let win = gtk::ApplicationWindow::builder().application(app).title("AI OS").default_width(420).default_height(900).build();
+        let win = gtk::ApplicationWindow::builder().application(app).title("AI OS").default_width(420).default_height(600).build();
+        // 600, not taller: a small screen (a VM's, a laptop's) put a taller window's bottom — the
+        // newest card, its Yes button, the entry — below the edge. The cards scroll inside it.
+        let header = gtk::HeaderBar::new();
+        let clear = gtk::Button::with_label("Clear");
+        clear.set_tooltip_text(Some("Clear the chat (a task still running stays)"));
+        header.pack_start(&clear);
+        win.set_titlebar(Some(&header));
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&column).build();
         let status = gtk::Label::new(Some("Connecting to the AI OS service…")); status.add_css_class("status"); status.set_xalign(0.0);
@@ -158,6 +165,13 @@ fn main() {
         let say = net_thread(to_ui);
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
+
+        let (cards3, widgets3, column3, say3) = (cards.clone(), widgets.clone(), column.clone(), say.clone());
+        clear.connect_clicked(move |_| {
+            cards3.borrow_mut().clear();
+            for w in widgets3.borrow_mut().drain(..) { column3.remove(&w); }
+            for c in &cards3.borrow().list { let w = render(c, &say3); column3.append(&w); widgets3.borrow_mut().push(w); }
+        });
 
         let s = say.clone();
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(t); e.set_text(""); } });

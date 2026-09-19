@@ -97,6 +97,14 @@ impl Cards {
         }
     }
 
+    /// The Clear button: every card goes but the running job's, and whatever came after it — its
+    /// Stop button and a Yes/No still waiting on the person must stay reachable.
+    pub fn clear(&mut self) {
+        let from = self.building.unwrap_or(self.list.len());
+        self.list.drain(..from);
+        self.building = self.building.map(|_| 0);
+    }
+
     /// A reopened rail: the open job as one Building card (steps ticked so far) plus its
     /// waiting card, if any. Earlier finished jobs are not replayed (1d §4.2).
     fn rebuild(&mut self, st: &JobState) -> Vec<Change> {
