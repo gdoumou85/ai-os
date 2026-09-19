@@ -25,6 +25,93 @@ enum FromNet {
     Models { found: String, env: String },
     /// One LM Studio's models, asked for with the key the person typed.
     Keyed { url: String, key: String, found: String },
+    /// The cloud models an account's key opened, for the card that adds one.
+    Cloud { key: String, found: String },
+}
+
+/// Where the chat window and the engine's cloud pool share the switch and the accounts (core::cloud).
+fn config_dir() -> String { format!("{}/.config/ai-os", std::env::var("HOME").unwrap_or_default()) }
+fn cloud_on() -> bool { std::path::Path::new(&format!("{}/cloud-on", config_dir())).exists() }
+fn cloud_accounts() -> String { std::fs::read_to_string(format!("{}/cloud.tsv", config_dir())).unwrap_or_default() }
+
+/// A file only its owner can read: the keys are in it.
+fn write_private(path: &str, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path).map_err(|e| e.to_string())?;
+    f.write_all(text.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// The cloud accounts card: each account with Remove, and a box for an Ollama key.
+/// ponytail: Ollama's cloud only; the OpenAI-style providers (Groq, OpenRouter…) get a row each
+/// once someone has a key to test them with.
+fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gtk::Label) -> gtk::Widget {
+    let tsv = cloud_accounts();
+    let list = aios_rail::models::accounts(&tsv);
+    let text = if list.is_empty() { "No cloud accounts yet. While Cloud is on, they are tried in order, and the next takes over when one's free allowance runs out.".to_string() }
+        else { "Tried in this order while Cloud is on; the next takes over when one's free allowance runs out.".to_string() };
+    let b = plain_card("Cloud accounts", &text);
+    let w: gtk::Widget = b.clone().upcast();
+    for (i, (name, model)) in list.into_iter().enumerate() {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let l = gtk::Label::new(Some(&format!("{}. {name}: {model}", i + 1))); l.set_xalign(0.0); l.set_hexpand(true); l.set_wrap(true);
+        let rm = gtk::Button::with_label("Remove");
+        let (col, me, st, tx, stt) = (column.clone(), w.clone(), status.clone(), to_ui.clone(), status.clone());
+        rm.connect_clicked(move |_| {
+            let _ = write_private(&format!("{}/cloud.tsv", config_dir()), &aios_rail::models::without(&cloud_accounts(), i));
+            st.set_text(&format!("Removed {name}."));
+            col.remove(&me);
+            col.append(&cloud_card(&col, &tx, &stt));
+        });
+        row.append(&l); row.append(&rm);
+        b.append(&row);
+    }
+    let add = gtk::Label::new(Some("Add your Ollama account: make a key at ollama.com → Settings → Keys, and paste it here."));
+    add.set_xalign(0.0); add.set_wrap(true);
+    let entry = gtk::PasswordEntry::new(); entry.set_show_peek_icon(true);
+    let go = gtk::Button::with_label("Use this key"); go.set_halign(gtk::Align::Start);
+    let close = gtk::Button::with_label("Close"); close.set_halign(gtk::Align::Start);
+    b.append(&add); b.append(&entry); b.append(&go); b.append(&close);
+    let (col, me, tx, st) = (column.clone(), w.clone(), to_ui.clone(), status.clone());
+    go.connect_clicked(move |_| {
+        let key = entry.text().to_string();
+        if !aios_rail::models::safe_key(&key) { st.set_text("That key has spaces or odd characters in it; paste just the key."); return; }
+        col.remove(&me);
+        st.set_text("Asking Ollama which cloud models your key opens…");
+        let tx = tx.clone();
+        std::thread::spawn(move || { let found = run("ai-os-find", &["--url", OLLAMA_CLOUD], Some(&key)); let _ = tx.send(FromNet::Cloud { key, found }); });
+    });
+    let (col, me) = (column.clone(), w.clone());
+    close.connect_clicked(move |_| col.remove(&me));
+    w
+}
+
+const OLLAMA_CLOUD: &str = "https://ollama.com";
+
+/// The models an Ollama key opens, a button each: a click adds the account and turns Cloud on.
+fn cloud_models_card(found: &str, key: String, column: &gtk::Box, status: &gtk::Label, switch: &gtk::ToggleButton) -> gtk::Widget {
+    let choices: Vec<_> = aios_rail::models::parse_found(found).into_iter().filter_map(|c| c.model).collect();
+    let b = plain_card("Pick a cloud model", if choices.is_empty() { "Ollama did not list any models for that key. Check the key and try again." } else { "The bigger the model, the better it works, and the sooner its free allowance runs out." });
+    let w: gtk::Widget = b.clone().upcast();
+    for m in choices {
+        let btn = gtk::Button::with_label(&m); btn.set_halign(gtk::Align::Start);
+        let (col, me, st, sw, key) = (column.clone(), w.clone(), status.clone(), switch.clone(), key.clone());
+        btn.connect_clicked(move |_| {
+            col.remove(&me);
+            let Some(line) = aios_rail::models::account_line("Ollama", "ollama", OLLAMA_CLOUD, &m, &key) else { st.set_text("That model's name has characters it may not."); return };
+            match write_private(&format!("{}/cloud.tsv", config_dir()), &(cloud_accounts() + &line)) {
+                Ok(()) => { sw.set_active(true); st.set_text(&format!("Added Ollama {m}. Cloud is on.")); }
+                Err(e) => st.set_text(&format!("Could not save the account: {e}")),
+            }
+        });
+        b.append(&btn);
+    }
+    let close = gtk::Button::with_label("Close"); close.set_halign(gtk::Align::Start);
+    let (col, me) = (column.clone(), w.clone());
+    close.connect_clicked(move |_| col.remove(&me));
+    b.append(&close);
+    w
 }
 
 /// The socket on its own thread: reconnects every 3 s; every event goes to a plain std channel
@@ -188,6 +275,11 @@ fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, t
         });
         b.append(&btn);
     }
+    let accounts = gtk::Button::with_label("Cloud accounts…");
+    accounts.set_halign(gtk::Align::Start);
+    let (col, me, tx, st) = (column.clone(), w.clone(), to_ui.clone(), status.clone());
+    accounts.connect_clicked(move |_| { col.remove(&me); col.append(&cloud_card(&col, &tx, &st)); });
+    b.append(&accounts);
     let close = gtk::Button::with_label("Close");
     close.set_halign(gtk::Align::Start);
     let (col, me) = (column.clone(), w.clone());
@@ -330,6 +422,11 @@ fn main() {
         let model_btn = gtk::Button::with_label("Model");
         model_btn.set_tooltip_text(Some("Switch the AI's model"));
         header.pack_start(&model_btn);
+        // Stays on until turned off (the owner's call, 2026-09-19); the engine reads it every turn.
+        let cloud = gtk::ToggleButton::with_label("Cloud");
+        cloud.set_tooltip_text(Some("Use your cloud accounts: stronger models, but what you ask leaves this computer"));
+        cloud.set_active(cloud_on());
+        header.pack_start(&cloud);
         // Stop where it can always be reached while a job runs, not on a card scrolled out of view.
         let stop = gtk::Button::with_label("Stop");
         stop.add_css_class("destructive-action");
@@ -367,7 +464,7 @@ fn main() {
         // Once per login, off the GTK thread: a slow network never holds the window up.
         let up = to_ui.clone();
         std::thread::spawn(move || { if let Some(v) = aios_rail::update::check() { let _ = up.send(FromNet::Update(v)); } });
-        let (to_ui_models, to_ui2) = (to_ui.clone(), to_ui.clone());
+        let (to_ui_models, to_ui2, to_ui_cloud) = (to_ui.clone(), to_ui.clone(), to_ui.clone());
         let say = net_thread(to_ui);
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
@@ -378,6 +475,15 @@ fn main() {
             status_m.set_text("Looking for models on your network…");
             let tx = tx_m.clone();
             std::thread::spawn(move || { let found = run("ai-os-find", &[], None); let _ = tx.send(FromNet::Models { found, env: engine_env() }); });
+        });
+        let (col_c, st_c) = (column.clone(), status.clone());
+        cloud.connect_toggled(move |t| {
+            let flag = format!("{}/cloud-on", config_dir());
+            let done = if t.is_active() { write_private(&flag, "") } else { std::fs::remove_file(&flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }).map_err(|e| e.to_string()) };
+            if let Err(e) = done { st_c.set_text(&format!("Could not switch the cloud: {e}")); return }
+            // Nothing to use yet: the card to add an account, rather than a switch that does nothing.
+            if t.is_active() && aios_rail::models::accounts(&cloud_accounts()).is_empty() { col_c.append(&cloud_card(&col_c, &to_ui_cloud, &st_c)); }
+            st_c.set_text(if t.is_active() { "Cloud is on: your cloud accounts answer first." } else { "Cloud is off: only your own models answer." });
         });
         let s_stop = say.clone();
         stop.connect_clicked(move |_| { let _ = s_stop.send("stop".into()); });
@@ -391,7 +497,7 @@ fn main() {
         let s = say.clone();
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(t); e.set_text(""); } });
 
-        let (cards2, widgets2, column2, status2, say2, spinner2, stop2, entry2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone(), entry.clone());
+        let (cards2, widgets2, column2, status2, say2, spinner2, stop2, entry2, cloud2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone(), entry.clone(), cloud.clone());
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
                 match msg {
@@ -407,6 +513,7 @@ fn main() {
                         if only.is_empty() || only.contains("\t-\t") { status2.set_text("LM Studio did not accept that key."); }
                         else { column2.append(&models_card(&only, &engine_env(), Some(key), &column2, &to_ui2, &status2)); }
                     }
+                    FromNet::Cloud { key, found } => { status2.set_text(""); column2.append(&cloud_models_card(&found, key, &column2, &status2, &cloud2)); }
                     FromNet::Down => { spinner2.stop(); status2.set_text("The AI OS service is not running — retrying…"); }
                     FromNet::Event(ev) => {
                         match aios_rail::cards::busy_after(&ev) {

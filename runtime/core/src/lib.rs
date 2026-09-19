@@ -1,5 +1,6 @@
 //! The core: conversation front door, job loop, model connection, memory outside the chat.
 //! Each task adds its own `pub mod` line.
+pub mod cloud;
 pub mod engine;
 pub mod event;
 pub mod find;

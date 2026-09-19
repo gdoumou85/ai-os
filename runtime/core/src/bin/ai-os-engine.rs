@@ -1,4 +1,5 @@
 //! The engine as a long-running service on a private socket; front doors connect to it.
+use aios_core::cloud::{self, Pooled};
 use aios_core::engine::{Engine, HOUSEKEEPING_DIR};
 use aios_core::model::{Model, RemoteModel};
 use aios_core::service;
@@ -19,7 +20,8 @@ fn main() {
         let store = Store::open(&db).expect("open store");
         // One state for the whole process: the accessibility bus connection and the id table
         // outlive any one job. The look cap follows the model's own context (2a §4).
-        let llm = RemoteModel::from_env(&model);
+        // The cloud accounts in front of it while the chat window's Cloud switch is on (core::cloud).
+        let llm = Pooled::new(RemoteModel::from_env(&model), cloud::dir());
         let desktop = DesktopState::for_model(llm.context_tokens());
         Engine::new(store, llm, root, Some(db),
             Box::new(move |ws| (

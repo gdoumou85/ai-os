@@ -29,7 +29,8 @@ While the AI is working, the circle next to the status line turns.
 <big><b>The buttons at the top</b></big>
 
 • <b>Clear</b> empties the chat. A job still running and a question still waiting stay.
-• <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop a job first.
+• <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop a job first. Your cloud accounts are there too.
+• <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
 • <b>Help</b> opens this guide.
 • <b>Stop</b> shows up only while a job runs.
 
@@ -61,22 +62,21 @@ The AI OS needs a model to think with. The model runs in a separate program, the
 Everything you ask goes to the runner you chose. On your own computers nothing leaves your home.
 
 
-<big><b>Cloud models (coming soon)</b></big>
+<big><b>Cloud models</b></big>
 
-Soon the AI OS will also be able to use free cloud models, which are much stronger than what a home computer can run. You will give it one key per provider. When one provider's free allowance runs out, it moves to the next by itself.
+Cloud models are much stronger than what a home computer can run, and several providers give some use for free. The AI OS can use your cloud accounts, one key each. When one account's free allowance runs out, the next takes over by itself. When all of them have run out, your own model answers again.
 
-Cloud stays <b>off</b> unless you turn it on for a job, because what you ask then leaves your computer. Some free plans use what you send to train their models.
+<b>The Cloud button</b> at the top turns this on and off, and it stays the way you left it. While it is on, what you ask leaves your computer. Some free plans use what you send to train their models.
 
-<b>Accounts to create</b> (all free; each gives you one key):
-• <b>Ollama</b> (ollama.com): sign in to the Ollama app. Its cloud models have names ending in "-cloud".
+<b>To add your Ollama account:</b> make a key at ollama.com (Settings, then Keys). Press <b>Model</b>, then <b>Cloud accounts…</b>, paste the key, and pick a model. Cloud turns on. The same card lists your accounts in the order they are tried, each with a Remove button.
+
+<b>More providers are coming</b> (all free; each gives you one key):
 • <b>GitHub Models</b> (github.com/marketplace/models): uses a GitHub account.
 • <b>Google AI Studio</b> (aistudio.google.com): Gemini models, with a Google account.
 • <b>Groq</b> (console.groq.com): very fast.
 • <b>OpenRouter</b> (openrouter.ai): many free models behind one account.
 • <b>Mistral</b> (console.mistral.ai).
 • <b>Cerebras</b> (cloud.cerebras.ai).
-
-You don't need all of them. Start with one or two, and add more later.
 
 
 <big><b>When something goes wrong</b></big>

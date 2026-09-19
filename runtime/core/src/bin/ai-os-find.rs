@@ -2,7 +2,7 @@
 //!   ai-os-find              scan the network
 //!   ai-os-find --url URL    ask that one runner
 //! Lines are `kind<TAB>url<TAB>model`, or `kind<TAB>url<TAB>-<TAB>needs-key`. A key for LM Studio
-//! comes only from AI_OS_MODEL_KEY: a command line is readable by every user through `ps`.
+//! (or ollama.com) comes only from AI_OS_MODEL_KEY: a command line is readable by every user through `ps`.
 use aios_core::find::{self, Kind};
 
 fn main() {
@@ -15,7 +15,8 @@ fn main() {
     let key = std::env::var("AI_OS_MODEL_KEY").ok().filter(|k| !k.is_empty());
     let found = match url {
         Some(u) => {
-            let ollama = find::ask(Kind::Ollama, &u, None);
+            // Ollama's own cloud (ollama.com) wants the key; one on a home machine ignores it.
+            let ollama = find::ask(Kind::Ollama, &u, key.as_deref());
             if ollama.is_empty() { find::ask(Kind::OpenAi, &u, key.as_deref()) } else { ollama }
         }
         None => find::scan(&find::home_hosts(), find::OLLAMA_PORT, find::LMSTUDIO_PORT, key.as_deref()),
