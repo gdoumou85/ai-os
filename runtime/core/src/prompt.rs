@@ -227,6 +227,24 @@ mod tests {
     }
 
     #[test]
+    fn a_job_turn_with_everything_at_its_cap_still_fits_an_8k_context() {
+        // Tokens ≈ chars/4; 6500 leaves the answer room in 8192 (Phase 3 §3's 3000-char tips block
+        // is what this guards: it came on top of a prompt already sized for 8k).
+        let mut j = Job::new("p", "/data/projects/p", &"g".repeat(300), false, &"u".repeat(300));
+        j.state = State::Working;
+        j.request = "r".repeat(500);
+        j.answers = (0..3).map(|i| (format!("question {i}"), "a".repeat(100))).collect();
+        j.plan = (0..8).map(|i| format!("{i} {}", "p".repeat(60))).collect();
+        j.notes_block = "t".repeat(3000);
+        j.note_to_model = Some("n".repeat(200));
+        j.steps = (0..40).map(|_| StepRecord { plan_step: 1, action: Action::RunCommand { argv: vec!["x".repeat(1000)] }, ok: true, detail: "d".repeat(500) }).collect();
+        let instructions: Vec<String> = (0..5).map(|_| "i".repeat(200)).collect();
+        let p = job_turn(&instructions, &j, Some(&"b".repeat(4000)), Some(&"l".repeat(2000)));
+        let tokens = (p.system.len() + p.user.len()) / 4;
+        assert!(tokens < 6500, "about {tokens} tokens");
+    }
+
+    #[test]
     fn the_learning_turn_numbers_every_step_and_asks_only_for_learn() {
         let mut j = Job::new_housekeeping("/data/housekeeping", "go to a site", "u");
         j.request = "open example.org".into();

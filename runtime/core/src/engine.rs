@@ -269,13 +269,17 @@ impl<M: Model> Engine<M> {
         std::fs::read_to_string(self.workspace(job).join("BLUEPRINT.md")).ok()
     }
 
-    /// The tips a job starts with, fixed on the job (Phase 3 §3).
-    fn give_tips(&self, job: &mut Job, skills: &[String]) -> Result<(), EngineError> {
-        job.skills = skills.iter().map(|s| crate::notes::norm_notebook(s)).filter(|s| !s.is_empty() && s != crate::notes::THIS_COMPUTER).take(3).collect();
-        let (block, shown) = crate::notes::for_job(self.store.conn(), &format!("{} {}", job.goal, job.request), &job.skills)?;
-        job.notes_block = block;
-        job.shown_notes = shown;
-        Ok(())
+    /// The tips a job starts with, fixed on the job (Phase 3 §3). Tips are a help, never a
+    /// condition: a notes table that cannot be read starts the job without them.
+    fn give_tips(&self, job: &mut Job, skills: &[String]) {
+        job.skills.clear();
+        for s in skills.iter().map(|s| crate::notes::norm_notebook(s)) {
+            if !s.is_empty() && s != crate::notes::THIS_COMPUTER && !job.skills.contains(&s) && job.skills.len() < 3 { job.skills.push(s); }
+        }
+        match crate::notes::for_job(self.store.conn(), &format!("{} {}", job.goal, job.request), &job.skills) {
+            Ok((block, shown)) => { job.notes_block = block; job.shown_notes = shown; }
+            Err(e) => eprintln!("engine: no tips for this job ({e})"),
+        }
     }
 
     /// One user message in, the lines to show the user out — the terminal's view of
@@ -321,6 +325,8 @@ impl<M: Model> Engine<M> {
         job.outcome_text = "This job predates the folder record; please start it again.".into();
         self.store.save_job(&job)?;
         self.emit(Event::Failed { job_id: job.id.clone(), text: job.outcome_text, files: vec![] });
+        // No learning turn, but the rail's spinner still waits for the Learned that ends one.
+        self.emit(Event::Learned { job_id: job.id, lines: vec![], pending: false });
         Ok(())
     }
 
@@ -407,7 +413,8 @@ impl<M: Model> Engine<M> {
             return Ok(());
         }
         // Idle: the model decides — chat, or work.
-        let notebooks = crate::notes::notebooks(self.store.conn())?;
+        // Names to pick skills from, a help like the tips: unreadable means none listed, not no answer.
+        let notebooks = crate::notes::notebooks(self.store.conn()).unwrap_or_else(|e| { eprintln!("engine: no notebooks for the front door ({e})"); vec![] });
         let mut p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &notebooks, &self.store.recent_messages(4)?, text);
         // An answer that is not a move gets one more try with the reason; a second one is said in
         // plain words, never as "something went wrong".
@@ -465,7 +472,7 @@ impl<M: Model> Engine<M> {
                 job.new_project = is_new;
                 // The model's `goal` is its paraphrase; this is what the user actually said.
                 job.request = text.to_string();
-                self.give_tips(&mut job, &skills)?;
+                self.give_tips(&mut job, &skills);
                 // The files as they were before this job touched them — taken BEFORE the job
                 // row exists. A snapshot that fails after the job is saved leaves an open job
                 // whose files nothing can put back; this way the job never starts at all. A
@@ -499,7 +506,7 @@ impl<M: Model> Engine<M> {
                 if fresh { snapshot::share_with_sandbox(&self.housekeeping_dir); }
                 let mut job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
                 job.request = text.to_string();
-                self.give_tips(&mut job, &[])?;
+                self.give_tips(&mut job, &[]);
                 self.store.save_job(&job)?;
                 self.emit(Event::Understood { job_id: job.id.clone(), name: display_name(&job).to_string(), text: understood, housekeeping: job.housekeeping });
                 if let Some(n) = note { self.emit(Event::Said { text: n }); }
@@ -553,6 +560,12 @@ impl<M: Model> Engine<M> {
     fn learn(&mut self, job: &Job, passed: bool) {
         let job_id = job.id.clone();
         let nothing = Event::Learned { job_id: job_id.clone(), lines: vec![], pending: false };
+        // What an earlier job left waiting for Keep/Discard and nobody answered goes now (spec §5),
+        // whatever this turn comes to: the rail takes the older card's Keep away on this Learned.
+        if let Err(e) = crate::notes::discard_pending(self.store.conn()) { eprintln!("engine: an old proposal could not be discarded ({e})"); }
+        // A job that did not pass can only mark the tips it was shown; with none, there is nothing
+        // to ask the model.
+        if !passed && job.shown_notes.is_empty() { self.emit(nothing); return }
         let mv = match self.model.next_move(&prompt::learning_turn(job, passed)) {
             Ok(m) => m,
             Err(e) => { eprintln!("engine: no learning turn ({e})"); self.emit(nothing); return }
@@ -1600,8 +1613,8 @@ mod tests {
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
         assert!(e.open_job().unwrap().is_none());
-        // front door + plan + 6 replans + the learning turn
-        assert!(e.model.prompts.borrow().len() <= 9, "{}", e.model.prompts.borrow().len());
+        // front door + plan + 6 replans; no learning turn: a failed job with no tips has nothing to mark
+        assert!(e.model.prompts.borrow().len() <= 8, "{}", e.model.prompts.borrow().len());
     }
 
     #[test]
@@ -2551,8 +2564,9 @@ mod tests {
         job.folder = String::new();
         e.store.save_job(&job).unwrap();
         let ev = e.resume().unwrap();
-        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert_eq!(ev.len(), 2, "{ev:?}");
         assert!(matches!(&ev[0], Event::Failed { text, .. } if text == "This job predates the folder record; please start it again."), "{ev:?}");
+        assert!(matches!(&ev[1], Event::Learned { lines, pending: false, .. } if lines.is_empty()), "the rail's spinner stops: {ev:?}");
         assert!(e.open_job().unwrap().is_none());
     }
 
@@ -2690,6 +2704,14 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_job_shown_no_tips_asks_the_model_nothing_after() {
+        let (mut e, _, _) = engine_with(vec![hk("open it"), plan(), Move::GiveUp { reason: "no".into(), missing: "x".into() }], "learn-failed-bare");
+        let ev = crate::testing::events_of(&mut e, "open it");
+        assert!(matches!(ev.last(), Some(Event::Learned { lines, pending: false, .. }) if lines.is_empty()), "{ev:?}");
+        assert!(e.model.prompts.borrow().iter().all(|p| p.allowed != vec!["learn"]), "nothing to mark, no learning turn");
+    }
+
+    #[test]
     fn a_stopped_job_has_no_learning_turn() {
         let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()], options: vec![] }], "learn-stop");
         e.handle("make p").unwrap();
@@ -2714,12 +2736,12 @@ mod tests {
 
     #[test]
     fn start_records_its_skills_and_the_skill_tips() {
-        let ball = Move::Start { project: "ball".into(), new_project: true, description: "d".into(), goal: "a ball".into(), creative: false, understood: "Making a ball".into(), skills: vec!["Blender".into(), "this computer".into()], remember: None };
+        let ball = Move::Start { project: "ball".into(), new_project: true, description: "d".into(), goal: "a ball".into(), creative: false, understood: "Making a ball".into(), skills: vec!["Blender".into(), " blender ".into(), "this computer".into()], remember: None };
         let (mut e, _, _) = engine_with(vec![ball, Move::Ask { questions: vec!["?".into()], options: vec![] }], "learn-skills");
         crate::notes::put(e.store.conn(), &crate::notes::Note { notebook: "blender".into(), topic: "make a round object".into(), kind: "technique".into(), text: "add a uv sphere".into(), ..Default::default() }, None).unwrap();
         e.handle("make a ball in blender").unwrap();
         let job = e.open_job().unwrap().unwrap();
-        assert_eq!(job.skills, vec!["blender".to_string()], "normalised, and this computer is never a skill");
+        assert_eq!(job.skills, vec!["blender".to_string()], "normalised, once, and this computer is never a skill");
         assert!(job.notes_block.contains("blender/make a round object"), "{}", job.notes_block);
         assert_eq!(job.shown_notes, vec!["blender/make a round object".to_string()]);
     }

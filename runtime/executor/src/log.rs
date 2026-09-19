@@ -24,6 +24,9 @@ impl ActionLog {
     }
 
     fn from_conn(conn: Connection) -> Result<Self, LogError> {
+        // The engine's database: the service reads and deletes notebook entries on its own
+        // connection meanwhile, so wait for its write rather than fail on a locked file.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, created_at INTEGER);
              CREATE TABLE IF NOT EXISTS actions(

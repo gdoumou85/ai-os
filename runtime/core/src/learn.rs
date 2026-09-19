@@ -6,14 +6,15 @@ use crate::notes::{self, Note, THIS_COMPUTER};
 use crate::store::StoreError;
 use executor::action::Action;
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Component, Path};
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Learned { pub lines: Vec<String>, pub pending: bool }
 
-/// Whether a step changed the machine outside the job's own folder (Phase 3 §5).
+/// Whether a step changed the machine outside the job's own folder (Phase 3 §5). A `..` anywhere
+/// counts as outside: `starts_with` compares components and never resolves one.
 fn changes_machine(a: &Action, folder: &str) -> bool {
-    let outside = |p: &str| Path::new(p).is_absolute() && !Path::new(p).starts_with(folder);
+    let outside = |p: &str| { let p = Path::new(p); p.components().any(|c| c == Component::ParentDir) || (p.is_absolute() && !p.starts_with(folder)) };
     match a {
         Action::Install { .. } | Action::Remove { .. } | Action::Service { .. } | Action::SetSetting { .. } => true,
         Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::MakeDir { path } => outside(path),
@@ -29,8 +30,6 @@ fn steps_text(job: &Job, ns: &[usize]) -> String {
 
 pub fn apply(c: &Connection, job: &Job, entries: Vec<LearnEntry>, used: &[String], wrong: &[String], remove: &[String], passed: bool) -> Result<Learned, StoreError> {
     let mut out = Learned::default();
-    // What an earlier job left waiting for Keep/Discard and nobody answered goes now (spec §5).
-    notes::discard_pending(c)?;
     let shown = |k: &String| { let (nb, tp) = k.split_once('/').unwrap_or(("", k)); job.shown_notes.contains(&notes::key(nb, tp)) };
     for k in used.iter().filter(|k| shown(k)) { notes::mark_used(c, k)?; }
     for k in wrong.iter().filter(|k| shown(k)) {
@@ -72,7 +71,10 @@ pub fn apply(c: &Connection, job: &Job, entries: Vec<LearnEntry>, used: &[String
         let note = Note { notebook: nb.clone(), topic: tp.clone(), kind: e.kind.clone(), text: e.text.trim().to_string(), steps: steps_text(job, &proof), links, ..Default::default() };
         notes::put(c, &note, pending.then_some(job.id.as_str()))?;
         out.pending |= pending;
-        out.lines.push(if pending { format!("Learned, if you keep it: {tp} ({nb})") } else { format!("Learned: {tp} ({nb})") });
+        // What waits for Keep is shown whole: the owner keeps what he read, not a topic name.
+        out.lines.push(if pending {
+            format!("Learned, if you keep it: {tp} ({nb}) — {} (did: {})", notes::cut(&note.text, notes::MAX_TEXT), notes::cut(&note.steps, notes::MAX_STEPS))
+        } else { format!("Learned: {tp} ({nb})") });
     }
     Ok(out)
 }
@@ -165,11 +167,14 @@ mod tests {
     #[test]
     fn a_step_that_changes_the_machine_waits_for_keep() {
         let c = db();
-        let j = job(vec![rec(Action::Install { packages: vec!["gimp".into()] }, true), rec(Action::WriteFile { path: "/data/housekeeping/x".into(), contents: "y".into() }, true)]);
-        let l = apply(&c, &j, vec![entry("this computer", "get gimp", "technique", vec![1]), entry("this computer", "scratch note", "technique", vec![2])], &[], &[], &[], true).unwrap();
+        let write = |p: &str| rec(Action::WriteFile { path: p.into(), contents: "y".into() }, true);
+        let j = job(vec![rec(Action::Install { packages: vec!["gimp".into()] }, true), write("/data/housekeeping/x"), write("/data/housekeeping/../../etc/x"), write("../x")]);
+        let l = apply(&c, &j, vec![entry("this computer", "get gimp", "technique", vec![1]), entry("this computer", "scratch note", "technique", vec![2]),
+            entry("this computer", "climb out", "technique", vec![3]), entry("this computer", "step up", "technique", vec![4])], &[], &[], &[], true).unwrap();
         assert!(l.pending);
-        assert_eq!(l.lines, vec!["Learned, if you keep it: get gimp (this computer)".to_string(), "Learned: scratch note (this computer)".to_string()]);
-        assert_eq!(list(&c, THIS_COMPUTER).unwrap().len(), 1, "the install waits unseen");
+        assert_eq!(l.lines[..2], [format!("Learned, if you keep it: get gimp (this computer) — the way (did: {})", crate::prompt::compact_action(&j.steps[0].action)), "Learned: scratch note (this computer)".to_string()]);
+        assert!(l.lines[2].starts_with("Learned, if you keep it: climb out") && l.lines[3].starts_with("Learned, if you keep it: step up"), "a `..` leaves the folder: {:?}", l.lines);
+        assert_eq!(list(&c, THIS_COMPUTER).unwrap().len(), 1, "the machine changes wait unseen");
     }
 
     #[test]
