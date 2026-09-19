@@ -227,7 +227,7 @@ Each phase gets its own plan and its own approval.
 | **0. Trial** (throwaway) — **DONE 2026-09-15** | Answered the unknowns: GPU inside WSL ✓; accessibility reads + operates native apps ✓ (typing needs a real seat); screen fallback via the compositor API ✓; snapshot disk with rollback ✓; a 9B multimodal model at 35–40 tok/s, 100% grammar-forced parse, 8k context on 8 GB ✓; desktop = GNOME. Full-desktop-on-Windows dropped as not needed | `../findings/phase0-findings.md`; desktop = GNOME |
 | 1. Foundation | Core loop, executor, direct abilities, undo, chat panel | It can do system jobs and prove them |
 | 2. Handover | Program controls (accessibility) plus the screen fallback | It can work a window the user hands it |
-| 3. Skills | Ability map, skills library, learning new skills | It improves on repeated jobs |
+| 3. Skills — **BUILT 2026-09-19 (v0.7.0)** | Notebooks of what worked: "This computer" plus one per craft, read at the start of every job, updated after it | It improves on repeated jobs |
 | 4. Watch | Background jobs, desktop and Telegram notifications | It can monitor and inform |
 | 5. Create | Local image generation and other creative tools | It can make graphics and assets |
 | 6. Fine-tune | Train the open model on logged OS jobs | Our own model |
@@ -350,3 +350,36 @@ The two 1b carry-forwards are closed. **Stop lands mid-job**: the word raises a 
 ## The desktop edition (2026-09-18)
 
 **§5.2's full Ubuntu edition, pulled forward from Phase 7 at his request** — design `2026-09-18-desktop-edition-design.md` (§9–§10 are what stands; §3's automated VM build was tried three times and withdrawn), plans `2026-09-18-desktop-edition.md` and `2026-09-18-install-command.md`. He installs Ubuntu 26.04 Desktop himself under his own user name; one command, `install/install.sh` (fetched by `install/get.sh` from the latest GitHub release), adds the AI OS for whoever runs it: `/data` as a btrfs loop file, the `ai-sandbox` account, the root wrapper and its single sudoers line, the engine as his user service, the rail opening with the session, and either a runner elsewhere (`--model-url`, his VM uses the Windows Ollama at `http://10.0.2.2:11434`) or Ollama installed locally with the Phase 0 settings. Nothing in the product names the user `ai` any more: the wrapper's owner is whoever sudo says, the prompt names the engine's own home. **WSL was uninstalled on 2026-09-18**, so the workshop of §5.1 no longer exists: GitHub Actions builds the programs inside Ubuntu 26.04, the repo `gdoumou85/ai-os` is public with no licence yet, and building, testing and the live acceptances move into his Ubuntu. The installer's first real run is his; Phase 2b and the rest continue there.
+
+## 2026-09-19: models on the network, the screen fallback, the cloud pool, and Phase 3
+
+Releases v0.2 to v0.7.0, all built by CI. None has had its live acceptance on the owner's VM yet
+except by his ad-hoc runs.
+
+- **Models on the network**, design `2026-09-19-network-models-design.md`. The engine speaks
+  Ollama's `/api/chat` and OpenAI-style `/v1/chat/completions` (LM Studio and cloud providers).
+  `ai-os-find` sweeps every private /24 for runners. A **Model** button switches between them.
+- **Phase 2b, the screen fallback**, design `2026-09-19-phase2b-screen-fallback-design.md`: an
+  8×6 grid, then a zoom, click and type. It stops if the person moves.
+- **The cloud pool.** A **Cloud** switch and accounts in `~/.config/ai-os/cloud.tsv`, tried in
+  order; a used-up account rests while the next one answers. Providers are Ollama (no longer free
+  for the owner), NVIDIA (v0.6.4) and OpenRouter's `:free` models (v0.6.5).
+- **Robustness from the owner's runs:**
+  - Answers may take 30 min, and a job 200 steps.
+  - An answer that is not a move is sent back as a rejected move (v0.6.3). LM Studio with a
+    thinking Qwen let one past its grammar.
+  - The replan bound counts replans in a row without a step that worked.
+  - The prompt says pip packages live in the project's `.venv`.
+- **Phase 3, skills**, design `2026-09-19-phase3-skills-design.md` (as built), plan
+  `2026-09-19-phase3-skills.md`. It replaces §4.5's "ability map".
+  - A skill is a craft notebook, and "This computer" holds the everyday know-how.
+  - The tips come from the job record and are a tip sheet, not a replay. Only the most-used and
+    matching ones are read, within 3000 characters.
+  - One `learn` turn after each job decides what goes in.
+  - Machine-changing entries wait for Keep, in their own table.
+  - A **Skills** button shows the notebooks and deletes entries.
+  - Its acceptance cases are the owner's: open a website twice, then make a round object in
+    Blender twice.
+- **Next,** at the owner's word: a live "thinking — N min, N words" line and a step counter, then
+  his skills test. A Settings screen, with the answer timeout as its first item, comes later.
+

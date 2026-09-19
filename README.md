@@ -68,6 +68,12 @@ the chat window opens when you log back in.
 The chat window's **Help** button opens a guide: how to talk to the AI, what it can do, and
 the models and runners it works with.
 
+The other buttons at the top:
+- **Model** switches the AI's model.
+- **Cloud** turns your cloud accounts on and off. NVIDIA and OpenRouter keys are added from the
+  Model card.
+- **Skills** shows what the AI has learned from past jobs and lets you delete any of it.
+
 ## Checking it
 
 ```
