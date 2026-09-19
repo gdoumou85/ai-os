@@ -44,7 +44,7 @@ pub fn busy_after(ev: &Event) -> Option<bool> {
         Event::Said { .. } | Event::NeedsAnswer { .. } | Event::NeedsOk { .. } | Event::Done { .. } | Event::Failed { .. }
         | Event::Stopped { .. } | Event::Undone { .. } | Event::Error { .. } => Some(false),
         // ponytail: stopgap, Task 8 gives the learning turn its own card and spinner behaviour.
-        Event::Busy { .. } | Event::State { .. } | Event::Learned { .. } => None,
+        Event::Busy { .. } | Event::State { .. } | Event::Learned { .. } | Event::Skills { .. } => None,
     }
 }
 
@@ -117,6 +117,9 @@ impl Cards {
             Event::Undone { job_id, lines, notes, .. } => self.push(Card { kind: CardKind::Undone { lines: lines.clone(), notes: notes.clone() }, text: lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
             // ponytail: stopgap, Task 8 gives the learning turn its own card.
             Event::Learned { .. } => vec![],
+            // The Skills screen reads this event straight off its own connection (Task 8); the
+            // chat rail has no card for it.
+            Event::Skills { .. } => vec![],
             Event::Busy { text, .. } | Event::Error { text } => vec![Change::Line(text.clone())],
             Event::State { job: None } => vec![],
             Event::State { job: Some(st) } => self.rebuild(st),

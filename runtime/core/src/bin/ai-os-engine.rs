@@ -10,7 +10,7 @@ use executor::worker::{SandboxWorker, Worker};
 use std::path::PathBuf;
 
 fn main() {
-    let db = std::env::var("AI_OS_DB").unwrap_or_else(|_| "/data/ai-os.db".into());
+    let db = service::db_path();
     let model = std::env::var("AI_OS_MODEL").unwrap_or_else(|_| "qwen3.5:9b".into());
     let root = PathBuf::from(std::env::var("AI_OS_PROJECTS").unwrap_or_else(|_| "/data/projects".into()));
     let sock = service::socket_path();

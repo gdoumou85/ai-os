@@ -45,7 +45,7 @@ pub fn lines(event: &Event) -> Vec<String> {
         Event::Said { text } | Event::Understood { text, .. }
         | Event::Failed { text, .. } | Event::Stopped { text, .. } | Event::Busy { text, .. } => vec![text.clone()],
         Event::Done { text, windows, .. } => { let mut v = vec![text.clone()]; v.extend(aios_proto::window_note(windows)); v }
-        Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } => vec![],
+        Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } | Event::Skills { .. } => vec![],
         Event::NeedsAnswer { questions, options, .. } => questions.iter().enumerate().map(|(i, q)| match options.get(i).filter(|o| !o.is_empty()) {
             Some(o) => format!("Question: {q} ({})", o.join(" / ")),
             None => format!("Question: {q}"),

@@ -71,6 +71,25 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
     Ok(l)
 }
 
+/// Where the engine's database is: its notebooks are read from here by the Skills screen.
+pub fn db_path() -> String { std::env::var("AI_OS_DB").unwrap_or_else(|_| "/data/ai-os.db".into()) }
+
+/// The notebooks as the Skills screen draws them, read on the client's own thread so the screen
+/// opens while a job runs (Phase 3 §6).
+fn skills_event(forget: Option<(&str, &str)>) -> Event {
+    let read = || -> Result<Vec<aios_proto::Notebook>, crate::store::StoreError> {
+        let c = rusqlite::Connection::open(db_path())?;
+        c.busy_timeout(std::time::Duration::from_secs(5))?;
+        crate::notes::init(&c)?;
+        if let Some((nb, tp)) = forget { crate::notes::remove(&c, nb, tp)?; }
+        Ok(crate::notes::all(&c)?.into_iter().map(|(name, notes)| aios_proto::Notebook {
+            name,
+            entries: notes.into_iter().map(|n| aios_proto::NoteView { topic: n.topic, kind: n.kind, text: n.text, uses: n.uses, failed: n.failed, needs_check: n.needs_check }).collect(),
+        }).collect())
+    };
+    match read() { Ok(notebooks) => Event::Skills { notebooks }, Err(e) => Event::Error { text: format!("could not read the notebooks: {e}") } }
+}
+
 /// `$AI_OS_SOCKET_DIR/ai-os.sock` when set (tests, a second engine on purpose), else
 /// `$XDG_RUNTIME_DIR/ai-os.sock` (a systemd user service and every shell in the distro have
 /// it), else `/run/user/<uid>/ai-os.sock`.
@@ -193,6 +212,8 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                             _ => if tx.send(Command::Say(text)).is_err() { break; },
                         }
                     }
+                    Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
+                    Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
                     Err(_) => sh.send_to(id, &Event::Error { text: "could not read that message".into() }),
                 }
             }

@@ -227,6 +227,27 @@ fn bind_refuses_a_live_socket_and_removes_a_stale_file() {
 }
 
 #[test]
+fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
+    let dir = temp("skills");
+    let db = dir.join("notes.db");
+    std::env::set_var("AI_OS_DB", &db);
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        aios_core::notes::init(&c).unwrap();
+        aios_core::notes::put(&c, &aios_core::notes::Note { notebook: "this computer".into(), topic: "open a website".into(), kind: "technique".into(), text: "open_app firefox".into(), ..Default::default() }, None).unwrap();
+    }
+    let sock = start(&dir, vec![], Arc::new(Mutex::new(None)));
+    let (mut r, mut w) = Client::connect(&sock).unwrap().split();
+    w.request(&aios_proto::Request::Skills {}).unwrap();
+    let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event") };
+    assert_eq!(notebooks[0].name, "this computer");
+    assert_eq!(notebooks[0].entries[0].topic, "open a website");
+    w.request(&aios_proto::Request::Forget { notebook: "this computer".into(), topic: "open a website".into() }).unwrap();
+    let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event after forget") };
+    assert!(notebooks.is_empty(), "{notebooks:?}");
+}
+
+#[test]
 fn a_message_while_only_a_chat_reply_is_in_progress_is_queued_not_busy() {
     let dir = temp("chat-queue");
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
