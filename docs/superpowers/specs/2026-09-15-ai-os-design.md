@@ -383,3 +383,18 @@ except by his ad-hoc runs.
 - **Next,** at the owner's word: a live "thinking — N min, N words" line and a step counter, then
   his skills test. A Settings screen, with the answer timeout as its first item, comes later.
 
+## 2026-09-19: full access (v0.8.0)
+
+The owner reversed the confinement decisions of this design and of 1c/1d/2a/2b: "the AI should
+have full access to everything; if it kills the OS it kills it — that's why we run it in a VM."
+Design `2026-09-19-full-access-design.md`, plan `2026-09-19-full-access.md`.
+
+- The AI runs as the owner with `NOPASSWD: ALL`, the network and every folder. One machine hand
+  runs commands and file actions; the sandbox, the root helper and its fixed menu, the risk rules
+  and the install/remove/service/make_dir/fetch_packages/http_post actions are gone.
+- Nobody is asked: no Needs-your-OK card and no approval state.
+- No Undo, no undo log, no project snapshots. The VirtualBox snapshot is the way back.
+- The screen hand keeps working while the person uses the mouse.
+- Stays: the loop guards and budgets, the answer timeout, Skills (Keep/Discard now counts a `sudo`
+  command as changing the machine), the Stop button.
+
