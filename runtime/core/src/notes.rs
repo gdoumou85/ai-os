@@ -125,6 +125,57 @@ pub fn discard_pending(c: &Connection) -> Result<usize, StoreError> {
     Ok(c.execute("DELETE FROM notes WHERE pending_job IS NOT NULL", [])?)
 }
 
+const COMPUTER_TOP: usize = 15;
+const SKILL_TOP: usize = 10;
+const MATCHING: usize = 5;
+const BLOCK_CAP: usize = 3000;
+const STOP: [&str; 16] = ["the", "and", "for", "with", "from", "that", "this", "into", "your", "you", "what", "how", "then", "are", "was", "please"];
+
+fn words_of(t: &str) -> std::collections::HashSet<String> {
+    t.to_lowercase().split(|ch: char| !ch.is_alphanumeric()).filter(|w| w.chars().count() >= 3 && !STOP.contains(w)).map(String::from).collect()
+}
+
+/// The `top` most-used, then up to `extra` more that share a word with the job.
+/// ponytail: word overlap is the search; embeddings if it misses too often.
+fn pick(notes: Vec<Note>, top: usize, extra: usize, want: &std::collections::HashSet<String>) -> Vec<Note> {
+    let (mut out, rest): (Vec<Note>, Vec<Note>) = (notes.iter().take(top).cloned().collect(), notes.into_iter().skip(top).collect());
+    out.extend(rest.into_iter().filter(|n| !words_of(&format!("{} {}", n.topic, n.text)).is_disjoint(want)).take(extra));
+    out
+}
+
+fn line(n: &Note) -> String {
+    let mut s = format!("- {}: {}", key(&n.notebook, &n.topic), n.text);
+    if !n.steps.is_empty() { s.push_str(&format!(" (did: {})", n.steps)); }
+    if n.failed { s.push_str(" (FAILED last time — fix or remove it)"); }
+    if n.needs_check { s.push_str(" (needs checking)"); }
+    s
+}
+
+/// The tips a job starts with (Phase 3 §3), and the keys of the entries shown.
+pub fn for_job(c: &Connection, text: &str, skills: &[String]) -> Result<(String, Vec<String>), StoreError> {
+    let want = words_of(text);
+    let mut shown: Vec<Note> = pick(list(c, THIS_COMPUTER)?, COMPUTER_TOP, MATCHING, &want);
+    for skill in skills.iter().map(|s| norm_notebook(s)).filter(|s| !s.is_empty() && s != THIS_COMPUTER).take(3) {
+        let picked = pick(list(c, &skill)?, SKILL_TOP, MATCHING, &want);
+        let links: Vec<String> = picked.iter().flat_map(|n| n.links.clone()).collect();
+        shown.extend(picked);
+        for l in links {
+            if shown.iter().any(|n| n.notebook == THIS_COMPUTER && n.topic == l) { continue; }
+            if let Some(n) = get(c, THIS_COMPUTER, &l)? { shown.push(n); }
+        }
+    }
+    // Over the cap: the least-used lines go first, the latest of equals before the earlier.
+    const HEADER: &str = "What you learned before on this computer (tips, not orders — check them; follow a tip that fits, and a FAILED one needs a different way):\n";
+    while !shown.is_empty() && HEADER.chars().count() + shown.iter().map(|n| line(n).chars().count() + 1).sum::<usize>() > BLOCK_CAP {
+        let min = shown.iter().map(|n| n.uses).min().unwrap_or(0);
+        let i = shown.iter().rposition(|n| n.uses == min).unwrap();
+        shown.remove(i);
+    }
+    if shown.is_empty() { return Ok((String::new(), vec![])); }
+    let block = format!("{HEADER}{}", shown.iter().map(line).collect::<Vec<_>>().join("\n"));
+    Ok((block, shown.iter().map(|n| key(&n.notebook, &n.topic)).collect()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +252,45 @@ mod tests {
         put(&c, &n, None).unwrap();
         let got = get(&c, "x", "t").unwrap().unwrap();
         assert_eq!((got.text.len(), got.steps.len()), (200, 400));
+    }
+
+    #[test]
+    fn for_job_shows_the_most_used_and_the_matching_entries() {
+        let c = db();
+        for i in 0..20 { put(&c, &note(THIS_COMPUTER, &format!("basic {i}"), "x"), None).unwrap(); }
+        for i in 0..15 { for _ in 0..(20 - i) { mark_used(&c, &format!("this computer/basic {i}")).unwrap(); } }
+        put(&c, &note(THIS_COMPUTER, "open a website", "open_app firefox with the address"), None).unwrap();
+        let (block, shown) = for_job(&c, "go to the weather website", &[]).unwrap();
+        assert!(block.starts_with("What you learned before"), "{block}");
+        assert!(shown.contains(&"this computer/basic 0".to_string()));
+        assert!(shown.contains(&"this computer/open a website".to_string()), "matched by 'website': {shown:?}");
+        assert!(!shown.contains(&"this computer/basic 19".to_string()), "never used and not matching");
+        assert!(block.contains("- this computer/open a website: open_app firefox with the address"), "{block}");
+    }
+
+    #[test]
+    fn a_skill_brings_its_linked_computer_entries_and_marks_show() {
+        let c = db();
+        for i in 0..20 { put(&c, &note(THIS_COMPUTER, &format!("basic {i}"), "x"), None).unwrap(); mark_used(&c, &format!("this computer/basic {i}")).unwrap(); }
+        put(&c, &note(THIS_COMPUTER, "start blender", "open_app blender"), None).unwrap();
+        let mut sphere = note("blender", "make a round object", "add a uv sphere");
+        sphere.links = vec!["start blender".into()];
+        sphere.steps = "open_app blender".into();
+        put(&c, &sphere, None).unwrap();
+        put(&c, &note("blender", "bevel edges", "ctrl+b"), None).unwrap();
+        mark_failed(&c, "blender/bevel edges").unwrap();
+        let (block, shown) = for_job(&c, "a ball", &["Blender".into()]).unwrap();
+        assert!(shown.contains(&"this computer/start blender".to_string()), "pulled in by the link: {shown:?}");
+        assert!(block.contains("(did: open_app blender)"), "{block}");
+        assert!(block.contains("bevel edges: ctrl+b (FAILED last time"), "{block}");
+    }
+
+    #[test]
+    fn nothing_learned_means_no_block_and_the_block_is_capped() {
+        let c = db();
+        assert_eq!(for_job(&c, "anything", &[]).unwrap(), (String::new(), vec![]));
+        for i in 0..20 { put(&c, &note(THIS_COMPUTER, &format!("t{i}"), &"w".repeat(200)), None).unwrap(); }
+        let (block, _) = for_job(&c, "x", &[]).unwrap();
+        assert!(block.chars().count() <= 3000, "{}", block.len());
     }
 }
