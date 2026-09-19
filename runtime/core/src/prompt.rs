@@ -7,7 +7,7 @@ use executor::action::Action;
 pub const SYSTEM: &str = "You are the AI that runs this computer for its user. You answer with exactly one JSON move.
 Rules:
 - You act only through moves; the executor runs them and reports back. Never claim something ran unless the report says so.
-- Where a move needs the user's yes, the machine stops it and asks them for you. Take the step and let it be asked: never wait for permission before acting, and never give up for the want of a yes you cannot ask for yourself.
+- You have full access to this computer: every folder, the whole network, and root through `sudo` (it never asks for a password). Nobody is asked before you act: take the step yourself, never wait for permission and never ask for it.
 - You cannot know the full scope of what the user imagines. When starting work, ask what you need to know (1-3 questions) unless the job is in creative mode; then decide yourself. The user answers by clicking: give each question 2-4 short likely answers in options (options[i] for questions[i]), and leave its list empty only when the answer is theirs alone, like a name.
 - Say what you understood before you act.
 - Work from the project's BLUEPRINT.md: read it to find what to change and where. After each change, update BLUEPRINT.md in place (replace lines, never pile on; keep it as small as possible). Create it first for a new project.
@@ -15,14 +15,11 @@ Rules:
 - A step that failed once will fail again. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
 - If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.
-- Install software with `install` (apt), never with run_command apt. Enable, disable or restart services with `service`. Language packages (pip, npm, crates) come through `fetch_packages`: the sandbox has no other network.
-- Make a folder outside the working directory with `make_dir` and an absolute path, never `run_command mkdir`: the sandbox can only write inside the working directory, so mkdir there reports a read-only filesystem. A folder inside the working directory is the sandbox's own: make it with `run_command mkdir -p src`. `make_dir` is never used with a relative path.
-- The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`), never by an absolute path: an absolute path leaves the workspace and needs the user's yes.
-- A file outside the project is written with `write_file` and its absolute path, never with run_command (`echo`, `tee`, `cp`): the sandbox cannot reach out there, so such a command reports success and writes nothing. It needs the user's yes (reading under /etc is free); say in one line why you need it.
-- Remove software with `remove` and change a setting with `set_setting`; both are hands like the rest, not run_command.
+- Install, remove and set up software with run_command: `sudo apt-get install -y …`, `sudo apt-get remove -y …`, `sudo systemctl …`; language packages with pip (into the working directory's .venv), npm or cargo. Make folders with `run_command mkdir -p`.
+- The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`). read_file, write_file and edit_file take any absolute path too; a file only root may write is written for you. Where projects live is changed with `set_setting`.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project; so is using a program or a website for the user (opening it, clicking, filling it in). A project is something you build and keep as files.
-- Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`, never with run_command: the sandbox cannot see a window.
-- The screen is the last resort, for what `look` cannot reach (a web page, an app that lists no controls): `screen_look` shows the screen under numbered squares 1-48; `screen_look` with a cell shows that square enlarged under spots 1-16; `screen_click` a spot in the square you just enlarged, naming what you click; `screen_type` types into what has the focus (enter to press Enter after). Look, enlarge, click, then look again to see what happened; every click needs a fresh enlarged look. If the person moves the mouse, you stop.";
+- Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`.
+- The screen is the last resort, for what `look` cannot reach (a web page, an app that lists no controls): `screen_look` shows the screen under numbered squares 1-48; `screen_look` with a cell shows that square enlarged under spots 1-16; `screen_click` a spot in the square you just enlarged, naming what you click; `screen_type` types into what has the focus (enter to press Enter after). Look, enlarge, click, then look again to see what happened; every click needs a fresh enlarged look.";
 
 fn join_instructions(instructions: &[String]) -> String {
     if instructions.is_empty() { "(none)".into() } else { instructions.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n") }
@@ -113,12 +110,6 @@ pub fn summarise_steps(job: &Job) -> String {
     if out.is_empty() { "(nothing done yet)".into() } else { out }
 }
 
-/// The owner's home as the engine sees it, named beside /data as a root the wrapper accepts
-/// (design §9.1). No home, no invented one: the header then promises only /data.
-fn home_clause(home: Option<String>) -> String {
-    match home { Some(h) if !h.is_empty() => format!(" and {h}"), _ => String::new() }
-}
-
 pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, last_run: Option<&str>) -> Prompt {
     let answers = if job.answers.is_empty() { "(none)".into() } else {
         job.answers.iter().map(|(q, a)| format!("- {q} -> {a}")).collect::<Vec<_>>().join("\n")
@@ -127,7 +118,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
     let (header, bp_block) = if job.housekeeping {
-        (format!("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. The sandbox cannot see outside the scratch folder — that limits checking, never doing: make_dir and the other hands work anywhere under /data{}, and a check out there reports what the sandbox cannot see, not what is not there. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) make_dir the folder, 2) set_setting projects_root=<that absolute path>, 3) done with make_dir (or run_command ls) as the check, and that job is not done until the setting is set. A window the user named is found with `look` first; nothing inside a window is a file of yours.", home_clause(std::env::var("HOME").ok())), String::new())
+        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. You can reach and check anything on the machine. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) run_command mkdir -p the folder, 2) set_setting projects_root=<that absolute path>, 3) done with run_command ls <that folder> as the check, and that job is not done until the setting is set. A window the user named is found with `look` first; nothing inside a window is a file of yours.".to_string(), String::new())
     } else {
         let bp = match blueprint {
             Some(b) => b.chars().take(3000).collect::<String>(),
@@ -151,20 +142,10 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     // carry none, and then the line is simply not there.
     let verbatim = if job.request.is_empty() { String::new() } else { format!("The user asked (verbatim): {}\n", job.request) };
     let user = format!(
-        "Machine: Ubuntu Linux (python3, no `python`; apt via install; pip/npm/cargo via fetch_packages; pip ones go into the working directory's .venv, so run them from there: .venv/bin/python, .venv/bin/django-admin).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
+        "Machine: Ubuntu Linux (python3, no `python`; root through sudo; pip packages go into the working directory's .venv — `python3 -m venv .venv`, then .venv/bin/pip — and run from there: .venv/bin/python, .venv/bin/django-admin).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
         join_instructions(instructions), header, job.goal, verbatim, mode, job.understood, answers, plan, bp_block, last, tips, summarise_steps(job), note, hint
     );
     Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job), image: None }
-}
-
-/// The user asked something instead of yes or no while an action waits for their OK (1d §2.1).
-/// Reply only: the answer is words, never a move that changes the job.
-pub fn approval_question(instructions: &[String], job: &Job, what: &str, why: &str, question: &str) -> Prompt {
-    let user = format!(
-        "Standing instructions:\n{}\n\nJob: {} — {}\nAn action is waiting for the user's OK: {what} (reason: {why}).\nThe user asked: {question}\nAnswer the question in one or two plain sentences so they can decide. Do not act, do not decide for them, do not ask them for the OK yourself (the system asks again).",
-        join_instructions(instructions), if job.housekeeping { "housekeeping" } else { &job.project }, job.goal,
-    );
-    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply"], image: None }
 }
 
 /// Every step of the job, numbered as the learning turn cites them: the last 80 in full, compact.
@@ -286,33 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn system_rules_say_who_asks_the_user_and_which_hand_reaches_outside() {
-        // The 1d live run's findings, one line each. Without the first, the 9B planned the
-        // write_file it needed and then gave up on the job "because the user did not provide
-        // confirmation" — a yes it has no way to ask for. Without the second it wrote /etc with
-        // `echo`, which the sealed sandbox reports as a success that wrote nothing. Without the
-        // third it used `make_dir` for a folder in its own project.
-        assert!(SYSTEM.contains("never wait for permission before acting"));
+    fn system_rules_give_full_access_and_never_mention_a_sandbox() {
+        // Full access (2026-09-19): root, network, every folder, nobody asked.
+        for w in ["full access", "`sudo`", "never wait for permission", "sudo apt-get install -y", "mkdir -p", "`set_setting`"] {
+            assert!(SYSTEM.contains(w), "{w}");
+        }
+        for w in ["sandbox", "user's yes", "make_dir", "fetch_packages", "moves the mouse"] { assert!(!SYSTEM.contains(w), "{w}"); }
         assert!(SYSTEM.contains("give each question 2-4 short likely answers in options"), "the answers the rail offers as buttons");
-        assert!(SYSTEM.contains("A file outside the project is written with `write_file`"));
-        assert!(SYSTEM.contains("`make_dir` is never used with a relative path"));
-    }
-
-    #[test]
-    fn system_rules_mention_the_new_hands() {
-        assert!(SYSTEM.contains("install"));
-        assert!(SYSTEM.contains("fetch_packages"));
-        // The live run's first finding: without this the 9B tried `run_command mkdir /data/work`,
-        // read "Read-only file system" as the machine's truth and gave up on the whole job.
-        assert!(SYSTEM.contains("make_dir"));
-        // Third finding: absolute paths for the project's own files put every write one level
-        // above the workspace, so each one needed an approval and nothing landed in the project.
+        // The 1d run: absolute paths for the project's own files put every write one level above
+        // the project, so nothing landed in it.
         assert!(SYSTEM.contains("relative to the working directory"));
-        // Reading /etc is Auto (rules::classify), so the flat "needs the user's yes" sent the
-        // model asking for approvals it never needed.
-        assert!(SYSTEM.contains("reading under /etc is free"));
-        // The two hands the list left out: the model reached for run_command instead.
-        assert!(SYSTEM.contains("`remove`") && SYSTEM.contains("`set_setting`"));
     }
 
     #[test]
@@ -367,26 +331,9 @@ mod tests {
         // live — a housekeeping job that installs a tool has no setting to reach — and inside
         // that condition it is ordered, because the 9B needs the order (§11 Results).
         assert!(p.user.contains("If the user's request is about where projects live from now on"), "{}", p.user);
-        assert!(p.user.contains("1) make_dir the folder, 2) set_setting projects_root"), "{}", p.user);
+        assert!(p.user.contains("1) run_command mkdir -p the folder, 2) set_setting projects_root"), "{}", p.user);
         assert!(p.user.contains("that job is not done until the setting is set"), "{}", p.user);
-        // Third finding: with no way to look outside the scratch folder, the 9B invented a file
-        // to read as its check (`/etc/settings.conf`) and gave up when it could not be read.
-        assert!(p.user.contains("cannot see outside the scratch folder"), "{}", p.user);
-    }
-
-    /// The housekeeping header names the home of whoever runs the engine, not a fixed user —
-    /// and names no home at all rather than invent one when the engine has no HOME.
-    #[test]
-    fn the_housekeeping_header_names_the_owners_home() {
-        assert_eq!(home_clause(Some("/home/sam".into())), " and /home/sam");
-        assert_eq!(home_clause(None), "");
-        assert_eq!(home_clause(Some(String::new())), "");
-        let h = std::env::var("HOME").expect("the engine always runs with a HOME");
-        let mut job = Job::new("scratch", "/data/projects/scratch", "tidy", false, "Tidying");
-        job.housekeeping = true;
-        let p = job_turn(&[], &job, None, None);
-        let text = format!("{}{}", p.system, p.user);
-        assert!(text.contains(&format!("under /data and {h}")), "{text}");
+        assert!(!p.user.contains("sandbox"), "{}", p.user);
     }
 
     #[test]
@@ -519,18 +466,7 @@ mod tests {
         working_not_creative.state = State::Working;
         check(&job_turn(&[], &working_not_creative, None, None));
 
-        check(&approval_question(&[], &Job::new("p", "/data/projects/p", "g", false, "u"), "w", "y", "q"));
-
         let job = Job::new("p", "/data/projects/p", "g", false, "u");
         check(&learning_turn(&job, true));
-    }
-
-    #[test]
-    fn approval_question_is_reply_only_and_carries_the_action() {
-        let job = Job::new("p", "/data/projects/p", "g", false, "u");
-        let p = approval_question(&[], &job, "http post to https://x", "network access", "what does it send?");
-        assert_eq!(p.allowed, vec!["reply"]);
-        assert!(p.user.contains("http post to https://x") && p.user.contains("network access") && p.user.contains("what does it send?"));
-        assert!(p.user.contains("Do not") , "tells the model not to act");
     }
 }

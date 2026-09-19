@@ -16,8 +16,10 @@ pub struct Learned { pub lines: Vec<String>, pub pending: bool }
 fn changes_machine(a: &Action, folder: &str) -> bool {
     let outside = |p: &str| { let p = Path::new(p); p.components().any(|c| c == Component::ParentDir) || (p.is_absolute() && !p.starts_with(folder)) };
     match a {
-        Action::Install { .. } | Action::Remove { .. } | Action::Service { .. } | Action::SetSetting { .. } => true,
-        Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::MakeDir { path } => outside(path),
+        Action::SetSetting { .. } => true,
+        // Root is how software and services change (full-access spec).
+        Action::RunCommand { argv } => argv.first().is_some_and(|p| p == "sudo"),
+        Action::WriteFile { path, .. } | Action::EditFile { path, .. } => outside(path),
         _ => false,
     }
 }
@@ -168,7 +170,7 @@ mod tests {
     fn a_step_that_changes_the_machine_waits_for_keep() {
         let c = db();
         let write = |p: &str| rec(Action::WriteFile { path: p.into(), contents: "y".into() }, true);
-        let j = job(vec![rec(Action::Install { packages: vec!["gimp".into()] }, true), write("/data/housekeeping/x"), write("/data/housekeeping/../../etc/x"), write("../x")]);
+        let j = job(vec![rec(Action::RunCommand { argv: vec!["sudo".into(), "apt-get".into(), "install".into(), "-y".into(), "gimp".into()] }, true), write("/data/housekeeping/x"), write("/data/housekeeping/../../etc/x"), write("../x")]);
         let l = apply(&c, &j, vec![entry("this computer", "get gimp", "technique", vec![1]), entry("this computer", "scratch note", "technique", vec![2]),
             entry("this computer", "climb out", "technique", vec![3]), entry("this computer", "step up", "technique", vec![4])], &[], &[], &[], true).unwrap();
         assert!(l.pending);

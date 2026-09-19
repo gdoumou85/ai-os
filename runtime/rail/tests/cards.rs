@@ -20,14 +20,6 @@ fn a_whole_job_becomes_the_right_cards() {
     assert_eq!(steps.iter().map(|s| (s.text.as_str(), s.done, s.ok, s.detail.as_deref())).collect::<Vec<_>>(),
         vec![("write", true, true, Some("wrote a.py")), ("run", true, true, Some("ran python3 a.py"))]);
 
-    cards.apply(&Event::NeedsOk { job_id: j(), what: "http post to x".into(), why: "network".into() });
-    let ok = 2;
-    assert!(matches!(&cards.list[ok].kind, CardKind::NeedsOk { what, why } if what == "http post to x" && why == "network"));
-    assert_eq!(cards.list[ok].buttons, vec![Button { label: "Yes".into(), say: "yes".into() }, Button { label: "No".into(), say: "no".into() }]);
-    cards.apply(&Event::Said { text: "it sends b".into() });
-    cards.apply(&Event::NeedsOk { job_id: j(), what: "http post to x".into(), why: "network".into() });
-    assert_eq!(cards.list.len(), 5, "said, then the OK asked again as a new card");
-
     let files = vec![ChangedFile { path: "/data/p/a.py".into(), kind: FileKind::Text, size: 3 }, ChangedFile { path: "/data/p/pic.png".into(), kind: FileKind::Image, size: 9 }];
     cards.apply(&Event::Done { job_id: j(), text: "finished".into(), check: Some("ran python3 a.py: ok".into()), files: files.clone(), windows: vec![] });
     let CardKind::Building { collapsed, .. } = &cards.list[b].kind else { panic!() };
@@ -36,23 +28,18 @@ fn a_whole_job_becomes_the_right_cards() {
     let CardKind::Done { text, check, files: f, .. } = &done.kind else { panic!() };
     assert_eq!((text.as_str(), check.as_deref()), ("finished", Some("ran python3 a.py: ok")));
     assert_eq!(f, &files);
-    assert_eq!(done.buttons, vec![Button { label: "Undo".into(), say: "undo".into() }]);
+    assert!(done.buttons.is_empty(), "no Undo: full access (the VM snapshot is the way back)");
     assert_eq!(done.opens, vec!["/data/p/a.py".to_string(), "/data/p/pic.png".to_string()]);
     assert_eq!(done.thumbnails, vec!["/data/p/pic.png".to_string()]);
-
-    cards.apply(&Event::Undone { job_id: j(), name: "p".into(), lines: vec![UndoLine { text: "put back a.py".into(), ok: true }, UndoLine { text: "could not".into(), ok: false }], notes: vec!["Not covered: x".into()] });
-    let CardKind::Undone { lines, notes } = &cards.list.last().unwrap().kind else { panic!() };
-    assert_eq!(lines.len(), 2); assert_eq!(notes, &vec!["Not covered: x".to_string()]);
 }
 
 #[test]
-fn a_window_job_done_card_names_the_window_and_says_it_cannot_undo() {
+fn a_window_job_done_card_says_only_what_was_done() {
     let mut cards = Cards::default();
     cards.apply(&Event::Understood { job_id: j(), name: "housekeeping".into(), text: "Taking your editor".into(), housekeeping: true });
     cards.apply(&Event::Done { job_id: j(), text: "Added the line and saved.".into(), check: None, files: vec![], windows: vec!["Text Editor".into()] });
     let c = cards.list.last().unwrap();
-    assert!(matches!(&c.kind, CardKind::Done { windows, .. } if windows == &vec!["Text Editor".to_string()]));
-    assert!(c.text.ends_with("What I did inside Text Editor can't be undone by me."), "{}", c.text);
+    assert_eq!(c.text, "Added the line and saved.");
     assert!(c.opens.is_empty());
 }
 
@@ -105,11 +92,11 @@ fn clear_keeps_only_the_running_job_and_what_it_waits_on() {
     cards.apply(&Event::NeedsAnswer { job_id: j(), questions: vec!["which one?".into()], options: vec![] });
     cards.apply(&Event::You { text: "the first".into() });
     cards.apply(&Event::Said { text: "noted".into() });
-    cards.apply(&Event::NeedsOk { job_id: j(), what: "http post to x".into(), why: "network".into() });
+    cards.apply(&Event::NeedsAnswer { job_id: j(), questions: vec!["and then?".into()], options: vec![] });
     assert!(cards.running());
     cards.clear();
     assert!(matches!(cards.list[0].kind, CardKind::Building { .. }));
-    assert!(matches!(cards.list[1].kind, CardKind::NeedsOk { .. }));
+    assert!(matches!(cards.list[1].kind, CardKind::NeedsAnswer { .. }));
     assert_eq!(cards.list.len(), 2);
     // The job carries on in the cleared list: its steps and its end land on the kept card.
     assert_eq!(cards.apply(&Event::Plan { job_id: j(), steps: vec!["write".into()] }), vec![Change::Updated(0)]);
@@ -126,7 +113,7 @@ fn clear_keeps_only_the_running_job_and_what_it_waits_on() {
 fn the_spinner_runs_from_your_message_until_the_turn_comes_back() {
     assert_eq!(busy_after(&Event::You { text: "make p".into() }), Some(true));
     assert_eq!(busy_after(&Event::Step { job_id: j(), plan_step: 1, text: "wrote a".into(), ok: true }), Some(true));
-    assert_eq!(busy_after(&Event::NeedsOk { job_id: j(), what: "x".into(), why: "y".into() }), Some(false));
+    assert_eq!(busy_after(&Event::NeedsAnswer { job_id: j(), questions: vec!["x".into()], options: vec![] }), Some(false));
     assert_eq!(busy_after(&Event::Said { text: "hi".into() }), Some(false));
     assert_eq!(busy_after(&Event::Error { text: "bad".into() }), Some(false));
     assert_eq!(busy_after(&Event::State { job: None }), None);
@@ -145,7 +132,7 @@ fn learned_lines_join_the_jobs_done_card_and_pending_ones_offer_keep_and_discard
     let CardKind::Done { learned, .. } = &cards.list[0].kind else { panic!() };
     assert_eq!(learned, &vec!["Learned, if you keep it: get gimp (this computer)".to_string()]);
     let says: Vec<&str> = cards.list[0].buttons.iter().map(|b| b.say.as_str()).collect();
-    assert_eq!(says, vec!["undo", "keep what you learned", "discard what you learned"]);
+    assert_eq!(says, vec!["keep what you learned", "discard what you learned"]);
     // A failed job's "marked as not working" has no Done card to join: it is a line of its own.
     // (Its learning turn dropped what waited, so the Done card above loses Keep and Discard.)
     let ch = cards.apply(&Event::Learned { job_id: "other".into(), lines: vec!["Marked as not working: this computer/x".into()], pending: false });
@@ -162,11 +149,11 @@ fn only_the_newest_learned_card_keeps_keep_and_discard() {
     cards.apply(&Event::Done { job_id: "j2".into(), text: "done".into(), check: None, files: vec![], windows: vec![] });
     let ch = cards.apply(&Event::Learned { job_id: "j2".into(), lines: vec!["Learned, if you keep it: get inkscape (this computer)".into()], pending: true });
     assert_eq!(ch, vec![Change::Updated(0), Change::Updated(1)], "the older card is redrawn without them");
-    assert_eq!(says(&cards, 0), vec!["undo"]);
-    assert_eq!(says(&cards, 1), vec!["undo", "keep what you learned", "discard what you learned"]);
+    assert!(says(&cards, 0).is_empty());
+    assert_eq!(says(&cards, 1), vec!["keep what you learned", "discard what you learned"]);
     // A turn that learned nothing still dropped what waited: the buttons go with it.
     assert_eq!(cards.apply(&Event::Learned { job_id: "j3".into(), lines: vec![], pending: false }), vec![Change::Updated(1)]);
-    assert_eq!(says(&cards, 1), vec!["undo"]);
+    assert!(says(&cards, 1).is_empty());
 }
 
 #[test]

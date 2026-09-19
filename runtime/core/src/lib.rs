@@ -12,7 +12,6 @@ pub mod notes;
 pub mod prompt;
 pub mod schema;
 pub mod service;
-pub mod snapshot;
 pub mod store;
 // Not `#[cfg(test)]`: the integration tests are their own crates and need the fakes too. They
 // ship inside the binaries, unused, which is harmless.

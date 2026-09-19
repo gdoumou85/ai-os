@@ -28,7 +28,7 @@ jobs:
         run: bash install/make-release.sh
       - name: Check the shipped scripts and the tarball
         run: |
-          for f in install/*.sh runtime/admin/ai-os-admin runtime/admin/test-admin.sh; do bash -n "$f"; done
+          for f in install/*.sh; do bash -n "$f"; done
           tar -tzf dist/ai-os-linux-amd64.tar.gz
       - uses: actions/upload-artifact@v4
         with:

@@ -4,9 +4,8 @@ use aios_core::engine::{Engine, HOUSEKEEPING_DIR};
 use aios_core::model::{Model, RemoteModel};
 use aios_core::service;
 use aios_core::store::Store;
-use executor::admin::AdminWorker;
 use executor::atspi::{DesktopState, DesktopWorker};
-use executor::worker::{SandboxWorker, Worker};
+use executor::worker::{MachineWorker, Worker};
 use std::path::PathBuf;
 
 fn main() {
@@ -25,11 +24,9 @@ fn main() {
         let desktop = DesktopState::for_model(llm.context_tokens());
         Engine::new(store, llm, root, Some(db),
             Box::new(move |ws| (
-                Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
-                Box::new(AdminWorker) as Box<dyn Worker>,
+                Box::new(MachineWorker { workspace: ws.to_path_buf() }) as Box<dyn Worker>,
                 Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>,
             )),
-            PathBuf::from(HOUSEKEEPING_DIR),
-            PathBuf::from("/data/snapshots")).with_sink(sink)
+            PathBuf::from(HOUSEKEEPING_DIR)).with_sink(sink)
     }))
 }

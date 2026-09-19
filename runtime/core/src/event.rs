@@ -1,7 +1,7 @@
 //! Plain words for actions, and the lines the terminal prints for an event (1d design §2.1).
 //! `lines` reproduces, word for word, what `Engine::handle` printed before events existed.
 use aios_proto::Event;
-use executor::action::{Action, Manager, ServiceDo};
+use executor::action::Action;
 
 pub fn describe(action: &Action) -> String {
     match action {
@@ -9,13 +9,6 @@ pub fn describe(action: &Action) -> String {
         Action::EditFile { path, .. } => format!("edited {path}"),
         Action::ReadFile { path, .. } => format!("read {path}"),
         Action::RunCommand { argv } => format!("ran {}", argv.join(" ")),
-        Action::HttpPost { url, .. } => format!("http post to {url}"),
-        Action::Install { packages } => format!("installed {}", packages.join(" ")),
-        Action::Remove { packages } => format!("removed {}", packages.join(" ")),
-        // The field is `action` in Rust; `do` is only its serde name (action.rs:23).
-        Action::Service { name, action } => format!("service {name} {}", match action { ServiceDo::Enable => "enable", ServiceDo::Disable => "disable", ServiceDo::Restart => "restart" }),
-        Action::MakeDir { path } => format!("made folder {path}"),
-        Action::FetchPackages { manager, packages } => format!("fetched {} with {}", packages.join(" "), match manager { Manager::Pip => "pip", Manager::Npm => "npm", Manager::Cargo => "cargo" }),
         Action::SetSetting { key, value } => format!("set {key} = {value}"),
         // A blank name is no window — the hand reads it as none — so the card must not say
         // "looked at ", as the live 2a run's own Done check line did.
@@ -43,20 +36,12 @@ fn plural(n: usize, w: &str) -> String { if n == 1 { format!("1 {w}") } else { f
 pub fn lines(event: &Event) -> Vec<String> {
     match event {
         Event::Said { text } | Event::Understood { text, .. }
-        | Event::Failed { text, .. } | Event::Stopped { text, .. } | Event::Busy { text, .. } => vec![text.clone()],
-        Event::Done { text, windows, .. } => { let mut v = vec![text.clone()]; v.extend(aios_proto::window_note(windows)); v }
+        | Event::Done { text, .. } | Event::Failed { text, .. } | Event::Stopped { text, .. } | Event::Busy { text, .. } => vec![text.clone()],
         Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } | Event::Skills { .. } => vec![],
         Event::NeedsAnswer { questions, options, .. } => questions.iter().enumerate().map(|(i, q)| match options.get(i).filter(|o| !o.is_empty()) {
             Some(o) => format!("Question: {q} ({})", o.join(" / ")),
             None => format!("Question: {q}"),
         }).collect(),
-        Event::NeedsOk { why, .. } => vec![format!("Needs your OK: {why}. Say yes to allow it, no to refuse, or ask me about it.")],
-        Event::Undone { name, lines, notes, .. } => {
-            let mut v = vec![format!("Undoing the last job ({name}):")];
-            v.extend(lines.iter().map(|l| l.text.clone()));
-            v.extend(notes.iter().cloned());
-            v
-        }
         Event::Learned { lines, pending, .. } => {
             let mut v = lines.clone();
             if *pending { v.push("Say \"keep what you learned\" to keep what changes the machine, or \"discard what you learned\".".into()); }
@@ -86,10 +71,8 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_prints_the_undo_note_after_a_window_job() {
+    fn the_terminal_prints_a_done_as_its_own_words() {
         let e = Event::Done { job_id: "j".into(), text: "done".into(), check: None, files: vec![], windows: vec!["Calculator".into()] };
-        assert_eq!(lines(&e), vec!["done".to_string(), "What I did inside Calculator can't be undone by me.".to_string()]);
-        let plain = Event::Done { job_id: "j".into(), text: "done".into(), check: None, files: vec![], windows: vec![] };
-        assert_eq!(lines(&plain), vec!["done".to_string()], "no windows, no note: 1d's lines unchanged");
+        assert_eq!(lines(&e), vec!["done".to_string()], "no undo, so no note about what cannot be undone");
     }
 }
