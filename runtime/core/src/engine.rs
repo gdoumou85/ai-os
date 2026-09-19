@@ -175,6 +175,10 @@ pub fn is_undo(text: &str) -> bool {
     UNDO_PHRASES.contains(&normalize(text).as_str())
 }
 
+/// Keep or throw away what the last learning turn left waiting (Phase 3 §5): fixed words, no model.
+pub fn is_keep_learned(text: &str) -> bool { normalize(text) == "keep what you learned" }
+pub fn is_discard_learned(text: &str) -> bool { normalize(text) == "discard what you learned" }
+
 /// What to call a job in a line the user reads. A housekeeping job has no project, so
 /// `job.project` is the empty string — "Stopped the job in ." is not a sentence.
 /// What the model is told when its answer was not a move (the owner's LM Studio run, 2026-09-19:
@@ -265,6 +269,15 @@ impl<M: Model> Engine<M> {
         std::fs::read_to_string(self.workspace(job).join("BLUEPRINT.md")).ok()
     }
 
+    /// The tips a job starts with, fixed on the job (Phase 3 §3).
+    fn give_tips(&self, job: &mut Job, skills: &[String]) -> Result<(), EngineError> {
+        job.skills = skills.iter().map(|s| crate::notes::norm_notebook(s)).filter(|s| !s.is_empty() && s != crate::notes::THIS_COMPUTER).take(3).collect();
+        let (block, shown) = crate::notes::for_job(self.store.conn(), &format!("{} {}", job.goal, job.request), &job.skills)?;
+        job.notes_block = block;
+        job.shown_notes = shown;
+        Ok(())
+    }
+
     /// One user message in, the lines to show the user out — the terminal's view of
     /// `handle_events`.
     pub fn handle(&mut self, text: &str) -> Result<Vec<String>, EngineError> {
@@ -312,6 +325,14 @@ impl<M: Model> Engine<M> {
     }
 
     fn handle_inner(&mut self, text: &str) -> Result<(), EngineError> {
+        if is_keep_learned(text) || is_discard_learned(text) {
+            let keep = is_keep_learned(text);
+            let c = self.store.conn();
+            let n = if keep { crate::notes::keep_pending(c)? } else { crate::notes::discard_pending(c)? };
+            let text = match (n, keep) { (0, _) => "There is nothing waiting to be kept.", (_, true) => "Kept what I learned.", (_, false) => "Discarded it." };
+            self.emit(Event::Said { text: text.into() });
+            return Ok(());
+        }
         let open = self.open_job()?;
         // Undo is deterministic, like stop and the approvals: no model call either way. It is
         // one job at a time here too — a running job's changes are not finished being made, so
@@ -412,7 +433,7 @@ impl<M: Model> Engine<M> {
                 }
                 Ok(())
             }
-            Move::Start { project, new_project: _, description, goal, creative, understood, skills: _, remember } => {
+            Move::Start { project, new_project: _, description, goal, creative, understood, skills, remember } => {
                 let name = sanitize_project_name(&project);
                 let existing = self.store.get_project(&name)?;
                 let is_new = existing.is_none();
@@ -444,6 +465,7 @@ impl<M: Model> Engine<M> {
                 job.new_project = is_new;
                 // The model's `goal` is its paraphrase; this is what the user actually said.
                 job.request = text.to_string();
+                self.give_tips(&mut job, &skills)?;
                 // The files as they were before this job touched them — taken BEFORE the job
                 // row exists. A snapshot that fails after the job is saved leaves an open job
                 // whose files nothing can put back; this way the job never starts at all. A
@@ -477,6 +499,7 @@ impl<M: Model> Engine<M> {
                 if fresh { snapshot::share_with_sandbox(&self.housekeeping_dir); }
                 let mut job = Job::new_housekeeping(&self.housekeeping_dir.display().to_string(), &goal, &understood);
                 job.request = text.to_string();
+                self.give_tips(&mut job, &[])?;
                 self.store.save_job(&job)?;
                 self.emit(Event::Understood { job_id: job.id.clone(), name: display_name(&job).to_string(), text: understood, housekeeping: job.housekeeping });
                 if let Some(n) = note { self.emit(Event::Said { text: n }); }
@@ -518,7 +541,22 @@ impl<M: Model> Engine<M> {
             _ => Event::Failed { job_id, text, files },
         };
         self.emit(ev);
+        if state != State::Cancelled { self.learn(&job, state == State::Done); }
         Ok(())
+    }
+
+    /// One model call after a job, never fatal (Phase 3 §4): the job is already over and said so.
+    fn learn(&mut self, job: &Job, passed: bool) {
+        let mv = match self.model.next_move(&prompt::learning_turn(job, passed)) {
+            Ok(m) => m,
+            Err(e) => { eprintln!("engine: no learning turn ({e})"); return }
+        };
+        let Move::Learn { entries, used, wrong, remove } = mv else { return };
+        match crate::learn::apply(self.store.conn(), job, entries, &used, &wrong, &remove, passed) {
+            Ok(l) if !l.lines.is_empty() => self.emit(Event::Learned { job_id: job.id.clone(), lines: l.lines, pending: l.pending }),
+            Ok(_) => {}
+            Err(e) => eprintln!("engine: what was learned could not be saved ({e})"),
+        }
     }
 
     /// "Undo that": put back everything the most recent finished job changed, newest change
@@ -1515,7 +1553,8 @@ mod tests {
         let out = e.handle("make it work").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         let prompts = e.model.prompts.borrow();
-        assert!(prompts[5].user.contains("LAST RUN") && prompts[5].user.contains("NameError: prmes"), "{}", prompts[5].user);
+        // index 6, not 5: the failed job's own learning turn is prompt 4, one more than before.
+        assert!(prompts[6].user.contains("LAST RUN") && prompts[6].user.contains("NameError: prmes"), "{}", prompts[6].user);
         assert!(!root.join("p").join("LAST_RUN.md").exists(), "wiped once a job in the project is proven done");
     }
 
@@ -1556,8 +1595,8 @@ mod tests {
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
         assert!(e.open_job().unwrap().is_none());
-        // front door + plan + 6 replans
-        assert!(e.model.prompts.borrow().len() <= 8, "{}", e.model.prompts.borrow().len());
+        // front door + plan + 6 replans + the learning turn
+        assert!(e.model.prompts.borrow().len() <= 9, "{}", e.model.prompts.borrow().len());
     }
 
     #[test]
@@ -2601,5 +2640,72 @@ mod tests {
         assert_eq!(st.steps.len(), 1);
         assert_eq!((st.steps[0].plan_step, st.steps[0].text.as_str(), st.steps[0].ok), (1, "wrote BLUEPRINT.md", true));
         assert_eq!(st.waiting, Waiting::None);
+    }
+
+    fn learn_open_site() -> Move {
+        Move::Learn { entries: vec![crate::moves::LearnEntry { notebook: "this computer".into(), topic: "open a website".into(), kind: "technique".into(), text: "open_app firefox with the address".into(), steps: vec![1], links: vec![] }], used: vec![], wrong: vec![], remove: vec![] }
+    }
+    fn hk(goal: &str) -> Move { Move::Housekeep { goal: goal.into(), understood: "Opening it".into(), remember: None } }
+    fn open_ff() -> Action { Action::OpenApp { name: "firefox".into(), visible: true } }
+
+    #[test]
+    fn a_passed_job_learns_and_the_next_job_starts_with_the_tip() {
+        let (mut e, _, _) = engine_with(vec![
+            hk("open example.org"), plan(), act(1, open_ff()), done(Action::ScreenLook { cell: None }), learn_open_site(),
+            hk("open the weather website"),
+        ], "learn-next");
+        let ev = crate::testing::events_of(&mut e, "open the browser and go to example.org");
+        let done_at = ev.iter().position(|x| matches!(x, Event::Done { .. })).expect("done");
+        let learned_at = ev.iter().position(|x| matches!(x, Event::Learned { .. })).expect("learned");
+        assert!(done_at < learned_at, "the Done card never waits for the learning");
+        let Event::Learned { lines, pending, .. } = &ev[learned_at] else { unreachable!() };
+        assert_eq!((lines.clone(), *pending), (vec!["Learned: open a website (this computer)".to_string()], false));
+        let _ = e.handle("open the weather website");
+        let last = e.model.prompts.borrow().last().unwrap().user.clone();
+        assert!(last.contains("- this computer/open a website: open_app firefox with the address"), "{last}");
+    }
+
+    #[test]
+    fn a_learning_turn_the_model_cannot_answer_never_hurts_the_job() {
+        let (mut e, _, _) = engine_with(vec![hk("open it"), plan(), act(1, open_ff()), done(Action::ScreenLook { cell: None })], "learn-none");
+        let ev = crate::testing::events_of(&mut e, "open it");
+        assert!(ev.iter().any(|x| matches!(x, Event::Done { .. })));
+        assert!(!ev.iter().any(|x| matches!(x, Event::Learned { .. })));
+        assert_eq!(e.model.prompts.borrow().last().unwrap().allowed, vec!["learn"], "the learning turn was asked");
+    }
+
+    #[test]
+    fn a_stopped_job_has_no_learning_turn() {
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()], options: vec![] }], "learn-stop");
+        e.handle("make p").unwrap();
+        e.handle("stop").unwrap();
+        assert!(e.model.prompts.borrow().iter().all(|p| p.allowed != vec!["learn"]));
+    }
+
+    #[test]
+    fn keep_and_discard_are_fixed_words_not_model_calls() {
+        let install = Action::Install { packages: vec!["gimp".into()] };
+        let learn_install = Move::Learn { entries: vec![crate::moves::LearnEntry { notebook: "this computer".into(), topic: "get gimp".into(), kind: "technique".into(), text: "install gimp".into(), steps: vec![1], links: vec![] }], used: vec![], wrong: vec![], remove: vec![] };
+        let (mut e, _, _) = engine_with(vec![hk("get gimp"), plan(), act(1, install), done(run("true")), learn_install], "learn-keep");
+        let ev = crate::testing::events_of(&mut e, "install gimp");
+        assert!(ev.iter().any(|x| matches!(x, Event::Learned { pending: true, .. })), "{ev:?}");
+        assert!(crate::notes::list(e.store.conn(), "this computer").unwrap().is_empty());
+        let before = e.model.prompts.borrow().len();
+        assert!(e.handle("Keep what you learned.").unwrap()[0].contains("Kept"));
+        assert_eq!(e.model.prompts.borrow().len(), before);
+        assert_eq!(crate::notes::list(e.store.conn(), "this computer").unwrap().len(), 1);
+        assert!(e.handle("discard what you learned").unwrap()[0].contains("nothing waiting"));
+    }
+
+    #[test]
+    fn start_records_its_skills_and_the_skill_tips() {
+        let ball = Move::Start { project: "ball".into(), new_project: true, description: "d".into(), goal: "a ball".into(), creative: false, understood: "Making a ball".into(), skills: vec!["Blender".into(), "this computer".into()], remember: None };
+        let (mut e, _, _) = engine_with(vec![ball, Move::Ask { questions: vec!["?".into()], options: vec![] }], "learn-skills");
+        crate::notes::put(e.store.conn(), &crate::notes::Note { notebook: "blender".into(), topic: "make a round object".into(), kind: "technique".into(), text: "add a uv sphere".into(), ..Default::default() }, None).unwrap();
+        e.handle("make a ball in blender").unwrap();
+        let job = e.open_job().unwrap().unwrap();
+        assert_eq!(job.skills, vec!["blender".to_string()], "normalised, and this computer is never a skill");
+        assert!(job.notes_block.contains("blender/make a round object"), "{}", job.notes_block);
+        assert_eq!(job.shown_notes, vec!["blender/make a round object".to_string()]);
     }
 }

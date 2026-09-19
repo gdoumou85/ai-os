@@ -57,6 +57,11 @@ pub fn lines(event: &Event) -> Vec<String> {
             v.extend(notes.iter().cloned());
             v
         }
+        Event::Learned { lines, pending, .. } => {
+            let mut v = lines.clone();
+            if *pending { v.push("Say \"keep what you learned\" to keep what changes the machine, or \"discard what you learned\".".into()); }
+            v
+        }
         Event::Error { text } => vec![format!("(error: {text})")],
     }
 }

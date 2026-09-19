@@ -63,6 +63,8 @@ pub enum Event {
     Failed { job_id: String, text: String, files: Vec<ChangedFile> },
     Stopped { job_id: String, text: String, files: Vec<ChangedFile> },
     Undone { job_id: String, name: String, lines: Vec<UndoLine>, notes: Vec<String> },
+    /// What the learning turn after a job kept (Phase 3 §6). `pending`: something waits for Keep.
+    Learned { job_id: String, lines: Vec<String>, #[serde(default)] pending: bool },
     Busy { job_id: String, text: String },
     State { job: Option<JobState> },
     /// The service could not read a client line. Sent to that client only.
@@ -76,7 +78,7 @@ impl Event {
             Event::Understood { job_id, .. } | Event::Plan { job_id, .. } | Event::Step { job_id, .. }
             | Event::NeedsAnswer { job_id, .. } | Event::NeedsOk { job_id, .. } | Event::Done { job_id, .. }
             | Event::Failed { job_id, .. } | Event::Stopped { job_id, .. } | Event::Undone { job_id, .. }
-            | Event::Busy { job_id, .. } => Some(job_id),
+            | Event::Learned { job_id, .. } | Event::Busy { job_id, .. } => Some(job_id),
             _ => None,
         }
     }
@@ -163,6 +165,7 @@ mod tests {
             Event::Failed { job_id: "j".into(), text: "gave up".into(), files: vec![] },
             Event::Stopped { job_id: "j".into(), text: "Stopped".into(), files: vec![] },
             Event::Undone { job_id: "j".into(), name: "p".into(), lines: vec![UndoLine { text: "put back".into(), ok: true }], notes: vec!["n".into()] },
+            Event::Learned { job_id: "j".into(), lines: vec!["Learned: open a website (this computer)".into()], pending: false },
             Event::Busy { job_id: "j".into(), text: "working".into() },
             Event::State { job: None },
             Event::Error { text: "bad".into() },
