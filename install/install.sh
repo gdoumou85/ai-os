@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # Adds the AI OS to an Ubuntu 26.04 desktop, for the user who runs it (desktop design §9.2).
-#   bash install.sh [--model-url http://host:11434] [--model qwen3.5:9b]
+#   bash install.sh [--model-url http://host:port] [--model NAME] [--model-key KEY]
+# With no --model-url it looks for Ollama and LM Studio on the home network and asks which to use.
 # Run it as yourself, not as root: it asks sudo for the root steps. Safe to run again.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-model=qwen3.5:9b; model_url=""
+model=""; model_url=""; model_key=""
 while [ $# -gt 0 ]; do case "$1" in
   --model-url) model_url=${2:?--model-url needs a value}; shift 2 ;;
   --model)     model=${2:?--model needs a value}; shift 2 ;;
+  --model-key) model_key=${2:?--model-key needs a value}; shift 2 ;;
   *) echo "unknown option: $1" >&2; exit 2 ;;
 esac; done
 [ "$(id -u)" -ne 0 ] || { echo "run this as your own user, not as root" >&2; exit 1; }
 owner=$(id -un); uid=$(id -u); ogroup=$(id -gn)
 [ "$(uname -m)" = x86_64 ] || { echo "only x86_64 is built" >&2; exit 1; }
 . /etc/os-release; [ "${VERSION_ID:-}" = 26.04 ] || echo "warning: built and tested on Ubuntu 26.04, this is ${PRETTY_NAME:-unknown}" >&2
-for f in bin/ai-os-engine bin/ai-os-chat bin/ai-os-rail ai-os-admin org.aios.Rail.desktop check.sh ai-os-engine.service.in; do
+for f in bin/ai-os-engine bin/ai-os-chat bin/ai-os-rail bin/ai-os-find ai-os-admin org.aios.Rail.desktop check.sh ai-os-engine.service.in; do
   [ -f "$here/$f" ] || { echo "missing next to install.sh: $f" >&2; exit 1; }
 done
 echo "== installing the AI OS for $owner (sudo will ask for your password)"
@@ -71,7 +73,7 @@ sudo visudo -cf /etc/sudoers.d/ai-os-admin.tmp >/dev/null || {
 sudo mv -f /etc/sudoers.d/ai-os-admin.tmp /etc/sudoers.d/ai-os-admin
 
 echo "== programs"
-for b in ai-os-engine ai-os-chat ai-os-rail; do sudo install -m 0755 -o root -g root "$here/bin/$b" /usr/local/bin/$b; done
+for b in ai-os-engine ai-os-chat ai-os-rail ai-os-find; do sudo install -m 0755 -o root -g root "$here/bin/$b" /usr/local/bin/$b; done
 # Which build this is, for check.sh and for anyone reporting a problem. Older tarballs have none.
 if [ -f "$here/VERSION" ]; then
   sudo install -d /usr/local/share/ai-os
@@ -89,16 +91,64 @@ sudo sed -i 's/\r$//' /usr/local/libexec/ai-os-admin /usr/local/bin/ai-os-check 
   /usr/share/applications/org.aios.Rail.desktop /etc/xdg/autostart/org.aios.Rail.desktop
 
 echo "== the model"
+# ai-os-find prints one model per line: kind<TAB>url<TAB>model, or kind<TAB>url<TAB>-<TAB>needs-key.
+# The key goes to it through the environment, never on a command line anyone can read with ps.
+find_models() { AI_OS_MODEL_KEY="$model_key" "$here/bin/ai-os-find" "$@" || true; }
+# Shows the lines as a numbered list and prints the one picked; with offer-native=1 a last choice
+# installs Ollama here instead and prints "native". Questions go to the terminal itself: under
+# `curl | bash` stdin is this script.
+pick() {   # pick <offer-native> <line>...
+  local native=$1; shift
+  local n=$# i=0 line k u m choice
+  [ -r /dev/tty ] || { echo "no terminal to ask on — pass --model-url and --model" >&2; exit 1; }
+  for line in "$@"; do
+    i=$((i+1)); IFS=$'\t' read -r k u m _ <<<"$line"
+    if [ "$k" = openai ]; then k="LM Studio"; else k=Ollama; fi
+    [ "$m" != - ] || m="(needs its API key)"
+    printf '%3d) %-28s %-10s %s\n' "$i" "$u" "$k" "$m" >/dev/tty
+  done
+  [ "$native" = 0 ] || printf '%3d) install Ollama on this machine instead (slow without a GPU)\n' $((n+1)) >/dev/tty
+  local max=$((n+native))
+  [ "$max" -gt 0 ] || { echo "nothing to choose from" >&2; exit 1; }
+  while :; do
+    read -rp "which one (1-$max)? " choice </dev/tty || exit 1
+    case "$choice" in ''|*[!0-9]*) continue ;; esac
+    [ "$choice" -ge 1 ] && [ "$choice" -le "$max" ] && break
+  done
+  if [ "$choice" -gt "$n" ]; then echo native; else echo "${!choice}"; fi
+}
 if [ -n "$model_url" ]; then
-  # Asked for as a whole answer, not piped into grep: under pipefail, `curl | grep -q` reports the
-  # pipeline as failed when grep finds the name and stops reading before curl has finished writing.
-  tags=$(curl -fsS --max-time 5 "$model_url/api/tags" 2>/dev/null) || tags=""
-  case "$tags" in
-    *"\"$model\""*) echo "the runner at $model_url has $model" ;;
-    *) echo "warning: $model_url did not answer with $model — the AI will say so until it does" >&2 ;;
-  esac
-  url_line="Environment=AI_OS_MODEL_URL=$model_url"
+  mapfile -t found < <(find_models --url "$model_url")
+  [ ${#found[@]} -gt 0 ] || { echo "nothing answered at $model_url as Ollama or LM Studio — check the address, and that the runner accepts connections from the network" >&2; exit 1; }
+  if [ -n "$model" ] || [ ${#found[@]} -eq 1 ]; then line=${found[0]}; else line=$(pick 0 "${found[@]}") || exit 1; fi
 else
+  echo "looking for Ollama and LM Studio on your network — a few seconds"
+  mapfile -t found < <(find_models)
+  [ ${#found[@]} -gt 0 ] || echo "none found: to use another machine, turn on its runner's network setting and run this again"
+  line=$(pick 1 "${found[@]}") || exit 1
+fi
+kind=ollama
+if [ "$line" != native ]; then
+  IFS=$'\t' read -r kind model_url m _ <<<"$line"
+  if [ "$m" = - ]; then
+    # Not echoed; kept only in a file only this account can read (below).
+    read -rsp "that LM Studio needs its API key (LM Studio → Developer → Server settings): " model_key </dev/tty; echo
+    mapfile -t found < <(find_models --url "$model_url")
+    case "${found[0]:-}" in ''|*$'\t-\t'*) echo "LM Studio did not accept that key" >&2; exit 1 ;; esac
+    if [ -n "$model" ] || [ ${#found[@]} -eq 1 ]; then line=${found[0]}; else line=$(pick 0 "${found[@]}") || exit 1; fi
+    IFS=$'\t' read -r kind model_url m _ <<<"$line"
+  fi
+  [ -n "$model" ] || model=$m
+  # Captured whole, not piped into grep -q: under pipefail an early grep exit fails the pipeline.
+  case $'\n'"$(printf '%s\n' "${found[@]}" | cut -f3)"$'\n' in
+    *$'\n'"$model"$'\n'*) ;;
+    *) echo "warning: $model_url does not list $model — the AI will say so until it does" >&2 ;;
+  esac
+  echo "using $model at $model_url"
+  [ "$kind" = ollama ] || echo "in LM Studio, load $model with a context length of at least 8192"
+  url_line="Environment=AI_OS_MODEL_URL=$model_url"$'\n'"Environment=AI_OS_MODEL_KIND=$kind"
+else
+  model_url=""; model=${model:-qwen3.5:9b}
   # A native install: the runner lives on this machine. Untested until a machine with a GPU runs it
   # (desktop design §9.2). The two settings are Phase 0's measurement: they are what keeps an 8k
   # context fully on an 8 GB GPU.
@@ -128,6 +178,13 @@ unit=${unit//@MODEL@/"$model"}
 unit=${unit//@MODEL_URL_LINE@/"$url_line"}
 printf '%s\n' "$unit" > "$HOME/.config/systemd/user/ai-os-engine.service"
 sed -i 's/\r$//' "$HOME/.config/systemd/user/ai-os-engine.service"
+# The LM Studio key: out of the unit (which any user can read) and in a file only you can.
+install -d -m 0700 "$HOME/.config/ai-os"
+if [ -n "$model_key" ]; then
+  (umask 077; printf 'AI_OS_MODEL_KEY=%s\n' "$model_key" > "$HOME/.config/ai-os/model.env")
+else
+  rm -f "$HOME/.config/ai-os/model.env"
+fi
 sudo loginctl enable-linger "$owner"
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$uid}
 # With nobody logged in, the user manager starts because of the linger just asked for, a moment

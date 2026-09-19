@@ -12,6 +12,7 @@ Environment=AI_OS_PROJECTS=/data/projects
 Environment=AI_OS_DISPLAY_INVISIBLE=wayland-0
 Environment=AI_OS_DISPLAY_VISIBLE=wayland-0
 @MODEL_URL_LINE@
+EnvironmentFile=-%h/.config/ai-os/model.env
 Restart=on-failure
 RestartSec=2
 

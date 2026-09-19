@@ -10,7 +10,7 @@ version=$(git -C "$root" describe --tags --always --dirty)
 (cd "$root/runtime" && cargo build --locked --release)
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
 install -d "$stage/ai-os/bin"
-for b in ai-os-engine ai-os-chat ai-os-rail; do install -m 0755 "$root/runtime/target/release/$b" "$stage/ai-os/bin/$b"; done
+for b in ai-os-engine ai-os-chat ai-os-rail ai-os-find; do install -m 0755 "$root/runtime/target/release/$b" "$stage/ai-os/bin/$b"; done
 install -m 0755 "$root/install/install.sh" "$root/install/check.sh" "$root/runtime/admin/ai-os-admin" "$stage/ai-os/"
 install -m 0644 "$root/install/ai-os-engine.service.in" "$root/runtime/rail/org.aios.Rail.desktop" "$stage/ai-os/"
 printf '%s\n' "$version" > "$stage/ai-os/VERSION"
