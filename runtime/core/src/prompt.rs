@@ -89,12 +89,18 @@ fn compact_action(action: &Action) -> String {
     }
 }
 
-/// Last 6 steps in full (but compact — see `compact_action`); older ones one line each
-/// (budget, parent §4.3).
+/// Last 6 steps in full (but compact — see `compact_action`); the 30 before them one line each;
+/// anything older a count (budget, parent §4.3): a job may run 200 steps, and 200 one-liners
+/// would take a fifth of an 8k context.
 pub fn summarise_steps(job: &Job) -> String {
     let n = job.steps.len();
     let mut out = String::new();
-    for (i, s) in job.steps.iter().enumerate() {
+    let old = n.saturating_sub(36);
+    if old > 0 {
+        let failed = job.steps[..old].iter().filter(|s| !s.ok).count();
+        out.push_str(&format!("steps 1-{old}: {} ok, {failed} failed\n", old - failed));
+    }
+    for (i, s) in job.steps.iter().enumerate().skip(old) {
         let kind = serde_json::to_value(&s.action).ok().and_then(|v| v["kind"].as_str().map(String::from)).unwrap_or_default();
         let status = if s.ok { "ok" } else { "failed" };
         if i + 6 < n {
@@ -330,6 +336,18 @@ mod tests {
         let big = "x".repeat(10_000);
         let p = job_turn(&[], &j, Some(&big), None);
         assert!(p.user.len() < 6_000, "blueprint must be capped at 3000 chars: {}", p.user.len());
+    }
+
+    #[test]
+    fn a_long_job_keeps_its_step_list_small() {
+        let mut j = Job::new("p", "/data/projects/p", "g", true, "u");
+        for i in 0..200 {
+            j.steps.push(StepRecord { plan_step: 1, action: Action::RunCommand { argv: vec![format!("cmd{i}")] }, ok: i % 10 != 0, detail: format!("detail-{i}") });
+        }
+        let s = summarise_steps(&j);
+        assert!(s.starts_with("steps 1-164: 147 ok, 17 failed\n"), "{s}");
+        assert_eq!(s.lines().count(), 1 + 36);
+        assert!(s.contains("step 165: run_command") && s.contains("detail-199"));
     }
 
     /// I4: a big `write_file` step must not blow the prompt budget — the content is summarised
