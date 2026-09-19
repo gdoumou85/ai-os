@@ -65,11 +65,15 @@ pub struct Provider { pub name: &'static str, pub kind: &'static str, pub url: &
 /// 2026-09-19, once Ollama's cloud stopped being free.
 pub const NVIDIA: Provider = Provider { name: "NVIDIA", kind: "openai", url: "https://integrate.api.nvidia.com" };
 pub const OLLAMA: Provider = Provider { name: "Ollama", kind: "ollama", url: "https://ollama.com" };
+/// OpenRouter: many providers behind one key, OpenAI-style under `/api` (so `/api/v1/…`).
+pub const OPENROUTER: Provider = Provider { name: "OpenRouter", kind: "openai", url: "https://openrouter.ai/api" };
 
 /// The models worth offering from a provider's list. NVIDIA lists everything it hosts —
 /// embedders, safety filters, picture readers — and only some of those can hold a conversation.
+/// OpenRouter lists hundreds, most of them paid: only the free ones (`…:free`) are offered.
 /// ponytail: a name filter; NVIDIA's own model types if its list ever says them.
 pub fn chat_models(provider: Provider, names: Vec<String>) -> Vec<String> {
+    if provider == OPENROUTER { return names.into_iter().filter(|n| n.ends_with(":free")).collect(); }
     if provider != NVIDIA { return names; }
     const NOT_CHAT: [&str; 15] = ["embed", "rerank", "retriev", "guard", "safety", "reward", "vision", "-vl", "vlm", "clip", "parse", "detect", "translat", "pii", "content-"];
     const CHAT: [&str; 9] = ["instruct", "chat", "-it", "deepseek", "kimi", "qwen3", "gpt-oss", "nemotron", "coder"];
@@ -106,6 +110,9 @@ mod tests {
         assert_eq!(chat_models(NVIDIA, names.clone()), vec!["meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-v3.1",
             "qwen/qwen3-coder-480b-a35b-instruct", "google/gemma-2-27b-it", "openai/gpt-oss-120b"]);
         assert_eq!(chat_models(OLLAMA, names.clone()), names, "Ollama's list is already its chat models");
+        let or = ["nvidia/nemotron-nano-9b-v2:free", "openai/gpt-4o", "qwen/qwen3-coder:free"].map(String::from).to_vec();
+        assert_eq!(chat_models(OPENROUTER, or), vec!["nvidia/nemotron-nano-9b-v2:free", "qwen/qwen3-coder:free"], "free ones only");
+        assert!(account_line(OPENROUTER.name, OPENROUTER.kind, OPENROUTER.url, "nvidia/nemotron-nano-9b-v2:free", "sk-or-v1-abc123").is_some());
         assert!(account_line(NVIDIA.name, NVIDIA.kind, NVIDIA.url, "meta/llama-3.3-70b-instruct", "nvapi-abc_DEF-123").is_some(), "NVIDIA's names and keys are writable");
     }
 

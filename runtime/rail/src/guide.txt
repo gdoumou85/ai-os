@@ -70,13 +70,13 @@ Cloud models are much stronger than what a home computer can run, and several pr
 
 <b>To add an account:</b> press <b>Model</b>, then <b>Cloud accounts…</b>, paste the key, and press the provider's button. Pick a model from the list it shows, and Cloud turns on. The same card lists your accounts in the order they are tried, each with a Remove button.
 • <b>NVIDIA</b> (build.nvidia.com): sign in, then <b>Get API Key</b>. It gives free credits for many large models.
+• <b>OpenRouter</b> (openrouter.ai, then Keys): many models behind one key. Only its free models are listed (their names end in ":free"); they allow a limited number of answers a day.
 • <b>Ollama</b> (ollama.com, Settings, then Keys): its cloud models may need a paid plan.
 
 <b>More providers are coming</b> (all free; each gives you one key):
 • <b>GitHub Models</b> (github.com/marketplace/models): uses a GitHub account.
 • <b>Google AI Studio</b> (aistudio.google.com): Gemini models, with a Google account.
 • <b>Groq</b> (console.groq.com): very fast.
-• <b>OpenRouter</b> (openrouter.ai): many free models behind one account.
 • <b>Mistral</b> (console.mistral.ai).
 • <b>Cerebras</b> (cloud.cerebras.ai).
 
