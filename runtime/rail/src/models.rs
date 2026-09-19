@@ -46,9 +46,38 @@ pub fn label(c: &Choice) -> String {
     match &c.model { Some(m) => format!("{m} — {who} at {}", c.url), None => format!("{who} at {} (needs its API key)", c.url) }
 }
 
+/// The line `cloud.tsv` (the engine's cloud pool) keeps for one account; `None` unless every part
+/// is safe to write, so no tab or newline can make a second account of its own.
+pub fn account_line(name: &str, kind: &str, url: &str, model: &str, key: &str) -> Option<String> {
+    (safe(name) && matches!(kind, "ollama" | "openai") && safe(url) && safe(model) && safe_key(key)).then(|| format!("{name}	{kind}	{url}	{model}	{key}
+"))
+}
+
+/// The accounts in `cloud.tsv`, as the name and model to show; the keys stay in the file.
+pub fn accounts(tsv: &str) -> Vec<(String, String)> {
+    tsv.lines().filter_map(|l| { let f: Vec<&str> = l.split('	').collect(); (f.len() == 5).then(|| (f[0].to_string(), f[3].to_string())) }).collect()
+}
+
+/// `cloud.tsv` without its `i`th account.
+pub fn without(tsv: &str, i: usize) -> String {
+    tsv.lines().filter(|l| l.split('	').count() == 5).enumerate().filter(|(n, _)| *n != i).map(|(_, l)| format!("{l}
+")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_accounts_are_written_read_and_removed_without_their_keys_showing() {
+        let l = account_line("Ollama", "ollama", "https://ollama.com", "gpt-oss:120b", "abc.123").unwrap();
+        assert_eq!(l, "Ollama	ollama	https://ollama.com	gpt-oss:120b	abc.123
+");
+        assert_eq!(account_line("Ollama", "ollama", "https://ollama.com", "m", "k	X	ollama	u	m"), None, "a key with a tab is refused");
+        let tsv = format!("{l}{}", account_line("Groq", "openai", "https://api.groq.com/openai", "llama", "k2").unwrap());
+        assert_eq!(accounts(&tsv), vec![("Ollama".into(), "gpt-oss:120b".into()), ("Groq".into(), "llama".into())]);
+        assert_eq!(accounts(&without(&tsv, 0)), vec![("Groq".into(), "llama".into())]);
+    }
 
     #[test]
     fn found_lines_become_choices_and_unsafe_ones_are_dropped() {
