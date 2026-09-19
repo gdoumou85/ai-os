@@ -1,8 +1,9 @@
 # AI OS
 
 A local AI that does jobs on your Ubuntu machine: it writes and changes files, installs software,
-changes settings, and works the windows you hand it — and it keeps a record of what it did, so you
-can read it back and undo it. It thinks with a model that runs on your own machine through Ollama,
+changes settings, and works the windows you hand it. **It has full access to the machine**: root
+through `sudo` with no password, the network, and every folder, and it never stops to ask. There is
+no undo: run it in a virtual machine and take snapshots. It thinks with a model that runs on your own machine through Ollama,
 so nothing you give it leaves the machine — unless you point it at a model runner elsewhere with
 `--model-url`, and then what you ask goes to that machine. It is early, and it is one person's
 project.
@@ -43,11 +44,9 @@ same model on the network and carries on.
 - A file `/var/lib/ai-os/data.img`, formatted btrfs and mounted at `/data`, where the AI keeps its
   work. It takes half the free space, at most 50 GB, and grows only as it fills. One line is added
   to `/etc/fstab` so it mounts at every boot.
-- A system account `ai-sandbox`, which owns the folders a job runs in. Your account is added to its
-  group.
-- A root helper at `/usr/local/libexec/ai-os-admin` and one line in `/etc/sudoers.d/ai-os-admin`
-  that lets your user run that one helper without a password. That is the only root power the AI
-  has; everything else asks for a password it does not have.
+- One line in `/etc/sudoers.d/ai-os` that lets your user run anything as root without a password.
+  The AI runs as you, so this is its root. Install it only on a machine you are ready to lose,
+  like a virtual machine with a snapshot.
 - Three programs in `/usr/local/bin`: `ai-os-engine`, `ai-os-chat`, `ai-os-rail`, and the check
   below as `ai-os-check`.
 - A service `ai-os-engine` under your own user account. It starts when the machine boots and keeps
@@ -60,8 +59,7 @@ same model on the network and carries on.
   a window and to press the controls in it.
 - Ollama, its service settings, and the model — only when you did not pass `--model-url`.
 
-Restart the computer once after it finishes. The engine picks up its new group membership then, and
-the chat window opens when you log back in.
+Restart the computer once after it finishes. The chat window opens when you log back in.
 
 ## Using it
 
@@ -80,7 +78,7 @@ The other buttons at the top:
 ai-os-check
 ```
 
-`AI OS ready` means the disk, the sandbox account, the root helper, the engine, its socket, the
+`AI OS ready` means the disk, the passwordless root, the engine, its socket, the
 model runner and the chat window's autostart entry are all in place. Anything else is the first
 thing it found wrong, in plain words.
 

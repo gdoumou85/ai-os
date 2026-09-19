@@ -6,9 +6,8 @@ use aios_core::model::{Model, RemoteModel};
 use aios_core::service;
 use aios_core::store::Store;
 use aios_proto::{Client, Event};
-use executor::admin::AdminWorker;
 use executor::atspi::{DesktopState, DesktopWorker};
-use executor::worker::{SandboxWorker, Worker};
+use executor::worker::{MachineWorker, Worker};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -25,11 +24,10 @@ fn start_service() -> PathBuf {
         let desktop = DesktopState::for_model(model.context_tokens());
         Engine::new(Store::open(DB).unwrap(), model, PathBuf::from("/data/projects"), Some(DB.into()),
             Box::new(move |ws| (
-                Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
-                Box::new(AdminWorker) as Box<dyn Worker>,
+                Box::new(MachineWorker { workspace: ws.to_path_buf() }) as Box<dyn Worker>,
                 Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>,
             )),
-            PathBuf::from("/data/housekeeping"), PathBuf::from("/data/snapshots")).with_sink(sink)
+            PathBuf::from("/data/housekeeping")).with_sink(sink)
     })));
     let t = Instant::now();
     while !sock.exists() && t.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(20)); }
@@ -91,14 +89,10 @@ fn a_window_of_the_users_a_window_of_its_own_and_a_risky_press() {
     assert!(text.contains("408") || ev.iter().any(|e| matches!(e, Event::Said { text } if text.contains("408"))), "the answer is said: {ev:?}");
     assert!(ev.iter().any(|e| matches!(e, Event::Step { text, .. } if text.starts_with("opened "))), "it opened the app itself");
 
-    // Script 3: the risky press.
-    let ev = say_until(&mut c, "take my Text Editor window and close it without saving; decide everything yourself and do not ask", 300,
-        |e| matches!(e, Event::NeedsOk { .. }) || ended(e));
-    let Event::NeedsOk { what, why, .. } = ev.last().unwrap() else { panic!("script 3 stopped at an OK: {ev:?}") };
-    assert!(what.starts_with("pressed ") && why.contains("unsaved work"), "{what} / {why}");
-    let ev = say_until(&mut c, "yes", 300, ended);
+    // Script 3: the press that closes without saving — full access, so nobody is asked.
+    let ev = say_until(&mut c, "take my Text Editor window and close it without saving; decide everything yourself and do not ask", 300, ended);
     let t = Instant::now();
     while editor_running() && t.elapsed() < Duration::from_secs(15) { std::thread::sleep(Duration::from_millis(500)); }
-    assert!(!editor_running(), "the editor is gone after the yes: {ev:?}");
+    assert!(!editor_running(), "the editor is gone: {ev:?}");
     let _ = std::process::Command::new("pkill").args(["-u", "ai", "-f", "gnome-calculator"]).status();
 }

@@ -13,11 +13,9 @@ pub enum CardKind {
     Building { name: String, understood: String, steps: Vec<StepLine>, collapsed: bool },
     /// `options[i]`: buttons for `questions[i]`, maybe none.
     NeedsAnswer { questions: Vec<String>, options: Vec<Vec<String>> },
-    NeedsOk { what: String, why: String },
-    Done { text: String, check: Option<String>, files: Vec<ChangedFile>, windows: Vec<String>, learned: Vec<String> },
+    Done { text: String, check: Option<String>, files: Vec<ChangedFile>, learned: Vec<String> },
     Failed { text: String, files: Vec<ChangedFile> },
     Stopped { text: String, files: Vec<ChangedFile> },
-    Undone { lines: Vec<aios_proto::UndoLine>, notes: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,8 +39,8 @@ pub enum Change { Added(usize), Updated(usize), Line(String) }
 pub fn busy_after(ev: &Event) -> Option<bool> {
     match ev {
         Event::You { .. } | Event::Understood { .. } | Event::Plan { .. } | Event::Step { .. } => Some(true),
-        Event::Said { .. } | Event::NeedsAnswer { .. } | Event::NeedsOk { .. } | Event::Stopped { .. }
-        | Event::Undone { .. } | Event::Error { .. } | Event::Learned { .. } => Some(false),
+        Event::Said { .. } | Event::NeedsAnswer { .. } | Event::Stopped { .. }
+        | Event::Error { .. } | Event::Learned { .. } => Some(false),
         // A slow local model can take minutes for the learning turn after Done/Failed, so the
         // spinner keeps turning until the Learned that always follows (engine.rs `learn`) stops it.
         Event::Done { .. } | Event::Failed { .. } | Event::Busy { .. } | Event::State { .. } | Event::Skills { .. } => None,
@@ -68,7 +66,7 @@ const DISCARD: &str = "discard what you learned";
 
 fn result_card(kind: CardKind, text: &str, files: &[ChangedFile], job_id: &str) -> Card {
     Card {
-        kind, text: text.into(), buttons: vec![btn("Undo", "undo")],
+        kind, text: text.into(), buttons: vec![],
         opens: files.iter().map(|f| f.path.clone()).collect(),
         thumbnails: files.iter().filter(|f| f.kind == FileKind::Image).map(|f| f.path.clone()).collect(),
         job_id: Some(job_id.into()),
@@ -109,16 +107,13 @@ impl Cards {
                 None => vec![],
             },
             Event::NeedsAnswer { job_id, questions, options } => self.push(Card { kind: CardKind::NeedsAnswer { questions: questions.clone(), options: options.clone() }, text: questions.join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
-            Event::NeedsOk { job_id, what, why } => self.push(Card { kind: CardKind::NeedsOk { what: what.clone(), why: why.clone() }, text: format!("{what}\n{why}"), buttons: vec![btn("Yes", "yes"), btn("No", "no")], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
-            Event::Done { job_id, text, check, files, windows } => {
+            Event::Done { job_id, text, check, files, .. } => {
                 let mut ch = self.close_building();
-                let shown = match aios_proto::window_note(windows) { Some(n) => format!("{text}\n{n}"), None => text.clone() };
-                ch.extend(self.push(result_card(CardKind::Done { text: text.clone(), check: check.clone(), files: files.clone(), windows: windows.clone(), learned: vec![] }, &shown, files, job_id)));
+                ch.extend(self.push(result_card(CardKind::Done { text: text.clone(), check: check.clone(), files: files.clone(), learned: vec![] }, text, files, job_id)));
                 ch
             }
             Event::Failed { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Failed { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
             Event::Stopped { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Stopped { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
-            Event::Undone { job_id, lines, notes, .. } => self.push(Card { kind: CardKind::Undone { lines: lines.clone(), notes: notes.clone() }, text: lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
             Event::Learned { job_id, lines, pending } => {
                 // Keep/Discard act on whatever waits now, and every learning turn drops what the one
                 // before left waiting: an older card's buttons would keep an entry nobody read there.
@@ -162,7 +157,7 @@ impl Cards {
     pub fn clear(&mut self) {
         let Some(b) = self.building else { self.list.clear(); return };
         let waiting = self.list.len() - 1 > b
-            && matches!(self.list.last().map(|c| &c.kind), Some(CardKind::NeedsAnswer { .. } | CardKind::NeedsOk { .. }));
+            && matches!(self.list.last().map(|c| &c.kind), Some(CardKind::NeedsAnswer { .. }));
         let kept: Vec<Card> = std::iter::once(self.list[b].clone()).chain(waiting.then(|| self.list.last().cloned()).flatten()).collect();
         self.list = kept;
         self.building = Some(0);
@@ -196,8 +191,6 @@ impl Cards {
             Waiting::None => return vec![],
             Waiting::Answer { questions, options } => (CardKind::NeedsAnswer { questions: questions.clone(), options: options.clone() },
                 Event::NeedsAnswer { job_id: st.id.clone(), questions: questions.clone(), options: options.clone() }),
-            Waiting::Ok { what, why } => (CardKind::NeedsOk { what: what.clone(), why: why.clone() },
-                Event::NeedsOk { job_id: st.id.clone(), what: what.clone(), why: why.clone() }),
         };
         if self.list.last().map(|c| &c.kind) == Some(&kind) { return vec![] }
         self.apply(&ev)

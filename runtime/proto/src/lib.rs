@@ -25,15 +25,12 @@ impl FileKind {
 pub struct ChangedFile { pub path: String, pub kind: FileKind, pub size: u64 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UndoLine { pub text: String, pub ok: bool }
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepView { pub plan_step: usize, pub text: String, pub ok: bool }
 
 /// What the open job is waiting for. `"none"` on the wire when nothing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Waiting { None, Answer { questions: Vec<String>, #[serde(default)] options: Vec<Vec<String>> }, Ok { what: String, why: String } }
+pub enum Waiting { None, Answer { questions: Vec<String>, #[serde(default)] options: Vec<Vec<String>> } }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobState {
@@ -66,11 +63,9 @@ pub enum Event {
     Step { job_id: String, plan_step: usize, text: String, ok: bool },
     /// `options[i]`: the answers to offer as buttons for `questions[i]`, maybe none.
     NeedsAnswer { job_id: String, questions: Vec<String>, #[serde(default)] options: Vec<Vec<String>> },
-    NeedsOk { job_id: String, what: String, why: String },
     Done { job_id: String, text: String, check: Option<String>, files: Vec<ChangedFile>, #[serde(default)] windows: Vec<String> },
     Failed { job_id: String, text: String, files: Vec<ChangedFile> },
     Stopped { job_id: String, text: String, files: Vec<ChangedFile> },
-    Undone { job_id: String, name: String, lines: Vec<UndoLine>, notes: Vec<String> },
     /// What the learning turn after a job kept (Phase 3 §6). `pending`: something waits for Keep.
     Learned { job_id: String, lines: Vec<String>, #[serde(default)] pending: bool },
     /// The Skills screen's notebooks, answered to the client that asked (Phase 3 §6).
@@ -86,18 +81,12 @@ impl Event {
     pub fn job_id(&self) -> Option<&str> {
         match self {
             Event::Understood { job_id, .. } | Event::Plan { job_id, .. } | Event::Step { job_id, .. }
-            | Event::NeedsAnswer { job_id, .. } | Event::NeedsOk { job_id, .. } | Event::Done { job_id, .. }
-            | Event::Failed { job_id, .. } | Event::Stopped { job_id, .. } | Event::Undone { job_id, .. }
+            | Event::NeedsAnswer { job_id, .. } | Event::Done { job_id, .. }
+            | Event::Failed { job_id, .. } | Event::Stopped { job_id, .. }
             | Event::Learned { job_id, .. } | Event::Busy { job_id, .. } => Some(job_id),
             _ => None,
         }
     }
-}
-
-/// The one line every Done card of a job that used the desktop hand carries (2a design §7).
-pub fn window_note(windows: &[String]) -> Option<String> {
-    if windows.is_empty() { return None; }
-    Some(format!("What I did inside {} can't be undone by me.", windows.join(" and ")))
 }
 
 /// A line from a client: `{"say":"…"}` or `{"hello":{}}`.
@@ -176,11 +165,9 @@ mod tests {
             Event::Plan { job_id: "j".into(), steps: vec!["a".into()] },
             Event::Step { job_id: "j".into(), plan_step: 1, text: "wrote a".into(), ok: true },
             Event::NeedsAnswer { job_id: "j".into(), questions: vec!["?".into()], options: vec![vec!["a".into(), "b".into()]] },
-            Event::NeedsOk { job_id: "j".into(), what: "http post to x".into(), why: "network".into() },
             Event::Done { job_id: "j".into(), text: "done".into(), check: Some("ran true".into()), files: vec![ChangedFile { path: "/a".into(), kind: FileKind::Text, size: 1 }], windows: vec![] },
             Event::Failed { job_id: "j".into(), text: "gave up".into(), files: vec![] },
             Event::Stopped { job_id: "j".into(), text: "Stopped".into(), files: vec![] },
-            Event::Undone { job_id: "j".into(), name: "p".into(), lines: vec![UndoLine { text: "put back".into(), ok: true }], notes: vec!["n".into()] },
             Event::Learned { job_id: "j".into(), lines: vec!["Learned: open a website (this computer)".into()], pending: false },
             Event::Skills { notebooks: vec![Notebook { name: "this computer".into(), entries: vec![NoteView { topic: "t".into(), kind: "technique".into(), text: "x".into(), uses: 2, failed: false, needs_check: true }] }] },
             Event::Busy { job_id: "j".into(), text: "working".into() },
@@ -210,7 +197,7 @@ mod tests {
             id: "j".into(), name: "p".into(), housekeeping: false, understood: "u".into(),
             plan: vec!["a".into()],
             steps: vec![StepView { plan_step: 1, text: "wrote a".into(), ok: true }],
-            waiting: Waiting::Ok { what: "w".into(), why: "y".into() },
+            waiting: Waiting::Answer { questions: vec!["q".into()], options: vec![] },
         };
         let e = Event::State { job: Some(st.clone()) };
         let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
@@ -220,13 +207,10 @@ mod tests {
     }
 
     #[test]
-    fn an_old_done_without_windows_still_parses_and_the_note_reads_right() {
+    fn an_old_done_without_windows_still_parses() {
         let old = r#"{"kind":"done","job_id":"j","text":"t","check":null,"files":[]}"#;
         let e: Event = serde_json::from_str(old).unwrap();
         assert!(matches!(&e, Event::Done { windows, .. } if windows.is_empty()));
-        assert_eq!(window_note(&[]), None);
-        assert_eq!(window_note(&["Text Editor".into()]).unwrap(), "What I did inside Text Editor can't be undone by me.");
-        assert_eq!(window_note(&["Writer".into(), "Calculator".into()]).unwrap(), "What I did inside Writer and Calculator can't be undone by me.");
     }
 
     #[test]

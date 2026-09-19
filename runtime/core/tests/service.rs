@@ -34,7 +34,7 @@ fn start(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc
         service::run(listener, Box::new(move |sink| {
             let rec = Recorder::default();
             std::fs::create_dir_all(root.join("hk")).unwrap();
-            Engine::new(Store::open_in_memory().unwrap(), GatedModel { inner: Mutex::new(FakeModel::new(moves)), gate }, root.clone(), None, scripted_workers(&rec), root.join("hk"), root.join("snaps")).with_sink(sink)
+            Engine::new(Store::open_in_memory().unwrap(), GatedModel { inner: Mutex::new(FakeModel::new(moves)), gate }, root.clone(), None, scripted_workers(&rec), root.join("hk")).with_sink(sink)
         }))
     });
     let t = Instant::now();
@@ -55,44 +55,6 @@ fn job() -> Vec<Move> { vec![
     Move::Act { step: 1, action: write("BLUEPRINT.md") },
     Move::Done { summary: "finished".into(), check: Action::RunCommand { argv: vec!["true".into()] } },
 ] }
-
-#[test]
-fn a_question_at_a_needs_ok_is_answered_never_answered_with_busy() {
-    // The live 1d run typed a question the instant the Needs-your-OK arrived and got `busy`:
-    // `running` only falls once `handle_events` returns, which is after the `needs_ok` has
-    // reached the client. Held open here by gating the model call that answers the first
-    // question — `running` is true, the job is open, and the second question must still be a
-    // question. §2.1 and §3.3: while the engine is waiting, text is queued, never refused.
-    let dir = temp("ok-question");
-    let (gtx, grx) = std::sync::mpsc::channel::<()>();
-    let moves = vec![
-        Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), skills: vec![], remember: None },
-        Move::Plan { steps: vec!["write outside".into()] },
-        Move::Act { step: 1, action: write("/etc/ai-os-never-written") },
-        Move::Reply { text: "the word hello".into(), remember: None },
-        Move::Reply { text: "still the word hello".into(), remember: None },
-    ];
-    let sock = start(&dir, moves, Arc::new(Mutex::new(Some(grx))));
-    let mut a = Client::connect(&sock).unwrap();
-    a.hello().unwrap(); a.next_event();
-    let mut b = Client::connect(&sock).unwrap();
-    b.hello().unwrap(); b.next_event();
-    a.say("write it").unwrap();
-    for _ in 0..3 { gtx.send(()).unwrap(); } // Start, Plan, Act — then the approval gate
-    until(&mut a, |e| matches!(e, Event::NeedsOk { .. }));
-    until(&mut b, |e| matches!(e, Event::NeedsOk { .. }));
-    // The first question: the engine is now inside the model call that answers it.
-    a.say("what exactly will you write?").unwrap();
-    until(&mut b, |e| matches!(e, Event::You { text } if text.contains("what exactly")));
-    b.say("and where?").unwrap();
-    for _ in 0..2 { gtx.send(()).unwrap(); }
-    // Ends either way — the bug is a `busy`, the fix is the answer — so a regression fails here
-    // rather than hanging.
-    let got = until(&mut b, |e| matches!(e, Event::Busy { .. } | Event::Said { .. }));
-    assert!(matches!(got.last().unwrap(), Event::Said { .. }), "a question at a needs_ok was refused as busy: {got:?}");
-    let got = until(&mut b, |e| matches!(e, Event::Busy { .. } | Event::NeedsOk { .. }));
-    assert!(matches!(got.last().unwrap(), Event::NeedsOk { .. }), "the OK is asked again: {got:?}");
-}
 
 #[test]
 fn both_clients_see_every_event_in_order_with_contiguous_seq() {

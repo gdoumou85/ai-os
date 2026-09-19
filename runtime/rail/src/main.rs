@@ -361,22 +361,15 @@ fn render(card: &Card, say: &Sender<Request>, entry: &gtk::Entry) -> gtk::Widget
                 b.append(&row);
             }
         }
-        CardKind::NeedsOk { what, why } => { b.add_css_class("ok"); b.append(&title("Needs your OK")); b.append(&text(what)); let l = text(why); l.add_css_class("dim"); b.append(&l); }
-        CardKind::Done { text: t, check, files, windows, learned } => {
+        CardKind::Done { text: t, check, files, learned } => {
             b.add_css_class("done"); b.append(&title("Done")); b.append(&text(t));
             if let Some(c) = check { let l = text(&format!("check: {c}")); l.add_css_class("dim"); b.append(&l); }
-            if let Some(n) = aios_proto::window_note(windows) { let l = text(&n); l.add_css_class("dim"); b.append(&l); }
             for l in learned { let w = text(l); w.add_css_class("dim"); b.append(&w); }
             file_rows(&b, files);
         }
         CardKind::Failed { text: t, files } | CardKind::Stopped { text: t, files } => {
             b.add_css_class("failed"); b.append(&title(if matches!(card.kind, CardKind::Failed { .. }) { "Could not finish" } else { "Stopped" })); b.append(&text(t));
             file_rows(&b, files);
-        }
-        CardKind::Undone { lines, notes } => {
-            b.add_css_class("undone"); b.append(&title("Undone"));
-            for l in lines { b.append(&text(&format!("{} {}", if l.ok { "✓" } else { "✗" }, l.text))); }
-            for n in notes { let l = text(n); l.add_css_class("dim"); b.append(&l); }
         }
     }
     if !card.buttons.is_empty() {
@@ -392,7 +385,6 @@ const CSS: &str = "
 .you { background: alpha(@theme_selected_bg_color, 0.25); margin-left: 40px; }
 .said { margin-right: 40px; }
 .building { border-left: 3px solid @theme_selected_bg_color; }
-.ok { border-left: 3px solid #e0a020; }
 .ask { border-left: 3px solid #4090e0; }
 .done { border-left: 3px solid #40b060; }
 .failed { border-left: 3px solid #d04040; }

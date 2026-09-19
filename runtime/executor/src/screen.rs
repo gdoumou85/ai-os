@@ -1,7 +1,6 @@
 //! The screen fallback (2b design): Mutter's own screencast and remote-desktop interfaces on the
 //! session bus — no portal and no dialog, because the engine runs as the session's owner (Phase 0
-//! U5). The pure parts come first (grid math, what ImageMagick is asked to draw, the took-over
-//! test); the bus and the frame grabber after, proven live in the owner's VM (2b probes 1 and 2).
+//! U5). The pure parts come first (grid math, what ImageMagick is asked to draw); the bus and the frame grabber after, proven live in the owner's VM (2b probes 1 and 2).
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use zbus::blocking::Connection;
@@ -12,10 +11,6 @@ pub const ROWS: u32 = 6;
 pub const SUB: u32 = 4;
 pub const CELLS: u32 = COLS * ROWS;
 pub const SPOTS: u32 = SUB * SUB;
-
-/// The failure a screen action reports when the person touched the mouse or keyboard since the
-/// AI's last look or move; the engine ends the job Stopped on it, never retries.
-pub const TOOK_OVER: &str = "you moved the mouse or typed, so I stopped using the screen";
 
 /// A cell's rectangle on a `w`×`h` screen as (x, y, width, height); cells are numbered from 1,
 /// row by row. The edges come from one division each, so the cells tile the screen exactly.
@@ -57,11 +52,6 @@ pub fn picture_args(input: &str, output: &str, w: u32, h: u32, cell: Option<u32>
     a
 }
 
-/// Did the person touch the mouse or keyboard since the AI last looked or moved? GNOME's idle time
-/// restarts on any input, the AI's own included (2b probe 1), so an idle time shorter than the time
-/// since the AI's last move means somebody else moved since. The slack covers the bus round trip.
-pub fn took_over(idle_ms: u64, since_ai: Duration) -> bool { idle_ms + 300 < since_ai.as_millis() as u64 }
-
 /// A PNG's width and height, from its header.
 pub fn png_size(png: &[u8]) -> Option<(u32, u32)> {
     if png.len() < 24 || &png[1..4] != b"PNG" { return None; }
@@ -81,7 +71,7 @@ pub const RETURN: u32 = 0xff0d;
 pub struct Screen {
     /// The cell the latest look zoomed into: the only one a click may land in (2b: two looks per click).
     pub last_zoom: Option<u32>,
-    /// When the AI last looked or injected input: the took-over test measures from here.
+    /// When the AI last looked or injected input: a click or typing needs a look first.
     pub last_ai: Option<Instant>,
     /// The screen's size in pixels, from the latest frame.
     pub size: Option<(u32, u32)>,
@@ -183,12 +173,6 @@ fn scratch(name: &str) -> String {
     format!("{dir}/ai-os-screen-{name}")
 }
 
-fn idle_ms() -> Result<u64, String> {
-    let conn = Connection::session().map_err(bus_err("no session bus"))?;
-    conn.call_method(Some("org.gnome.Mutter.IdleMonitor"), "/org/gnome/Mutter/IdleMonitor/Core", Some("org.gnome.Mutter.IdleMonitor"), "GetIdletime", &())
-        .and_then(|m| m.body().deserialize()).map_err(bus_err("idle monitor"))
-}
-
 /// The picture for the model, drawn by ImageMagick (`magick`, or `convert` where only v6 is).
 fn picture(frame: &[u8], w: u32, h: u32, cell: Option<u32>) -> Result<Vec<u8>, String> {
     let (inp, out) = (scratch("in.png"), scratch("out.png"));
@@ -201,10 +185,10 @@ fn picture(frame: &[u8], w: u32, h: u32, cell: Option<u32>) -> Result<Vec<u8>, S
     std::fs::read(&out).map_err(|e| format!("no picture came out: {e}"))
 }
 
-/// Refuses when the person has moved since the AI's last look or move (see `took_over`).
+/// A click or typing needs a look first. The person may use the mouse meanwhile: the AI keeps
+/// going (full-access spec), so the two can pull the pointer from each other.
 fn check_not_taken(st: &Screen) -> Result<(), String> {
-    let Some(at) = st.last_ai else { return Err("look at the screen first".into()) };
-    if took_over(idle_ms()?, at.elapsed()) { return Err(TOOK_OVER.into()); }
+    if st.last_ai.is_none() { return Err("look at the screen first".into()); }
     Ok(())
 }
 
@@ -292,14 +276,6 @@ mod tests {
         assert_eq!(zoom[i + 1], "160x133+0+133");
         assert!(zoom.contains(&"1024x851!".to_string()));
         assert_eq!(zoom.iter().filter(|a| *a == "-annotate").count(), SPOTS as usize);
-    }
-
-    #[test]
-    fn the_person_took_over_only_if_they_moved_after_the_ai() {
-        let since = Duration::from_secs(10);
-        assert!(!took_over(10_000, since), "idle since the AI's own move: nobody else touched it");
-        assert!(!took_over(9_800, since), "within the bus slack");
-        assert!(took_over(2_000, since), "input 2 s ago, the AI's was 10 s ago");
     }
 
     #[test]

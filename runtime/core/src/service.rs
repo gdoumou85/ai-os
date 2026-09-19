@@ -51,7 +51,6 @@ impl Shared {
             Event::Plan { steps, .. } => if let Some(j) = m.as_mut() { j.plan = steps.clone(); j.waiting = Waiting::None; },
             Event::Step { plan_step, text, ok, .. } => if let Some(j) = m.as_mut() { j.steps.push(StepView { plan_step: *plan_step, text: text.clone(), ok: *ok }); j.waiting = Waiting::None; },
             Event::NeedsAnswer { questions, options, .. } => if let Some(j) = m.as_mut() { j.waiting = Waiting::Answer { questions: questions.clone(), options: options.clone() }; },
-            Event::NeedsOk { what, why, .. } => if let Some(j) = m.as_mut() { j.waiting = Waiting::Ok { what: what.clone(), why: why.clone() }; },
             Event::Done { .. } | Event::Failed { .. } | Event::Stopped { .. } => *m = None,
             _ => {}
         }

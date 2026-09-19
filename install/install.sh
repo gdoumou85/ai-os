@@ -17,7 +17,7 @@ esac; done
 owner=$(id -un); uid=$(id -u); ogroup=$(id -gn)
 [ "$(uname -m)" = x86_64 ] || { echo "only x86_64 is built" >&2; exit 1; }
 . /etc/os-release; [ "${VERSION_ID:-}" = 26.04 ] || echo "warning: built and tested on Ubuntu 26.04, this is ${PRETTY_NAME:-unknown}" >&2
-for f in bin/ai-os-engine bin/ai-os-chat bin/ai-os-rail bin/ai-os-find ai-os-admin org.aios.Rail.desktop check.sh ai-os-engine.service.in; do
+for f in bin/ai-os-engine bin/ai-os-chat bin/ai-os-rail bin/ai-os-find org.aios.Rail.desktop check.sh ai-os-engine.service.in; do
   [ -f "$here/$f" ] || { echo "missing next to install.sh: $f" >&2; exit 1; }
 done
 echo "== installing the AI OS for $owner (sudo will ask for your password)"
@@ -29,7 +29,7 @@ sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y btrfs-progs libgtk-4-
   python3-venv npm cargo at-spi2-core \
   gstreamer1.0-tools gstreamer1.0-pipewire imagemagick   # the screen hand: a frame, and the grid drawn on it
 
-echo "== /data (btrfs, where the AI works and what undo covers)"
+echo "== /data (btrfs, where the AI keeps its projects)"
 if ! mountpoint -q /data; then
   # Files already at /data would be re-owned here and then hidden under the mount, with no way for
   # the person to guess where they went. Stop while they are still visible.
@@ -58,21 +58,20 @@ sudo chown "$owner:$ogroup" /data
 [ -d /data/live ] || sudo btrfs subvolume create /data/live >/dev/null
 sudo chown "$owner:$ogroup" /data/live
 
-echo "== the sandbox account"
-id ai-sandbox >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin ai-sandbox
-sudo usermod -aG ai-sandbox "$owner"
-sudo install -d -o ai-sandbox -g ai-sandbox -m 0770 /data/jobs
-sudo install -d -o "$owner" -g ai-sandbox -m 2770 /data/projects /data/snapshots /data/housekeeping
+echo "== the AI's folders, yours"
+sudo install -d -o "$owner" -g "$ogroup" -m 0755 /data/projects /data/housekeeping
+# Before full access (v0.8.0) a sandbox account wrote in these: hand everything back to you.
+sudo chown -R "$owner:$ogroup" /data/projects /data/housekeeping
 
-echo "== the root helper and its one permission"
-sudo install -d -m 0755 /usr/local/libexec
-sudo install -m 0755 -o root -g root "$here/ai-os-admin" /usr/local/libexec/ai-os-admin
-echo "$owner ALL=(root) NOPASSWD: /usr/local/libexec/ai-os-admin" | sudo tee /etc/sudoers.d/ai-os-admin.tmp >/dev/null
-sudo chmod 0440 /etc/sudoers.d/ai-os-admin.tmp
-sudo visudo -cf /etc/sudoers.d/ai-os-admin.tmp >/dev/null || {
-  sudo rm -f /etc/sudoers.d/ai-os-admin.tmp
+echo "== full access: root for the AI, with no password (the VM is the safety net)"
+echo "$owner ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/ai-os.tmp >/dev/null
+sudo chmod 0440 /etc/sudoers.d/ai-os.tmp
+sudo visudo -cf /etc/sudoers.d/ai-os.tmp >/dev/null || {
+  sudo rm -f /etc/sudoers.d/ai-os.tmp
   echo "the permission line for $owner did not pass visudo; nothing was changed" >&2; exit 1; }
-sudo mv -f /etc/sudoers.d/ai-os-admin.tmp /etc/sudoers.d/ai-os-admin
+sudo mv -f /etc/sudoers.d/ai-os.tmp /etc/sudoers.d/ai-os
+# The root helper of earlier versions, and its narrow permission, are gone.
+sudo rm -f /etc/sudoers.d/ai-os-admin /usr/local/libexec/ai-os-admin
 
 echo "== programs"
 for b in ai-os-engine ai-os-chat ai-os-rail ai-os-find; do sudo install -m 0755 -o root -g root "$here/bin/$b" /usr/local/bin/$b; done
@@ -89,7 +88,7 @@ sudo install -d /etc/xdg/autostart
 sudo install -m 0644 "$here/org.aios.Rail.desktop" /etc/xdg/autostart/org.aios.Rail.desktop
 # A tarball unpacked from a machine that rewrote line endings would leave `#!/usr/bin/env bash\r`
 # in the wrapper and a stray \r in every desktop-entry value.
-sudo sed -i 's/\r$//' /usr/local/libexec/ai-os-admin /usr/local/bin/ai-os-check \
+sudo sed -i 's/\r$//' /usr/local/bin/ai-os-check \
   /usr/share/applications/org.aios.Rail.desktop /etc/xdg/autostart/org.aios.Rail.desktop
 
 echo "== the model"
@@ -234,7 +233,6 @@ sleep 2
 # The check's verdict is the script's, but the restart instruction is printed either way: a failure
 # here is usually the model runner, which the restart and a working network settle.
 rc=0; bash "$here/check.sh" ${AI_OS_CHECK_ARGS:-} || rc=$?
-# The engine runs under your user manager, which lingers across logouts and so keeps its old groups:
-# only a restart hands it the ai-sandbox membership it needs to make job folders.
+# The chat window opens with the session, so the first one after a restart is where it appears.
 echo "Restart the computer once. After that the chat window opens whenever you log in."
 exit $rc

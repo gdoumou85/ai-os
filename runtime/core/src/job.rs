@@ -10,13 +10,19 @@ static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum State { Asking, Planning, Working, WaitingAnswer, WaitingApproval, Done, Failed, Cancelled }
+pub enum State {
+    Asking, Planning,
+    /// A job saved while it waited for an OK (before full access) carries on working.
+    #[serde(alias = "waiting_approval")]
+    Working,
+    WaitingAnswer, Done, Failed, Cancelled,
+}
 
 impl State {
     pub fn as_str(&self) -> &'static str {
         match self {
             State::Asking => "asking", State::Planning => "planning", State::Working => "working",
-            State::WaitingAnswer => "waiting_answer", State::WaitingApproval => "waiting_approval",
+            State::WaitingAnswer => "waiting_answer",
             State::Done => "done", State::Failed => "failed", State::Cancelled => "cancelled",
         }
     }
@@ -41,23 +47,7 @@ pub struct Job {
     pub pending_options: Vec<Vec<String>>,
     pub plan: Vec<String>,
     pub steps: Vec<StepRecord>,
-    pub pending_action: Option<(usize, Action)>,
-    pub pending_reason: String,
     pub failed_actions: Vec<String>,
-    /// A human's "no" to a risky action. Unlike `failed_actions`, this is never cleared by a
-    /// later file write — a decline is not a fixable failure, it must never expire.
-    /// `serde(default)`: a job saved before this field existed must still deserialise (I3;
-    /// standing convention from now on — every field added to `Job` gets this).
-    #[serde(default)]
-    pub declined_actions: Vec<String>,
-    /// A human's "yes", and it holds for the rest of the job: the same action asked for again,
-    /// word for word, is not put to them a second time. The live 1d run had the 9B re-issue its
-    /// approved `/etc` write after that write had already succeeded, and the job sat on a second
-    /// Needs-your-OK for a question the user had answered a moment earlier. Per job and per
-    /// exact action, like `declined_actions`, which is checked first: a later no overrides an
-    /// earlier yes. `serde(default)`: see `declined_actions` (I3).
-    #[serde(default)]
-    pub approved_actions: Vec<String>,
     pub rejections: u32,
     /// Bounded like `rejections`/MAX_FAILS_PER_STEP: a model that only ever replans never
     /// produces output otherwise (engine::MAX_REPLANS).
@@ -69,41 +59,35 @@ pub struct Job {
     pub outcome_text: String,
     /// True for a housekeeping job (machine-level: folders, settings, tools) — no project, no
     /// blueprint. `#[serde(default)]`: a job saved before this field existed must still
-    /// deserialise (I3; standing convention — see `declined_actions`).
+    /// deserialise (I3).
     #[serde(default)]
     pub housekeeping: bool,
     /// The job's own workspace — the folder every one of its actions runs in. Carried on the
     /// job rather than derived from `project`, so moving the projects root (or a project) never
-    /// silently redirects a job that is already running. `#[serde(default)]`: see
-    /// `declined_actions` (I3).
+    /// silently redirects a job that is already running. `#[serde(default)]`: a job
+    /// saved before this field existed must still deserialise (I3).
     #[serde(default)]
     pub folder: String,
-    /// True when this job's `Start` created the project folder — what Task 9 needs to tell
-    /// whether undoing the job means removing the folder or only putting its files back.
+    /// True when this job's `Start` created the project folder: a new project must leave a
+    /// BLUEPRINT.md behind.
     #[serde(default)]
     pub new_project: bool,
     /// What the user actually typed to start this job, word for word. `goal` is the model's own
     /// paraphrase and loses what it did not think mattered — the live 1c run watched "where all
     /// my projects will live from now on" become "for project storage", and a job cannot act on
-    /// what it never saw. `#[serde(default)]`: see `declined_actions` (I3).
+    /// what it never saw. `#[serde(default)]`: a job saved before this field existed must still deserialise (I3).
     #[serde(default)]
     pub request: String,
     /// When the job began (unix seconds): the Done card lists what changed since then.
     /// `#[serde(default)]`: a job saved before 1d has no such key.
     #[serde(default)]
     pub started_at: u64,
-    /// How many times, while an action waited for the user's OK, they asked something instead
-    /// of yes/no. Reset to 0 in `resume_after_approval` once the OK is settled either way; three
-    /// unanswered questions in a row count as a no (engine::is_refusal, engine's WaitingApproval
-    /// arm). `#[serde(default)]`: see `declined_actions` (I3).
-    #[serde(default)]
-    pub ok_questions: u32,
     /// How many `done` moves the blueprint gate has held back on this job. Its own counter, not
     /// the grammar `rejections` budget of two: a gated `done` is a legal move refused by policy
     /// and the fix is one concrete extra step, so two tries is not enough room — the live 1d run
     /// lost two jobs to a second `done` arriving before the blueprint write. Bounded all the
     /// same (engine::MAX_DONE_GATED), so a model that only ever says done still ends.
-    /// `#[serde(default)]`: see `declined_actions` (I3).
+    /// `#[serde(default)]`: a job saved before this field existed must still deserialise (I3).
     #[serde(default)]
     pub done_gated: u32,
     /// The craft notebooks this job belongs to (Phase 3 §2). `serde(default)`: I3.
@@ -126,13 +110,12 @@ impl Job {
             project: project.into(), goal: goal.into(), creative, understood: understood.into(),
             state: if creative { State::Planning } else { State::Asking },
             answers: vec![], pending_questions: vec![], pending_options: vec![], plan: vec![], steps: vec![],
-            pending_action: None, pending_reason: String::new(), failed_actions: vec![],
-            declined_actions: vec![], approved_actions: vec![], rejections: 0, replans: 0,
+            failed_actions: vec![], rejections: 0, replans: 0,
             note_to_model: None, last_code_change: 0, last_blueprint_update: 0,
             outcome_text: String::new(), housekeeping: false,
             folder: folder.into(), new_project: false, request: String::new(),
             started_at: (millis / 1000) as u64,
-            ok_questions: 0, done_gated: 0,
+            done_gated: 0,
             skills: vec![], notes_block: String::new(), shown_notes: vec![],
         }
     }
@@ -160,18 +143,28 @@ mod tests {
         assert_ne!(a.id, b.id, "same project, same millisecond is possible — the counter must still separate them");
     }
 
-    /// I3: a `Job` saved before `replans`/`declined_actions` existed has neither key in its JSON.
-    /// Both fields must default rather than fail deserialisation.
+    /// I3: a `Job` saved before `replans` existed has no such key in its JSON.
     #[test]
-    fn job_without_replans_or_declined_actions_keys_still_deserialises() {
+    fn job_without_replans_key_still_deserialises() {
+        let job = Job::new("p", "/data/projects/p", "g", true, "u");
+        let mut value = serde_json::to_value(&job).unwrap();
+        assert!(value.as_object_mut().unwrap().remove("replans").is_some());
+        let back: Job = serde_json::from_value(value).unwrap();
+        assert_eq!(back.replans, 0);
+    }
+
+    /// A job saved before full access, waiting for an OK and carrying the old fields, loads and
+    /// carries on working.
+    #[test]
+    fn a_job_that_waited_for_an_ok_loads_as_working() {
         let job = Job::new("p", "/data/projects/p", "g", true, "u");
         let mut value = serde_json::to_value(&job).unwrap();
         let obj = value.as_object_mut().unwrap();
-        assert!(obj.remove("replans").is_some());
-        assert!(obj.remove("declined_actions").is_some());
+        obj.insert("state".into(), "waiting_approval".into());
+        obj.insert("declined_actions".into(), serde_json::json!([]));
+        obj.insert("pending_reason".into(), "network".into());
         let back: Job = serde_json::from_value(value).unwrap();
-        assert_eq!(back.replans, 0);
-        assert!(back.declined_actions.is_empty());
+        assert_eq!(back.state, State::Working);
     }
 
     /// I3 again, for the three keys this task adds: a job saved before `folder`,

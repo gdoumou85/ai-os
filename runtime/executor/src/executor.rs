@@ -1,124 +1,66 @@
 use crate::action::Action;
 use crate::log::{ActionLog, LogError};
-use crate::rules::{classify, resolves_inside, under_any, wrong_hand, Risk};
-use crate::undo::UndoEntry;
 use crate::worker::{Outcome, Worker};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-#[derive(Debug, PartialEq)]
-pub enum ExecOutcome {
-    Ran(Outcome),
-    Blocked(String),
-}
-
-/// Which hand performs an action (spec §6). `Engine` actions touch no worker at all —
-/// the engine applies them itself and records them with `log_only`.
+/// Which hand performs an action. `Engine` actions touch no worker at all — the engine applies
+/// them itself and records them with `log_only`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Lane {
-    Sandbox,
-    Admin,
+    Machine,
     Desktop,
     Engine,
 }
 
-/// Pure: the same action, workspace and approval always pick the same hand.
-pub fn lane(action: &Action, workspace: &Path, approved: bool) -> Lane {
+/// Pure: the same action always picks the same hand.
+pub fn lane(action: &Action) -> Lane {
     match action {
-        Action::Install { .. } | Action::Remove { .. } | Action::Service { .. } | Action::MakeDir { .. } => Lane::Admin,
-        // A file action only leaves the sandbox once it is both outside the workspace and
-        // approved. Reads under /etc stay in the sandbox: they are world-readable, so the
-        // privileged hand buys nothing.
-        Action::ReadFile { path, .. } | Action::WriteFile { path, .. } | Action::EditFile { path, .. } => {
-            let etc_read = matches!(action, Action::ReadFile { .. }) && under_any(path, &["/etc"]);
-            if !resolves_inside(path, workspace) && approved && !etc_read {
-                Lane::Admin
-            } else {
-                Lane::Sandbox
-            }
-        }
+        Action::RunCommand { .. } | Action::ReadFile { .. } | Action::WriteFile { .. } | Action::EditFile { .. } => Lane::Machine,
         Action::SetSetting { .. } => Lane::Engine,
         // Listed, not `_`: a new action kind must fail to compile here rather than land
-        // silently in the sandbox.
-        Action::RunCommand { .. } | Action::HttpPost { .. } | Action::FetchPackages { .. } => Lane::Sandbox,
-        // The desktop hand (2a §6): its own lane, whatever the approval — the seat is the only
-        // place these actions mean anything, and no approval moves them elsewhere.
+        // silently on the wrong hand.
         Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. }
         | Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. } => Lane::Desktop,
     }
 }
 
 pub struct Executor<W: Worker> {
-    sandbox: W,
-    admin: W,
+    machine: W,
     desktop: W,
     log: ActionLog,
+    /// The job's folder, kept for the demo binary and the log; the machine hand holds its own.
+    #[allow(dead_code)]
     workspace: PathBuf,
 }
 
 impl<W: Worker> Executor<W> {
-    pub fn new(sandbox: W, admin: W, desktop: W, log: ActionLog, workspace: PathBuf) -> Self {
-        Self { sandbox, admin, desktop, log, workspace }
+    pub fn new(machine: W, desktop: W, log: ActionLog, workspace: PathBuf) -> Self {
+        Self { machine, desktop, log, workspace }
     }
 
-    /// The one door. Classify, refuse unconfirmed risky actions, run the rest, log everything.
+    /// The one door: run the action on its hand and log it. Nothing is ever held for a yes
+    /// (full-access spec).
     ///
-    /// Invariant: an executed action is never lost — a logging failure is reported to
-    /// stderr but the outcome is still returned; only the blocked path may fail on
-    /// logging since nothing ran.
-    pub fn execute(&self, job_id: &str, action: &Action, approved: bool) -> Result<ExecOutcome, LogError> {
-        // The wrong hand is refused with the right one named, never run and never put to the
-        // user. A free command that belongs to another hand would fail in the sandbox in a way
-        // that teaches the model the wrong thing about the machine (see `wrong_hand`); a
-        // `make_dir` the privileged hand cannot carry out would go to the approval gate and, once
-        // the user said yes, be refused by the wrapper anyway — it takes absolute paths outside
-        // the workspace only, so a relative one means nothing to it whether it points into the
-        // project or out of it. A yes that buys a failure is worse than a refusal that names the
-        // hand, and the rule the prompt states ("make_dir is never used with a relative path") is
-        // enforced here rather than merely asked for.
-        let wrong = match action {
-            Action::RunCommand { argv } => wrong_hand(argv),
-            Action::MakeDir { path } if !Path::new(path).is_absolute() || resolves_inside(path, &self.workspace) => {
-                Some(if resolves_inside(path, &self.workspace) {
-                    format!("a folder inside the working directory is made with `run_command mkdir -p {path}`: make_dir is the hand for folders outside it and takes an absolute path")
-                } else {
-                    format!("make_dir takes an absolute path: `{path}` is relative, and the hand that would make it works from no working directory of yours")
-                })
+    /// Invariant: an executed action is never lost — a logging failure is reported to stderr
+    /// but the outcome is still returned.
+    pub fn execute(&self, job_id: &str, action: &Action) -> Result<Outcome, LogError> {
+        let worker = match lane(action) {
+            Lane::Machine => &self.machine,
+            Lane::Desktop => &self.desktop,
+            // A programming error: the engine applies its own actions and records them with
+            // `log_only`. Nothing ran, so the log failing here is worth reporting.
+            Lane::Engine => {
+                let reason = "engine action reached the executor";
+                self.log.append(job_id, action, &format!("error: {reason}"))?;
+                return Ok(Outcome::err(reason));
             }
-            _ => None,
         };
-        if let Some(reason) = wrong {
-            if let Err(e) = self.log.append(job_id, action, &format!("error: {reason}")) {
-                eprintln!("executor: failed to log a wrong-hand refusal: {e}");
-            }
-            return Ok(ExecOutcome::Ran(Outcome::err(reason)));
+        let outcome = worker.run(action);
+        let tag = if outcome.ok { "ok" } else { "error" };
+        if let Err(e) = self.log.append(job_id, action, &format!("{tag}: {}", outcome.detail)) {
+            eprintln!("executor: failed to log action outcome: {e}");
         }
-        match classify(action, &self.workspace) {
-            Risk::NeedsConfirm(reason) if !approved => {
-                self.log.append(job_id, action, &format!("blocked: {reason}"))?;
-                Ok(ExecOutcome::Blocked(reason))
-            }
-            _ => {
-                let worker = match lane(action, &self.workspace, approved) {
-                    Lane::Sandbox => &self.sandbox,
-                    Lane::Admin => &self.admin,
-                    Lane::Desktop => &self.desktop,
-                    // A programming error: the engine applies its own actions and records them
-                    // with `log_only`. Nothing ran, so the log failing here is worth reporting.
-                    Lane::Engine => {
-                        let reason = "engine action reached the executor";
-                        self.log.append(job_id, action, &format!("blocked: {reason}"))?;
-                        return Ok(ExecOutcome::Blocked(reason.into()));
-                    }
-                };
-                let outcome = worker.run(action);
-                let tag = if outcome.ok { "ok" } else { "error" };
-                // ponytail: log-failure branch is not unit-tested (needs failure-injection infra; out of scope this wave).
-                if let Err(e) = self.log.append(job_id, action, &format!("{tag}: {}", outcome.detail)) {
-                    eprintln!("executor: failed to log action outcome: {e}");
-                }
-                Ok(ExecOutcome::Ran(outcome))
-            }
-        }
+        Ok(outcome)
     }
 
     /// Record an action no worker performed — the engine's own lane (`SetSetting`).
@@ -126,207 +68,56 @@ impl<W: Worker> Executor<W> {
         self.log.append(job_id, action, detail)?;
         Ok(())
     }
-
-    /// Record a line no action and no worker stands behind — the engine's own reversals (a
-    /// setting, a project snapshot). `reverse` cannot log those: they never reach a worker,
-    /// and a snapshot has no `Action` to log against at all.
-    pub fn log_text(&self, job_id: &str, text: &str) -> Result<(), LogError> {
-        self.log.append_text(job_id, text)?;
-        Ok(())
-    }
-
-    /// Put one recorded change back. Only the privileged hand can undo.
-    ///
-    /// Same invariant as `execute`: a logging failure never loses the outcome.
-    pub fn reverse(&self, job_id: &str, entry: &UndoEntry) -> Result<Outcome, LogError> {
-        let outcome = self.admin.reverse(entry);
-        let tag = if outcome.ok { "ok" } else { "error" };
-        // The entry goes in the line: there is no action column behind an undo, so this is the
-        // only record of WHAT was put back.
-        if let Err(e) = self.log.append_text(job_id, &format!("undo: {entry:?}: {tag}: {}", outcome.detail)) {
-            eprintln!("executor: failed to log undo outcome: {e}");
-        }
-        Ok(outcome)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{Manager, ServiceDo};
-    use crate::undo::UndoEntry;
     use crate::worker::FakeWorker;
 
     fn exec(ok: bool) -> Executor<FakeWorker> {
-        Executor::new(
-            FakeWorker::new(ok),
-            FakeWorker::new(ok),
-            FakeWorker::new(ok),
-            ActionLog::open_in_memory().unwrap(),
-            PathBuf::from("/data/jobs/j1"),
-        )
+        Executor::new(FakeWorker::new(ok), FakeWorker::new(ok), ActionLog::open_in_memory().unwrap(), PathBuf::from("/data/jobs/j1"))
     }
 
     #[test]
-    fn auto_action_runs_and_logs() {
+    fn a_command_runs_on_the_machine_hand_and_is_logged() {
         let e = exec(true);
-        let a = Action::RunCommand { argv: vec!["ls".into()] };
-        let out = e.execute("j1", &a, false).unwrap();
-        assert!(matches!(out, ExecOutcome::Ran(_)));
-        assert_eq!(e.sandbox.calls.borrow().len(), 1);
+        let a = Action::RunCommand { argv: vec!["sudo".into(), "apt-get".into(), "install".into(), "-y".into(), "cowsay".into()] };
+        assert!(e.execute("j1", &a).unwrap().ok);
+        assert_eq!(e.machine.calls.borrow().len(), 1);
         assert_eq!(e.log.count_for_job("j1").unwrap(), 1);
     }
 
+    /// Full access: an outside write, a Delete press and a Send click all just run.
     #[test]
-    fn a_command_that_belongs_to_another_hand_never_reaches_the_sandbox() {
+    fn nothing_is_held_for_a_yes() {
         let e = exec(true);
-        let a = Action::RunCommand { argv: vec!["apt-get".into(), "install".into(), "-y".into(), "cowsay".into()] };
-        match e.execute("j1", &a, false).unwrap() {
-            ExecOutcome::Ran(o) => assert!(!o.ok && o.detail.contains("`install` action"), "{o:?}"),
-            other => panic!("a refusal is a failed step, not {other:?}"),
+        for a in [Action::WriteFile { path: "/etc/x".into(), contents: "x".into() },
+                  Action::Press { control: 2, name: "Delete".into() },
+                  Action::ScreenClick { cell: 1, spot: 1, name: "Send".into(), double: false }] {
+            assert!(e.execute("j", &a).unwrap().ok, "{a:?}");
         }
-        assert!(e.sandbox.calls.borrow().is_empty() && e.admin.calls.borrow().is_empty());
-        assert_eq!(e.log.count_for_job("j1").unwrap(), 1, "the refusal is logged like any outcome");
-    }
-
-    #[test]
-    fn risky_action_without_approval_is_blocked_and_not_run() {
-        let e = exec(true);
-        let a = Action::HttpPost { url: "https://x".into(), body: "b".into() };
-        let out = e.execute("j1", &a, false).unwrap();
-        assert!(matches!(out, ExecOutcome::Blocked(_)));
-        assert_eq!(e.sandbox.calls.borrow().len(), 0, "blocked action must never reach the worker");
-        assert_eq!(e.log.count_for_job("j1").unwrap(), 1, "the block itself is logged");
-    }
-
-    #[test]
-    fn risky_action_with_approval_runs() {
-        let e = exec(true);
-        let a = Action::HttpPost { url: "https://x".into(), body: "b".into() };
-        let out = e.execute("j1", &a, true).unwrap();
-        assert!(matches!(out, ExecOutcome::Ran(_)));
-        assert_eq!(e.sandbox.calls.borrow().len(), 1);
-    }
-
-    #[test]
-    fn admin_kinds_go_to_the_admin_lane() {
-        let e = exec(true);
-        e.execute("j", &Action::Install { packages: vec!["cowsay".into()] }, false).unwrap();
-        e.execute("j", &Action::Service { name: "nginx".into(), action: ServiceDo::Restart }, false).unwrap();
-        e.execute("j", &Action::MakeDir { path: "/data/x".into() }, false).unwrap();
-        assert_eq!(e.admin.calls.borrow().len(), 3);
-        assert!(e.sandbox.calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn a_make_dir_inside_the_working_directory_is_refused_with_the_right_hand_named() {
-        // The live 1d run had the 9B plan `make_dir src` for a folder in its own project. The
-        // wrapper takes absolute paths outside the workspace only, so the approval gate would
-        // have spent the user's yes on an action that then fails.
-        let e = exec(true);
-        for path in ["src", "/data/jobs/j1/src", "./a/b"] {
-            let out = e.execute("j", &Action::MakeDir { path: path.into() }, false).unwrap();
-            let ExecOutcome::Ran(o) = out else { panic!("{path} was not refused outright") };
-            assert!(!o.ok && o.detail.contains("mkdir -p"), "{path}: {}", o.detail);
-        }
-        // A relative path that points *out* of the workspace is no better: the hand works from
-        // no working directory at all, so it is refused for being relative rather than put to
-        // the user as a yes the wrapper would then throw away.
-        for path in ["../x", "../../../opt/x"] {
-            let out = e.execute("j", &Action::MakeDir { path: path.into() }, false).unwrap();
-            let ExecOutcome::Ran(o) = out else { panic!("{path} was not refused outright") };
-            assert!(!o.ok && o.detail.contains("absolute path"), "{path}: {}", o.detail);
-        }
-        assert!(e.admin.calls.borrow().is_empty() && e.sandbox.calls.borrow().is_empty());
-        // Absolute and outside, `make_dir` is still the hand; absolute and outside the AI's own
-        // areas still needs a yes.
-        assert!(matches!(e.execute("j", &Action::MakeDir { path: "/data/x".into() }, false).unwrap(), ExecOutcome::Ran(_)));
-        assert!(matches!(e.execute("j", &Action::MakeDir { path: "/opt/x".into() }, false).unwrap(), ExecOutcome::Blocked(_)));
-    }
-
-    #[test]
-    fn approved_outside_write_goes_admin_inside_write_goes_sandbox() {
-        let e = exec(true);
-        e.execute("j", &Action::WriteFile { path: "a.py".into(), contents: "x".into() }, false).unwrap();
-        assert!(matches!(
-            e.execute("j", &Action::WriteFile { path: "/etc/x".into(), contents: "x".into() }, false).unwrap(),
-            ExecOutcome::Blocked(_)
-        ));
-        e.execute("j", &Action::WriteFile { path: "/etc/x".into(), contents: "x".into() }, true).unwrap();
-        // Approval alone never promotes a lane: inside the workspace stays in the sandbox.
-        e.execute("j", &Action::WriteFile { path: "a.py".into(), contents: "x".into() }, true).unwrap();
-        assert_eq!(e.sandbox.calls.borrow().len(), 2);
-        assert_eq!(e.admin.calls.borrow().len(), 1);
-    }
-
-    #[test]
-    fn etc_read_and_fetch_stay_in_the_sandbox() {
-        let e = exec(true);
-        e.execute("j", &Action::ReadFile { path: "/etc/fstab".into(), from_line: None, lines: None }, false).unwrap();
-        e.execute("j", &Action::FetchPackages { manager: Manager::Pip, packages: vec!["x".into()] }, false).unwrap();
-        assert_eq!(e.sandbox.calls.borrow().len(), 2);
-        assert!(e.admin.calls.borrow().is_empty());
+        assert_eq!(e.machine.calls.borrow().len(), 1);
+        assert_eq!(e.desktop.calls.borrow().len(), 2);
     }
 
     #[test]
     fn set_setting_never_reaches_a_worker_but_log_only_records_it() {
         let e = exec(true);
         let a = Action::SetSetting { key: "projects_root".into(), value: "/data/w".into() };
-        assert_eq!(lane(&a, Path::new("/data/jobs/j1"), false), Lane::Engine);
+        assert_eq!(lane(&a), Lane::Engine);
+        assert!(!e.execute("j", &a).unwrap().ok, "an engine action that reaches execute is refused");
         e.log_only("j", &a, "ok: set").unwrap();
-        assert!(e.sandbox.calls.borrow().is_empty() && e.admin.calls.borrow().is_empty());
-        assert_eq!(e.log.count_for_job("j").unwrap(), 1);
-    }
-
-    #[test]
-    fn an_engine_action_that_reaches_execute_is_blocked_not_run() {
-        let e = exec(true);
-        let a = Action::SetSetting { key: "k".into(), value: "v".into() };
-        assert!(matches!(e.execute("j", &a, true).unwrap(), ExecOutcome::Blocked(_)));
-        assert!(e.sandbox.calls.borrow().is_empty() && e.admin.calls.borrow().is_empty());
-        assert_eq!(e.log.count_for_job("j").unwrap(), 1);
-    }
-
-    #[test]
-    fn reverse_goes_through_admin_and_is_logged() {
-        let e = exec(true);
-        e.reverse("j", &UndoEntry::DirCreated { path: "/data/x".into() }).unwrap();
-        assert_eq!(e.admin.reversed.borrow().len(), 1);
-        assert!(e.sandbox.reversed.borrow().is_empty());
-        assert_eq!(e.log.count_for_job("j").unwrap(), 1);
-    }
-
-    #[test]
-    fn log_text_records_a_reversal_no_worker_performed() {
-        // The engine puts settings and project snapshots back itself, so nothing else would
-        // leave a trace of them in the action log.
-        let e = exec(true);
-        e.log_text("j", "undo: Setting { .. }: ok: put back").unwrap();
-        assert_eq!(e.log.count_for_job("j").unwrap(), 1);
-        assert!(e.admin.reversed.borrow().is_empty() && e.sandbox.calls.borrow().is_empty());
+        assert!(e.machine.calls.borrow().is_empty() && e.desktop.calls.borrow().is_empty());
+        assert_eq!(e.log.count_for_job("j").unwrap(), 2);
     }
 
     #[test]
     fn desktop_actions_take_the_desktop_lane() {
-        let ws = PathBuf::from("/data/jobs/j1");
         for a in [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Bold".into() },
                   Action::Type { control: 1, text: "x".into(), replace: false }, Action::Read { control: 1, from_line: None, lines: None },
                   Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }] {
-            assert_eq!(lane(&a, &ws, false), Lane::Desktop, "{a:?}");
-            assert_eq!(lane(&a, &ws, true), Lane::Desktop, "{a:?}");
+            assert_eq!(lane(&a), Lane::Desktop, "{a:?}");
         }
-    }
-
-    #[test]
-    fn a_press_runs_on_the_desktop_worker_and_a_risky_one_is_blocked_until_approved() {
-        let e = exec(true);
-        let ok = Action::Press { control: 1, name: "Bold".into() };
-        assert!(matches!(e.execute("j", &ok, false).unwrap(), ExecOutcome::Ran(o) if o.ok));
-        assert_eq!(e.desktop.calls.borrow().as_slice(), &[ok.clone()]);
-        assert!(e.sandbox.calls.borrow().is_empty() && e.admin.calls.borrow().is_empty());
-        let close = Action::Press { control: 2, name: "Close".into() };
-        assert!(matches!(e.execute("j", &close, false).unwrap(), ExecOutcome::Blocked(r) if r.contains("Close")));
-        assert!(matches!(e.execute("j", &close, true).unwrap(), ExecOutcome::Ran(_)));
-        assert_eq!(e.desktop.calls.borrow().len(), 2);
     }
 }

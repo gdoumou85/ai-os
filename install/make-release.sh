@@ -11,10 +11,10 @@ version=$(git -C "$root" describe --tags --always --dirty)
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
 install -d "$stage/ai-os/bin"
 for b in ai-os-engine ai-os-chat ai-os-rail ai-os-find; do install -m 0755 "$root/runtime/target/release/$b" "$stage/ai-os/bin/$b"; done
-install -m 0755 "$root/install/install.sh" "$root/install/check.sh" "$root/runtime/admin/ai-os-admin" "$stage/ai-os/"
+install -m 0755 "$root/install/install.sh" "$root/install/check.sh" "$stage/ai-os/"
 install -m 0644 "$root/install/ai-os-engine.service.in" "$root/runtime/rail/org.aios.Rail.desktop" "$stage/ai-os/"
 printf '%s\n' "$version" > "$stage/ai-os/VERSION"
-sed -i 's/\r$//' "$stage/ai-os/"*.sh "$stage/ai-os/ai-os-admin" "$stage/ai-os/"*.in "$stage/ai-os/"*.desktop
+sed -i 's/\r$//' "$stage/ai-os/"*.sh "$stage/ai-os/"*.in "$stage/ai-os/"*.desktop
 install -d "$root/dist"
 tar -C "$stage" --owner=0 --group=0 -czf "$root/dist/ai-os-linux-amd64.tar.gz" ai-os
 echo "built dist/ai-os-linux-amd64.tar.gz ($(cat "$stage/ai-os/VERSION"))"

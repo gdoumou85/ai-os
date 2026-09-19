@@ -1,4 +1,4 @@
-// The Phase 1b acceptance test (1b spec §9): the real local model, the real sandbox, one job,
+// The Phase 1b acceptance test (1b spec §9): the real local model, the real machine, one job,
 // no human. Run inside the distro with Ollama up:
 //   AI_OS_LIVE=1 cargo test -p aios-core --test live_primes -- --nocapture
 use aios_core::engine::Engine;
@@ -6,9 +6,8 @@ use aios_core::job::{Job, State};
 use aios_core::model::{Model, RemoteModel};
 use aios_core::store::Store;
 use executor::action::Action;
-use executor::admin::AdminWorker;
 use executor::atspi::{DesktopState, DesktopWorker};
-use executor::worker::{SandboxWorker, Worker};
+use executor::worker::{MachineWorker, Worker};
 use std::path::PathBuf;
 
 #[test]
@@ -23,12 +22,10 @@ fn the_model_writes_and_proves_a_primes_script() {
     let desktop = DesktopState::for_model(llm.context_tokens());
     let mut e = Engine::new(store, llm, root.clone(), Some(db.into()),
         Box::new(move |ws| (
-            Box::new(SandboxWorker { user: "ai-sandbox".into(), workspace: ws.to_path_buf() }) as Box<dyn Worker>,
-            Box::new(AdminWorker) as Box<dyn Worker>,
+            Box::new(MachineWorker { workspace: ws.to_path_buf() }) as Box<dyn Worker>,
             Box::new(DesktopWorker(desktop.clone())) as Box<dyn Worker>,
         )),
-        PathBuf::from("/data/housekeeping"),
-        PathBuf::from("/data/snapshots"));
+        PathBuf::from("/data/housekeeping"));
     let mut out = e.handle("Start a new project called primes: make a Python script that prints the first ten prime numbers, one per line, and prove it runs. Decide the details yourself.").unwrap();
     for line in &out { eprintln!("AI: {line}"); }
     // If it asks anyway, answer once; a second question is a failure of the creative rule.

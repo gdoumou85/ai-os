@@ -1,6 +1,8 @@
 <big><b>Welcome to the AI OS</b></big>
 
-The AI OS is an assistant that does jobs on this computer for you. You tell it what you want in plain words, in the box at the bottom of the chat window. It writes and changes files, installs programs, changes settings, and can work the windows of your programs. It keeps a record of everything it does, so you can read it back and undo it.
+The AI OS is an assistant that does jobs on this computer for you. You tell it what you want in plain words, in the box at the bottom of the chat window. It writes and changes files, installs programs, changes settings, and can work the windows of your programs.
+
+<b>It has full access to this computer</b>: every folder, the internet, and administrator (root) rights. It never stops to ask your OK, and there is no undo. Before a big job, take a snapshot of the virtual machine in VirtualBox: that is the way back if something goes wrong.
 
 
 <big><b>How to talk to it</b></big>
@@ -10,7 +12,6 @@ The AI OS is an assistant that does jobs on this computer for you. You tell it w
 • <b>Say "you decide"</b> when you don't want questions: it makes the choices itself.
 • <b>Tell it something to keep</b> ("always use Python 3", "my projects go under Work") and it remembers it for every job after.
 • <b>"stop"</b> stops the job it is working on. So does the red <b>Stop</b> button at the top.
-• <b>"undo"</b> puts back what the last job changed, and says in plain words what it put back.
 
 The AI does not remember the chat itself. What is worth keeping it writes down: in each project's notes, and in the things you told it to keep.
 
@@ -18,9 +19,8 @@ The AI does not remember the chat itself. What is worth keeping it writes down: 
 <big><b>The cards</b></big>
 
 • <b>Building</b>: a job in progress, with a tick next to each step as it finishes.
-• <b>Needs your OK</b> (orange): the AI wants to do something that could hurt, like changing a system file or pressing Delete in a program. Nothing happens until you press Yes.
 • <b>A question</b> (blue): click one of the answers under it, or type your own in the box. When it asks several questions, your clicks gather in the box and go once each question has one.
-• <b>Done</b> (green): the job is finished and proved. The files it changed are listed with an Open button, and Undo is underneath.
+• <b>Done</b> (green): the job is finished and proved. The files it changed are listed with an Open button.
 • <b>Failed</b> (red): what went wrong, in plain words.
 
 While the AI is working, the circle next to the status line turns.
@@ -40,12 +40,10 @@ When a new version is out, a card at login says so. Press <b>Update now</b>, typ
 
 <big><b>What it can do</b></big>
 
-• <b>Files and projects</b>: write, change and run code and documents in its own work area, <tt>/data</tt>. Each project keeps a short notes file, BLUEPRINT.md, so the AI knows the project the next time.
-• <b>Programs</b>: install and remove programs, start and stop services, change settings. Installing needs no OK. It is recorded and can be undone.
+• <b>Files and projects</b>: write, change and run code and documents anywhere. Projects live in <tt>/data/projects</tt>. Each project keeps a short notes file, BLUEPRINT.md, so the AI knows the project the next time.
+• <b>Programs</b>: install and remove programs, start and stop services, change settings.
 • <b>Your windows</b>: open a program and press its buttons, type into it and read it, the way a person would. Say "take my Text Editor window" to hand it a window you have open.
-• <b>The screen</b>, as a last resort, for what it can't reach any other way (a web page, for example). It looks at the screen, zooms in and clicks. <b>Move the mouse or type and it stops at once.</b>
-
-Its work runs in a closed area of its own that cannot reach the internet or your personal files. Anything outside that area needs your OK, except reading settings and installing.
+• <b>The screen</b>, as a last resort, for what it can't reach any other way (a web page, for example). It looks at the screen, zooms in and clicks, using the real mouse. It keeps going if you move the mouse too, so leave it alone while it clicks, or the two of you pull the pointer from each other.
 
 
 <big><b>Skills: what it learns</b></big>
