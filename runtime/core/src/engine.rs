@@ -1675,8 +1675,11 @@ mod tests {
         let prompts = e.model.prompts.borrow();
         assert!(prompts.iter().any(|p| p.user.contains("that is an action, not a plan step; send it with act")), "{}", prompts.last().unwrap().user);
         // Never a rejection: that budget is two and fatal, and the live run died of it the first
-        // time this was refused rather than noted. The plan the job had is untouched.
-        assert!(!prompts.iter().any(|p| p.user.contains("rejected")), "it was rejected, not noted");
+        // time this was refused rather than noted. The plan the job had is untouched. "rejected:"
+        // (with the colon `reject()` always writes), not "rejected" bare — the learning turn's own
+        // fixed vocabulary ("what the user liked or rejected") now sits in every passed job's
+        // prompts and would otherwise false-positive this check.
+        assert!(!prompts.iter().any(|p| p.user.contains("rejected:")), "it was rejected, not noted");
         assert_eq!(ev.iter().filter(|x| matches!(x, Event::Plan { .. })).count(), 1, "the plan never changed: {ev:?}");
     }
 
@@ -1694,7 +1697,9 @@ mod tests {
         assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
         let prompts = e.model.prompts.borrow();
         assert!(prompts.iter().any(|p| p.user.contains("that is the plan you already have")), "no such note");
-        assert!(!prompts.iter().any(|p| p.user.contains("rejected")), "it was rejected, not noted");
+        // "rejected:" (the colon `reject()` always writes) — see the sibling test above for why
+        // a bare "rejected" now also matches the learning turn's own fixed vocabulary.
+        assert!(!prompts.iter().any(|p| p.user.contains("rejected:")), "it was rejected, not noted");
     }
 
     /// Three live 2a runs died here. The model read a control before looking at a window, was
