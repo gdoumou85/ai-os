@@ -3,7 +3,7 @@
 //   AI_OS_LIVE=1 cargo test -p aios-core --test live_1c -- --nocapture
 use aios_core::engine::Engine;
 use aios_core::job::{Job, State};
-use aios_core::model::{Model, OllamaModel};
+use aios_core::model::{Model, RemoteModel};
 use aios_core::store::Store;
 use executor::admin::AdminWorker;
 use executor::atspi::{DesktopState, DesktopWorker};
@@ -15,9 +15,9 @@ use std::time::Instant;
 const DB: &str = "/data/ai-os-live-1c.db";
 const WORK: &str = "/data/work";
 
-fn engine() -> Engine<OllamaModel> {
+fn engine() -> Engine<RemoteModel> {
     let store = Store::open(DB).unwrap();
-    let llm = OllamaModel::local("qwen3.5:9b");
+    let llm = RemoteModel::local("qwen3.5:9b");
     let desktop = DesktopState::for_model(llm.context_tokens());
     Engine::new(store, llm, PathBuf::from("/data/projects"), Some(DB.into()),
         Box::new(move |ws| (
@@ -69,7 +69,7 @@ fn must_clear(path: &str, dir: bool) {
 /// for a yes means the model reached outside what the script is about, and that is a failure to
 /// report, not something to wave through. Prints the step count and the seconds the line took,
 /// which is what §11 wants recorded per script.
-fn say(e: &mut Engine<OllamaModel>, label: &str, text: &str) -> Vec<String> {
+fn say(e: &mut Engine<RemoteModel>, label: &str, text: &str) -> Vec<String> {
     let t = Instant::now();
     println!("you> {text}");
     let mut out = e.handle(text).unwrap();
@@ -141,7 +141,7 @@ fn the_machine_moves_its_projects_installs_undoes_and_fetches() {
     println!("[script 3] {} before the undo: {before_undo:?}", project.display());
     let mut undos = 0;
     let mut restored = false;
-    let undo = |e: &mut Engine<OllamaModel>, undos: &mut i32, restored: &mut bool| {
+    let undo = |e: &mut Engine<RemoteModel>, undos: &mut i32, restored: &mut bool| {
         *undos += 1;
         let out = say(e, &format!("script 3: undo #{undos}"), "undo");
         assert!(!out.iter().any(|l| l.contains("Nothing left to undo")), "ran out of jobs to undo: {out:?}");

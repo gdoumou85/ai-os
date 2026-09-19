@@ -2,7 +2,7 @@
 // socket, no human. Inside the distro with the desktop unit up:
 //   trial/run-live-2a.sh   (sets the displays and AI_OS_LIVE=1)
 use aios_core::engine::Engine;
-use aios_core::model::{Model, OllamaModel};
+use aios_core::model::{Model, RemoteModel};
 use aios_core::service;
 use aios_core::store::Store;
 use aios_proto::{Client, Event};
@@ -21,7 +21,7 @@ fn start_service() -> PathBuf {
     let sock = dir.join("ai-os.sock");
     let listener = service::bind(&sock).unwrap();
     std::thread::spawn(move || service::run(listener, Box::new(|sink| {
-        let model = OllamaModel::local("qwen3.5:9b");
+        let model = RemoteModel::local("qwen3.5:9b");
         let desktop = DesktopState::for_model(model.context_tokens());
         Engine::new(Store::open(DB).unwrap(), model, PathBuf::from("/data/projects"), Some(DB.into()),
             Box::new(move |ws| (

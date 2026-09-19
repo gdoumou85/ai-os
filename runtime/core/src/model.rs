@@ -1,3 +1,4 @@
+use crate::find::{self, Found, Kind};
 use crate::moves::Move;
 use crate::schema;
 use std::cell::RefCell;
@@ -38,17 +39,53 @@ impl Model for FakeModel {
 /// so `ollama_body` and `context_tokens` can never drift apart.
 const NUM_CTX: usize = 8192;
 
-/// Ollama over HTTP on this machine (parent §4.3): grammar-forced via `format`, thinking off,
-/// temperature 0, 8k context — the Phase 0 settings.
-pub struct OllamaModel { pub url: String, pub model: String }
+/// A model runner over HTTP (parent §4.3): Ollama, or LM Studio through its OpenAI-style door
+/// (network-models spec §2). Grammar-forced, temperature 0, 8k context — the Phase 0 settings.
+/// When its address stops answering, `finder` looks for the same model on the home network (§3).
+pub struct RemoteModel {
+    pub kind: Kind,
+    /// A cell: a runner found again at a new address is kept for the rest of this process.
+    pub url: RefCell<String>,
+    pub model: String,
+    pub key: Option<String>,
+    pub finder: Box<dyn Fn() -> Vec<Found>>,
+}
 
-impl OllamaModel {
-    pub fn local(model: &str) -> Self { Self { url: "http://127.0.0.1:11434".into(), model: model.into() } }
-    /// `AI_OS_MODEL_URL` when set (the desktop edition points it at the host's runner), else local.
+impl RemoteModel {
+    /// A runner at a known address that is never looked for elsewhere.
+    pub fn at(kind: Kind, url: &str, model: &str) -> Self {
+        Self { kind, url: RefCell::new(url.into()), model: model.into(), key: None, finder: Box::new(Vec::new) }
+    }
+    pub fn local(model: &str) -> Self { Self::at(Kind::Ollama, "http://127.0.0.1:11434", model) }
+    /// What the installer wrote into the unit: `AI_OS_MODEL_URL` (else this machine),
+    /// `AI_OS_MODEL_KIND` (else ollama) and `AI_OS_MODEL_KEY` (from the private `model.env`).
     pub fn from_env(model: &str) -> Self {
-        let mut m = Self::local(model);
-        if let Ok(url) = std::env::var("AI_OS_MODEL_URL") { m.url = url; }
-        m
+        let kind = std::env::var("AI_OS_MODEL_KIND").ok().and_then(|k| Kind::parse(&k)).unwrap_or(Kind::Ollama);
+        let url = std::env::var("AI_OS_MODEL_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+        let key = std::env::var("AI_OS_MODEL_KEY").ok().filter(|k| !k.is_empty());
+        let finder_key = key.clone();
+        Self {
+            key,
+            finder: Box::new(move || find::scan(&find::home_hosts(), find::OLLAMA_PORT, find::LMSTUDIO_PORT, finder_key.as_deref())),
+            ..Self::at(kind, &url, model)
+        }
+    }
+
+    /// One request to the runner at `url`. `Err((true, _))` when it could not be reached at all —
+    /// the only failure worth looking for it elsewhere.
+    fn ask_at(&self, url: &str, prompt: &Prompt) -> Result<Move, (bool, ModelError)> {
+        let (endpoint, body) = match self.kind {
+            Kind::Ollama => (format!("{url}/api/chat"), ollama_body(&self.model, prompt)),
+            Kind::OpenAi => (format!("{url}/v1/chat/completions"), openai_body(&self.model, prompt)),
+        };
+        let mut req = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(180)).build().post(&endpoint);
+        if let Some(k) = &self.key { req = req.set("Authorization", &format!("Bearer {k}")); }
+        let resp: serde_json::Value = match req.send_json(body) {
+            Ok(r) => r.into_json().map_err(|e| (false, ModelError::Http(e.to_string())))?,
+            Err(ureq::Error::Transport(t)) if t.kind() == ureq::ErrorKind::ConnectionFailed => return Err((true, ModelError::Http(t.to_string()))),
+            Err(e) => return Err((false, ModelError::Http(e.to_string()))),
+        };
+        match self.kind { Kind::Ollama => parse_ollama(&resp), Kind::OpenAi => parse_openai(&resp) }.map_err(|e| (false, e))
     }
 }
 
@@ -95,17 +132,42 @@ pub fn parse_ollama(resp: &serde_json::Value) -> Result<Move, ModelError> {
     serde_json::from_str(content).map_err(|e| ModelError::BadJson(format!("{e}: {content}")))
 }
 
-impl Model for OllamaModel {
+/// LM Studio's OpenAI-style request: the same narrowed schema, forced through `response_format`.
+/// No context size: LM Studio fixes it when it loads the model (the installer asks for ≥ 8192).
+pub fn openai_body(model: &str, prompt: &Prompt) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "stream": false,
+        "temperature": 0.0,
+        "response_format": { "type": "json_schema", "json_schema": {
+            "name": "move", "strict": true, "schema": narrow_schema(schema::value(), &prompt.allowed) } },
+        "messages": [
+            { "role": "system", "content": prompt.system },
+            { "role": "user", "content": prompt.user }
+        ]
+    })
+}
+
+pub fn parse_openai(resp: &serde_json::Value) -> Result<Move, ModelError> {
+    let content = resp["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    serde_json::from_str(content).map_err(|e| ModelError::BadJson(format!("{e}: {content}")))
+}
+
+impl Model for RemoteModel {
     fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> {
-        let resp: serde_json::Value = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()
-            .post(&format!("{}/api/chat", self.url))
-            .send_json(ollama_body(&self.model, prompt))
-            .map_err(|e| ModelError::Http(e.to_string()))?
-            .into_json()
-            .map_err(|e| ModelError::Http(e.to_string()))?;
-        parse_ollama(&resp)
+        let url = self.url.borrow().clone();
+        match self.ask_at(&url, prompt) {
+            Err((true, gone)) => {
+                // The same model at another address: the router handed the runner's machine a new one.
+                let Some(moved) = (self.finder)().into_iter()
+                    .find(|f| f.kind == self.kind && f.model.as_deref() == Some(self.model.as_str()) && f.url != url)
+                else { return Err(gone) };
+                eprintln!("the model {} moved: {url} -> {}", self.model, moved.url);
+                *self.url.borrow_mut() = moved.url.clone();
+                self.ask_at(&moved.url, prompt).map_err(|(_, e)| e)
+            }
+            answer => answer.map_err(|(_, e)| e),
+        }
     }
 
     fn context_tokens(&self) -> usize { NUM_CTX }
@@ -117,40 +179,82 @@ mod tests {
 
     fn p() -> Prompt { Prompt { system: "sys".into(), user: "hello".into(), allowed: vec![] } }
 
-    /// Binds an ephemeral local socket, accepts one connection, reads up to the end of the
-    /// request headers (the body is irrelevant to these tests), then writes back `response`
-    /// verbatim. Returns the address before the client connects, since the listener is already
-    /// bound and listening.
-    fn respond_once(response: &'static str) -> std::net::SocketAddr {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut received = Vec::new();
-            let mut buf = [0u8; 4096];
-            while !received.windows(4).any(|w| w == b"\r\n\r\n") {
-                match stream.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => received.extend_from_slice(&buf[..n]),
-                }
-            }
-            let _ = stream.write_all(response.as_bytes());
-        });
-        addr
-    }
+    use crate::testing::{closed_port, json_response, serve};
+
+    const OLLAMA_HI: &str = r#"{"message":{"role":"assistant","content":"{\"move\":\"reply\",\"text\":\"hi\"}"}}"#;
+    const OPENAI_HI: &str = r#"{"choices":[{"message":{"role":"assistant","content":"{\"move\":\"reply\",\"text\":\"hi\"}"}}]}"#;
 
     #[test]
     fn ollama_http_error_status_is_model_error_http() {
-        let addr = respond_once("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        let m = OllamaModel { url: format!("http://{addr}"), model: "x".into() };
+        let addr = serve("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(), 1);
+        let m = RemoteModel::at(Kind::Ollama, &format!("http://{addr}"), "x");
         assert!(matches!(m.next_move(&p()), Err(ModelError::Http(_))));
     }
 
     #[test]
     fn ollama_non_json_body_is_model_error_http() {
-        let addr = respond_once("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json");
-        let m = OllamaModel { url: format!("http://{addr}"), model: "x".into() };
+        let addr = serve("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json".into(), 1);
+        let m = RemoteModel::at(Kind::Ollama, &format!("http://{addr}"), "x");
+        assert!(matches!(m.next_move(&p()), Err(ModelError::Http(_))));
+    }
+
+    #[test]
+    fn openai_request_is_grammar_forced_and_deterministic() {
+        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "start"] });
+        assert_eq!(b["model"], "bonsai-8b");
+        assert_eq!(b["stream"], false);
+        assert_eq!(b["temperature"], 0.0);
+        assert_eq!(b["response_format"]["type"], "json_schema");
+        assert_eq!(b["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(b["response_format"]["json_schema"]["schema"]["oneOf"].as_array().unwrap().len(), 2);
+        assert_eq!(b["messages"][0]["role"], "system");
+        assert_eq!(b["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn parses_openai_reply_content() {
+        let m = parse_openai(&serde_json::from_str(OPENAI_HI).unwrap()).unwrap();
+        assert!(matches!(m, Move::Reply { text, .. } if text == "hi"));
+        let bad = serde_json::json!({"choices":[{"message":{"content":"not json"}}]});
+        assert!(matches!(parse_openai(&bad), Err(ModelError::BadJson(_))));
+    }
+
+    #[test]
+    fn an_lm_studio_answer_comes_back_as_a_move() {
+        let addr = serve(json_response("200 OK", OPENAI_HI), 1);
+        let mut m = RemoteModel::at(Kind::OpenAi, &format!("http://{addr}"), "bonsai-8b");
+        m.key = Some("k".into());
+        assert!(matches!(m.next_move(&p()).unwrap(), Move::Reply { text, .. } if text == "hi"));
+    }
+
+    #[test]
+    fn a_runner_that_moved_is_found_again() {
+        let addr = serve(json_response("200 OK", OLLAMA_HI), 1);
+        let new_url = format!("http://{addr}");
+        let mut m = RemoteModel::at(Kind::Ollama, &format!("http://127.0.0.1:{}", closed_port()), "bonsai");
+        let there = new_url.clone();
+        m.finder = Box::new(move || vec![
+            Found { url: "http://10.9.9.9:11434".into(), kind: Kind::Ollama, model: Some("some-other-model".into()) },
+            Found { url: there.clone(), kind: Kind::Ollama, model: Some("bonsai".into()) },
+        ]);
+        assert!(matches!(m.next_move(&p()).unwrap(), Move::Reply { text, .. } if text == "hi"));
+        assert_eq!(*m.url.borrow(), new_url, "kept for the next request");
+    }
+
+    #[test]
+    fn a_runner_that_is_gone_is_an_http_error() {
+        let old = format!("http://127.0.0.1:{}", closed_port());
+        let mut m = RemoteModel::at(Kind::Ollama, &old, "bonsai");
+        m.finder = Box::new(|| vec![Found { url: "http://10.9.9.9:11434".into(), kind: Kind::OpenAi, model: Some("bonsai".into()) }]);
+        assert!(matches!(m.next_move(&p()), Err(ModelError::Http(_))), "a different kind is not the same runner");
+        assert_eq!(*m.url.borrow(), old);
+    }
+
+    #[test]
+    fn an_error_from_a_runner_that_answered_does_not_start_a_search() {
+        let addr = serve("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(), 1);
+        let mut m = RemoteModel::at(Kind::Ollama, &format!("http://{addr}"), "x");
+        m.finder = Box::new(|| panic!("searched after an answer"));
         assert!(matches!(m.next_move(&p()), Err(ModelError::Http(_))));
     }
 
@@ -182,7 +286,7 @@ mod tests {
 
     #[test]
     fn the_ollama_connection_says_its_context_and_sends_the_same_number() {
-        let m = OllamaModel::local("x");
+        let m = RemoteModel::local("x");
         assert_eq!(m.context_tokens(), 8192);
         let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![] });
         assert_eq!(b["options"]["num_ctx"], m.context_tokens());
@@ -217,7 +321,7 @@ mod tests {
     #[test]
     fn live_ollama_returns_a_reply() {
         if std::env::var("AI_OS_LIVE").as_deref() != Ok("1") { eprintln!("skipped: AI_OS_LIVE=1"); return; }
-        let m = OllamaModel::local("qwen3.5:9b");
+        let m = RemoteModel::local("qwen3.5:9b");
         let prompt = Prompt {
             system: "You answer with one move. For small talk use {\"move\":\"reply\",\"text\":...}.".into(),
             user: "hello, who are you?".into(),
@@ -232,11 +336,15 @@ mod tests {
     /// environment setting, read in one place. Only this test touches the variable.
     #[test]
     fn the_model_address_comes_from_the_environment() {
-        std::env::remove_var("AI_OS_MODEL_URL");
-        assert_eq!(OllamaModel::from_env("m").url, "http://127.0.0.1:11434");
-        std::env::set_var("AI_OS_MODEL_URL", "http://10.0.2.2:11434");
-        let m = OllamaModel::from_env("qwen3.5:9b");
-        std::env::remove_var("AI_OS_MODEL_URL");
-        assert_eq!((m.url.as_str(), m.model.as_str()), ("http://10.0.2.2:11434", "qwen3.5:9b"));
+        for v in ["AI_OS_MODEL_URL", "AI_OS_MODEL_KIND", "AI_OS_MODEL_KEY"] { std::env::remove_var(v); }
+        let m = RemoteModel::from_env("m");
+        assert_eq!((m.url.borrow().as_str(), m.kind, m.key.as_deref()), ("http://127.0.0.1:11434", Kind::Ollama, None));
+        std::env::set_var("AI_OS_MODEL_URL", "http://192.168.2.7:1234");
+        std::env::set_var("AI_OS_MODEL_KIND", "openai");
+        std::env::set_var("AI_OS_MODEL_KEY", "sk-lm-1");
+        let m = RemoteModel::from_env("bonsai-8b");
+        for v in ["AI_OS_MODEL_URL", "AI_OS_MODEL_KIND", "AI_OS_MODEL_KEY"] { std::env::remove_var(v); }
+        assert_eq!((m.url.borrow().as_str(), m.model.as_str()), ("http://192.168.2.7:1234", "bonsai-8b"));
+        assert_eq!((m.kind, m.key.as_deref()), (Kind::OpenAi, Some("sk-lm-1")));
     }
 }

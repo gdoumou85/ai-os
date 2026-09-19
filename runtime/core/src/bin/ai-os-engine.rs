@@ -1,6 +1,6 @@
 //! The engine as a long-running service on a private socket; front doors connect to it.
 use aios_core::engine::{Engine, HOUSEKEEPING_DIR};
-use aios_core::model::{Model, OllamaModel};
+use aios_core::model::{Model, RemoteModel};
 use aios_core::service;
 use aios_core::store::Store;
 use executor::admin::AdminWorker;
@@ -19,7 +19,7 @@ fn main() {
         let store = Store::open(&db).expect("open store");
         // One state for the whole process: the accessibility bus connection and the id table
         // outlive any one job. The look cap follows the model's own context (2a §4).
-        let llm = OllamaModel::from_env(&model);
+        let llm = RemoteModel::from_env(&model);
         let desktop = DesktopState::for_model(llm.context_tokens());
         Engine::new(store, llm, root, Some(db),
             Box::new(move |ws| (
