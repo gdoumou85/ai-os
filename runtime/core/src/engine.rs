@@ -124,10 +124,6 @@ fn normalize(text: &str) -> String {
     text.trim().to_lowercase().trim_end_matches(['.', '!', '?', ',']).trim().to_string()
 }
 
-fn words(t: &str) -> impl Iterator<Item = &str> {
-    t.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty())
-}
-
 pub fn is_stop(text: &str) -> bool {
     const STOP_PHRASES: [&str; 10] = [
         "stop", "cancel", "leave it", "abort", "never mind", "forget it",
@@ -842,7 +838,6 @@ mod tests {
     use super::*;
     use crate::moves::Move;
     use crate::testing::engine_with;
-    use crate::testing::Recorder;
 
     fn start(project: &str, creative: bool) -> Move {
         Move::Start { project: project.into(), new_project: true, description: "prime printer".into(), goal: "print ten primes".into(), creative, understood: format!("Starting a new project {project}"), skills: vec![], remember: None }
