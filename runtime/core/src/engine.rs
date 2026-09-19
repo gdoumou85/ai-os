@@ -177,6 +177,13 @@ pub fn is_undo(text: &str) -> bool {
 
 /// What to call a job in a line the user reads. A housekeeping job has no project, so
 /// `job.project` is the empty string — "Stopped the job in ." is not a sentence.
+/// What the model is told when its answer was not a move (the owner's LM Studio run, 2026-09-19:
+/// a thinking Qwen wrote `{"understood":…,"act":{…}}`, which the runner did not stop).
+fn not_a_move(allowed: &[&str], error: &str) -> String {
+    let moves = if allowed.is_empty() { String::new() } else { format!(", one of: {}", allowed.join(", ")) };
+    format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\"{moves}.", error.chars().take(120).collect::<String>())
+}
+
 fn display_name(job: &Job) -> &str {
     if job.housekeeping { "housekeeping" } else { &job.project }
 }
@@ -379,8 +386,23 @@ impl<M: Model> Engine<M> {
             return Ok(());
         }
         // Idle: the model decides — chat, or work.
-        let p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &self.store.recent_messages(4)?, text);
-        match self.model.next_move(&p)? {
+        let mut p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &self.store.recent_messages(4)?, text);
+        // An answer that is not a move gets one more try with the reason; a second one is said in
+        // plain words, never as "something went wrong".
+        let mv = match self.model.next_move(&p) {
+            Err(ModelError::BadJson(e)) => {
+                p.user.push_str(&format!("\n\n{}", not_a_move(&p.allowed, &e)));
+                match self.model.next_move(&p) {
+                    Err(ModelError::BadJson(_)) => {
+                        self.emit(Event::Said { text: "(I could not read my own answer twice — the model is not answering in the required format. Please say that again, or switch the model.)".into() });
+                        return Ok(());
+                    }
+                    r => r?,
+                }
+            }
+            r => r?,
+        };
+        match mv {
             Move::Reply { text, remember } => {
                 self.emit(Event::Said { text });
                 if let Some(r) = remember {
@@ -731,6 +753,7 @@ impl<M: Model> Engine<M> {
             job.rejections = 0;
             job.done_gated = 0;
             job.note_to_model = None;
+            if outcome.ok { job.replans = 0; }
             job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
             self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
             if outcome.ok {
@@ -774,6 +797,10 @@ impl<M: Model> Engine<M> {
                 // answering it correctly every time — would fail on the fourth.
                 job.done_gated = 0;
                 job.note_to_model = None;
+                // A step that worked is progress: the replan bound counts replans in a row without
+                // one (the owner's Django job, 2026-09-19, gave up after six replans spread over a
+                // job that was getting somewhere).
+                if outcome.ok { job.replans = 0; }
                 job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
                 self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
                 // Not gated on `outcome.ok`: a worker records an undo entry only when it really
@@ -843,7 +870,15 @@ impl<M: Model> Engine<M> {
             let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
             let mut p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
             p.image = self.image.take();
-            let mv = self.model.next_move(&p)?;
+            let mv = match self.model.next_move(&p) {
+                // A runner that let the model write outside the grammar: a rejected move like any
+                // other, told back to the model and bounded by the same two tries.
+                Err(ModelError::BadJson(e)) => {
+                    if self.reject(&mut job, &not_a_move(&p.allowed, &e))? { return Ok(()); }
+                    continue;
+                }
+                r => r?,
+            };
             let rejected = match (job.state, mv) {
                 (State::Asking, Move::Ask { questions, options }) | (State::Working, Move::Ask { questions, options }) | (State::Planning, Move::Ask { questions, options }) if !job.creative => {
                     if questions.is_empty() {
@@ -1270,6 +1305,45 @@ mod tests {
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
     }
 
+    /// The owner's LM Studio run (2026-09-19): a thinking Qwen answered `{"understood":…,"act":{…}}`
+    /// with no `move`, the turn ended on "something went wrong" and the job sat open until he typed.
+    /// An answer that is not a move is a rejected move: said back to the model, tried again.
+    #[test]
+    fn an_unreadable_answer_is_sent_back_to_the_model_and_the_job_goes_on() {
+        let (mut e, _, _) = engine_with(vec![
+            start("p", false), Move::Ask { questions: vec!["Which language?".into()], options: vec![] },
+            plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "unreadable-once");
+        e.handle("make p").unwrap();
+        e.model.unreadable.set(1);
+        let out = e.handle("Python").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        let prompts = e.model.prompts.borrow();
+        let retry = &prompts[3].user;
+        assert!(retry.contains("not a move") && retry.contains("\"move\""), "the retry says what was wrong: {retry}");
+    }
+
+    #[test]
+    fn two_unreadable_answers_in_a_row_end_the_job_and_say_why() {
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()], options: vec![] }], "unreadable-twice");
+        e.handle("make p").unwrap();
+        e.model.unreadable.set(2);
+        let out = e.handle("yes").unwrap();
+        assert!(out.last().unwrap().contains("gave up"), "{out:?}");
+        assert!(e.open_job().unwrap().is_none(), "never left half-open");
+    }
+
+    #[test]
+    fn the_front_door_asks_again_once_when_the_answer_is_not_a_move() {
+        let (mut e, _, _) = engine_with(vec![Move::Reply { text: "Hello.".into(), remember: None }], "unreadable-door");
+        e.model.unreadable.set(1);
+        assert_eq!(e.handle("hi").unwrap(), vec!["Hello.".to_string()]);
+        assert!(e.model.prompts.borrow()[1].user.contains("not a move"));
+        e.model.unreadable.set(2);
+        let out = e.handle("hi again").unwrap();
+        assert!(out[0].contains("could not read"), "a plain line, not an error: {out:?}");
+    }
+
     #[test]
     fn step_cap_fails_the_job() {
         let mut moves = vec![start("p", true), plan()];
@@ -1459,6 +1533,18 @@ mod tests {
         let out = e2.handle("python").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         assert!(e2.open_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn replans_spread_over_a_job_that_makes_progress_never_add_up_to_giving_up() {
+        let mut moves = vec![Move::Housekeep { goal: "set up".into(), understood: "Setting up".into(), remember: None }, plan()];
+        for i in 0..4 { moves.push(Move::Replan { steps: vec![format!("first try {i}")], why: "x".into() }); }
+        moves.push(act(1, run("worked")));
+        for i in 0..4 { moves.push(Move::Replan { steps: vec![format!("second try {i}")], why: "x".into() }); }
+        moves.push(done(run("true")));
+        let (mut e, _, _) = engine_with(moves, "replan-progress");
+        let out = e.handle("set it up").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "8 replans, but never 6 in a row: {out:?}");
     }
 
     #[test]

@@ -30,10 +30,12 @@ pub trait Model {
 }
 
 /// Scripted moves for tests; records every prompt it was given.
-pub struct FakeModel { queue: RefCell<std::collections::VecDeque<Move>>, pub prompts: RefCell<Vec<Prompt>> }
+/// `unreadable`: how many of the next answers come back as text that is not a move, the way a
+/// runner that does not enforce the grammar answers (LM Studio with a thinking Qwen, 2026-09-19).
+pub struct FakeModel { queue: RefCell<std::collections::VecDeque<Move>>, pub prompts: RefCell<Vec<Prompt>>, pub unreadable: std::cell::Cell<u32> }
 
 impl FakeModel {
-    pub fn new(moves: Vec<Move>) -> Self { Self { queue: RefCell::new(moves.into()), prompts: RefCell::new(vec![]) } }
+    pub fn new(moves: Vec<Move>) -> Self { Self { queue: RefCell::new(moves.into()), prompts: RefCell::new(vec![]), unreadable: Default::default() } }
 }
 
 impl Model for FakeModel {
@@ -43,6 +45,10 @@ impl Model for FakeModel {
         // answers "exhausted" and keeps its next move for the next job's prompt.
         if prompt.allowed == ["learn"] && !matches!(self.queue.borrow().front(), Some(Move::Learn { .. })) {
             return Err(ModelError::Exhausted);
+        }
+        if self.unreadable.get() > 0 {
+            self.unreadable.set(self.unreadable.get() - 1);
+            return Err(ModelError::BadJson(r#"missing field `move`: {"understood":"…","act":{}}"#.into()));
         }
         self.queue.borrow_mut().pop_front().ok_or(ModelError::Exhausted)
     }
