@@ -44,7 +44,7 @@ fn write_private(path: &str, text: &str) -> Result<(), String> {
 }
 
 /// The cloud accounts card: each account with Remove, and a key box with a button per provider.
-/// ponytail: NVIDIA and Ollama; the other OpenAI-style providers (Groq, OpenRouter…) get a button
+/// ponytail: NVIDIA, OpenRouter and Ollama; the other OpenAI-style providers (Groq, Mistral…) get a button
 /// each once someone has a key to test them with.
 fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gtk::Label) -> gtk::Widget {
     let tsv = cloud_accounts();
@@ -69,13 +69,14 @@ fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gtk::Label) -
     }
     let add = gtk::Label::new(Some("Add an account: paste its key here and press its provider.
 • NVIDIA: make a key at build.nvidia.com (sign in, then Get API Key).
+• OpenRouter: openrouter.ai → Keys (its free models end in \":free\").
 • Ollama: ollama.com → Settings → Keys."));
     add.set_xalign(0.0); add.set_wrap(true);
     let entry = gtk::PasswordEntry::new(); entry.set_show_peek_icon(true);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let close = gtk::Button::with_label("Close"); close.set_halign(gtk::Align::Start);
     b.append(&add); b.append(&entry); b.append(&row); b.append(&close);
-    for provider in [aios_rail::models::NVIDIA, aios_rail::models::OLLAMA] {
+    for provider in [aios_rail::models::NVIDIA, aios_rail::models::OPENROUTER, aios_rail::models::OLLAMA] {
         let go = gtk::Button::with_label(&format!("{} key", provider.name));
         row.append(&go);
         let (col, me, tx, st, entry) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), entry.clone());
