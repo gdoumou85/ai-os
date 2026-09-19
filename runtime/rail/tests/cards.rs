@@ -1,5 +1,5 @@
 use aios_proto::*;
-use aios_rail::cards::{Button, CardKind, Cards, Change};
+use aios_rail::cards::{busy_after, Button, CardKind, Cards, Change};
 
 fn j() -> String { "j1".into() }
 
@@ -112,4 +112,14 @@ fn clear_keeps_only_the_running_job_and_what_it_waits_on() {
     cards.apply(&Event::Done { job_id: j(), text: "finished".into(), check: None, files: vec![], windows: vec![] });
     let CardKind::Building { collapsed, .. } = &cards.list[0].kind else { panic!() };
     assert!(collapsed);
+}
+
+#[test]
+fn the_spinner_runs_from_your_message_until_the_turn_comes_back() {
+    assert_eq!(busy_after(&Event::You { text: "make p".into() }), Some(true));
+    assert_eq!(busy_after(&Event::Step { job_id: j(), plan_step: 1, text: "wrote a".into(), ok: true }), Some(true));
+    assert_eq!(busy_after(&Event::NeedsOk { job_id: j(), what: "x".into(), why: "y".into() }), Some(false));
+    assert_eq!(busy_after(&Event::Said { text: "hi".into() }), Some(false));
+    assert_eq!(busy_after(&Event::Error { text: "bad".into() }), Some(false));
+    assert_eq!(busy_after(&Event::State { job: None }), None);
 }

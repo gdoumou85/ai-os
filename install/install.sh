@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Adds the AI OS to an Ubuntu 26.04 desktop, for the user who runs it (desktop design §9.2).
-#   bash install.sh [--model-url http://host:port] [--model NAME] [--model-key KEY]
+#   bash install.sh [--model-url http://host:port] [--model NAME] [--model-key KEY] [--update]
 # With no --model-url it looks for Ollama and LM Studio on the home network and asks which to use.
 # Run it as yourself, not as root: it asks sudo for the root steps. Safe to run again.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-model=""; model_url=""; model_key=""
+model=""; model_url=""; model_key=""; update=0
 while [ $# -gt 0 ]; do case "$1" in
   --model-url) model_url=${2:?--model-url needs a value}; shift 2 ;;
   --model)     model=${2:?--model needs a value}; shift 2 ;;
   --model-key) model_key=${2:?--model-key needs a value}; shift 2 ;;
+  --update)    update=1; shift ;;
   *) echo "unknown option: $1" >&2; exit 2 ;;
 esac; done
 [ "$(id -u)" -ne 0 ] || { echo "run this as your own user, not as root" >&2; exit 1; }
@@ -92,6 +93,18 @@ sudo sed -i 's/\r$//' /usr/local/libexec/ai-os-admin /usr/local/bin/ai-os-check 
   /usr/share/applications/org.aios.Rail.desktop /etc/xdg/autostart/org.aios.Rail.desktop
 
 echo "== the model"
+# --update (the rail's Update now): the model chosen last time, read back from the unit and the
+# key file, so an update asks nothing but the password.
+saved_kind=""; native_update=0
+if [ "$update" = 1 ]; then
+  unit_file="$HOME/.config/systemd/user/ai-os-engine.service"
+  [ -f "$unit_file" ] || { echo "nothing to update: the AI OS is not installed for $owner yet — run the install command without --update" >&2; exit 1; }
+  saved() { sed -n "s/^Environment=$1=//p" "$unit_file" | tail -1; }
+  model=${model:-$(saved AI_OS_MODEL)}; model_url=${model_url:-$(saved AI_OS_MODEL_URL)}; saved_kind=$(saved AI_OS_MODEL_KIND)
+  model_key=${model_key:-$(sed -n 's/^AI_OS_MODEL_KEY=//p' "$HOME/.config/ai-os/model.env" 2>/dev/null || true)}
+  [ -n "$model_url" ] || native_update=1
+  echo "keeping ${model:-the model} ${model_url:+at $model_url}"
+fi
 # ai-os-find prints one model per line: kind<TAB>url<TAB>model, or kind<TAB>url<TAB>-<TAB>needs-key.
 # The key goes to it through the environment, never on a command line anyone can read with ps.
 find_models() { AI_OS_MODEL_KEY="$model_key" "$here/bin/ai-os-find" "$@" || true; }
@@ -120,8 +133,15 @@ pick() {   # pick <offer-native> <line>...
 }
 if [ -n "$model_url" ]; then
   mapfile -t found < <(find_models --url "$model_url")
+  if [ ${#found[@]} -eq 0 ] && [ "$update" = 1 ]; then
+    # An update must not fail because the model's machine is switched off right now.
+    echo "warning: $model_url is not answering right now; keeping it as it was" >&2
+    found=("${saved_kind:-ollama}"$'	'"$model_url"$'	'"$model")
+  fi
   [ ${#found[@]} -gt 0 ] || { echo "nothing answered at $model_url as Ollama or LM Studio — check the address, and that the runner accepts connections from the network" >&2; exit 1; }
   if [ -n "$model" ] || [ ${#found[@]} -eq 1 ]; then line=${found[0]}; else line=$(pick 0 "${found[@]}") || exit 1; fi
+elif [ "$native_update" = 1 ]; then
+  line=native
 else
   echo "looking for Ollama and LM Studio on your network — a few seconds"
   mapfile -t found < <(find_models)

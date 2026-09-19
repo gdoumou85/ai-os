@@ -33,6 +33,19 @@ pub struct Card {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change { Added(usize), Updated(usize), Line(String) }
 
+/// Whether the AI is busy after this event, for the spinner (the owner, 2026-09-19: "there is not
+/// any sort of sign that the AI is processing or it's stopped"). Your own message and any step of
+/// a job mean it is working; anything that hands the turn back to the person means it is not.
+/// `None`: this event says nothing either way.
+pub fn busy_after(ev: &Event) -> Option<bool> {
+    match ev {
+        Event::You { .. } | Event::Understood { .. } | Event::Plan { .. } | Event::Step { .. } => Some(true),
+        Event::Said { .. } | Event::NeedsAnswer { .. } | Event::NeedsOk { .. } | Event::Done { .. } | Event::Failed { .. }
+        | Event::Stopped { .. } | Event::Undone { .. } | Event::Error { .. } => Some(false),
+        Event::Busy { .. } | Event::State { .. } => None,
+    }
+}
+
 #[derive(Default)]
 pub struct Cards { pub list: Vec<Card>, building: Option<usize> }
 

@@ -89,6 +89,18 @@ fn on_the_desktop(action: &Action) -> bool {
         | Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. })
 }
 
+/// An `ask` that is really a request for permission. The owner's run (2026-09-19): "Is it okay
+/// to proceed with installing the necessary packages?" three times over, each yes answered with
+/// the same question and never an install. The machine asks for a yes itself (decision 9), so
+/// the model is sent back to take the step. Whole words, so "look to" is not "ok to".
+fn asks_permission(q: &str) -> bool {
+    let words: String = q.to_lowercase().chars().map(|c| if c.is_alphanumeric() || c == ''' { c } else { ' ' }).collect();
+    let padded = format!(" {} ", words.split_whitespace().collect::<Vec<_>>().join(" "));
+    ["okay to", "ok to", "all right to", "alright to", "may i", "shall i go", "go ahead", "your permission",
+     "should i proceed", "can i proceed", "shall i proceed", "want me to proceed", "should i go ahead"]
+        .iter().any(|p| padded.contains(&format!(" {p} ")))
+}
+
 /// The windows a job worked: those it looked into, in first-seen order, from the steps that
 /// succeeded (2a §7). Ids come only from a windowed look, so nothing is pressed, typed or read in
 /// a window that was never looked at — and an `open_app` desktop-entry id is not a window's name.
@@ -827,6 +839,8 @@ impl<M: Model> Engine<M> {
                 (State::Asking, Move::Ask { questions }) | (State::Working, Move::Ask { questions }) | (State::Planning, Move::Ask { questions }) if !job.creative => {
                     if questions.is_empty() {
                         Some("ask needs at least one question".to_string())
+                    } else if questions.iter().any(|q| asks_permission(q)) {
+                        Some("never ask for permission: take the step itself — where it needs the user's yes, the machine stops it and asks them".to_string())
                     } else {
                         job.pending_questions = questions.clone();
                         job.state = State::WaitingAnswer;
@@ -2256,6 +2270,18 @@ mod tests {
         let ev = e.handle_events("take my editor").unwrap();
         let Event::Done { windows, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
         assert_eq!(windows, &vec!["Text Editor".to_string()]);
+    }
+
+    #[test]
+    fn a_question_that_only_asks_for_permission_is_sent_back() {
+        for q in ["Is it okay to proceed with installing the necessary packages?", "May I install Django?",
+                  "Shall I go ahead?", "Do you want me to proceed?", "OK to delete the old files?"] {
+            assert!(asks_permission(q), "{q}");
+        }
+        for q in ["Which framework do you prefer, Django or Flask?", "Should the first version look to the customer side?",
+                  "What should the site be called?", "Do you want a dark theme?"] {
+            assert!(!asks_permission(q), "{q}");
+        }
     }
 
     fn screen_job() -> Move { Move::Housekeep { goal: "use the screen".into(), understood: "Using the screen".into(), remember: None } }

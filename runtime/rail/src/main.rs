@@ -19,7 +19,7 @@ fn socket_path() -> PathBuf {
     PathBuf::from(dir).join("ai-os.sock")
 }
 
-enum FromNet { Event(Event), Down, Up }
+enum FromNet { Event(Event), Down, Up, Update(String) }
 
 /// The socket on its own thread: reconnects every 3 s; every event goes to a plain std channel
 /// that the GTK loop drains on a timer (gtk4-rs 0.11 has no glib channel; std::mpsc + a 50 ms
@@ -56,6 +56,35 @@ fn net_thread(to_ui: Sender<FromNet>) -> Sender<String> {
         }
     });
     say_tx
+}
+
+/// The terminal that runs the update: Ubuntu 26.04's Ptyxis, else GNOME Terminal, else whatever
+/// the system calls its terminal.
+fn run_in_terminal(cmd: &str) {
+    let tries: [(&str, &[&str]); 3] = [("ptyxis", &["--", "bash", "-c"]), ("gnome-terminal", &["--", "bash", "-c"]), ("x-terminal-emulator", &["-e", "bash", "-c"])];
+    for (prog, args) in tries {
+        if std::process::Command::new(prog).args(args).arg(cmd).spawn().is_ok() { return; }
+    }
+}
+
+/// The card that offers a newer version (update.rs). Not one of `Cards`: it is about the AI OS
+/// itself, not the conversation, so Clear leaves it and it goes when answered.
+fn update_card(version: &str, column: &gtk::Box) -> gtk::Widget {
+    let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    b.add_css_class("card"); b.add_css_class("ask");
+    let title = gtk::Label::new(Some("Update available")); title.add_css_class("title"); title.set_xalign(0.0);
+    let text = gtk::Label::new(Some(&format!("A new version of the AI OS ({version}) is available. Updating keeps your model and settings, and asks for your password in a terminal."))); text.set_xalign(0.0); text.set_wrap(true);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let now = gtk::Button::with_label("Update now");
+    let later = gtk::Button::with_label("Later");
+    row.append(&now); row.append(&later);
+    b.append(&title); b.append(&text); b.append(&row);
+    let w: gtk::Widget = b.upcast();
+    let (c1, w1) = (column.clone(), w.clone());
+    now.connect_clicked(move |_| { run_in_terminal(&aios_rail::update::update_command()); c1.remove(&w1); });
+    let (c2, w2) = (column.clone(), w.clone());
+    later.connect_clicked(move |_| c2.remove(&w2));
+    w
 }
 
 fn open_path(path: &str) {
@@ -157,7 +186,11 @@ fn main() {
         let status = gtk::Label::new(Some("Connecting to the AI OS service…")); status.add_css_class("status"); status.set_xalign(0.0);
         let entry = gtk::Entry::builder().placeholder_text("Tell the AI what you want…").margin_start(8).margin_end(8).margin_bottom(8).build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        root.append(&scroll); root.append(&status); root.append(&entry);
+        // The spinner beside the status line: turning while the AI works (cards::busy_after).
+        let spinner = gtk::Spinner::new(); spinner.set_margin_start(12);
+        let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        status_row.append(&spinner); status_row.append(&status);
+        root.append(&scroll); root.append(&status_row); root.append(&entry);
         win.set_child(Some(&root));
 
         // Stay at the bottom, but only once GTK has allocated the new card: `upper` grows when the
@@ -171,6 +204,9 @@ fn main() {
         });
 
         let (to_ui, from_net) = channel::<FromNet>();
+        // Once per login, off the GTK thread: a slow network never holds the window up.
+        let up = to_ui.clone();
+        std::thread::spawn(move || { if let Some(v) = aios_rail::update::check() { let _ = up.send(FromNet::Update(v)); } });
         let say = net_thread(to_ui);
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
@@ -185,13 +221,19 @@ fn main() {
         let s = say.clone();
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(t); e.set_text(""); } });
 
-        let (cards2, widgets2, column2, status2, say2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone());
+        let (cards2, widgets2, column2, status2, say2, spinner2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone());
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
                 match msg {
                     FromNet::Up => status2.set_text(""),
-                    FromNet::Down => status2.set_text("The AI OS service is not running — retrying…"),
+                    FromNet::Update(v) => column2.prepend(&update_card(&v, &column2)),
+                    FromNet::Down => { spinner2.stop(); status2.set_text("The AI OS service is not running — retrying…"); }
                     FromNet::Event(ev) => {
+                        match aios_rail::cards::busy_after(&ev) {
+                            Some(true) => { spinner2.start(); status2.set_text("The AI is thinking…"); }
+                            Some(false) => { spinner2.stop(); status2.set_text(""); }
+                            None => {}
+                        }
                         // `apply` on its own line: the RefMut must end before `render` borrows.
                         let changes = cards2.borrow_mut().apply(&ev);
                         for ch in changes {
