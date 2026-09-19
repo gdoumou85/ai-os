@@ -772,12 +772,16 @@ impl<M: Model> Engine<M> {
         let trailing = job.steps.iter().rev().take_while(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key).count();
         // A second look at the screen is waiting for a page or a program to come up (the owner's
         // run, 2026-09-19); a third in a row is not looking at what the first two showed.
-        let repeatable = matches!(action, Action::Press { .. } | Action::Type { .. } | Action::ScreenLook { .. }) && trailing < 2;
+        // A window look the same: the refusal below said "look at the window", which refused
+        // every look after it until the job gave up.
+        let repeatable = matches!(action, Action::Press { .. } | Action::Type { .. } | Action::ScreenLook { .. } | Action::Look { .. }) && trailing < 2;
         if !is_check && !repeatable && trailing >= 1 {
             // Pointed at the eye that can see what the action did: `look` sees no web page, so
             // "look at the window" after a screen click sent the owner's run round in circles.
             return self.reject(job, if matches!(action, Action::ScreenLook { .. }) {
                 "you have looked at the screen twice and it is the same: act on what it shows (enlarge a square, click a spot) or replan"
+            } else if matches!(action, Action::Look { .. }) {
+                "you have looked at this window twice and it is the same: act on what it shows (press, type, read), look at the screen if the page is missing, or replan"
             } else if matches!(action, Action::ScreenClick { .. } | Action::ScreenType { .. }) {
                 "that exact action already worked; screen_look to see what it did, then take the next step"
             } else if on_the_desktop(&action) {
@@ -2468,6 +2472,19 @@ mod tests {
         e.handle_events("wait for it").unwrap();
         assert_eq!(rec.desktop_calls.borrow().len(), 3, "two looks and the check: the third look in a row was sent back");
         assert!(e.model.prompts.borrow()[5].user.contains("you have looked at the screen twice"));
+    }
+
+    /// The owner's run (2026-09-19): a repeated window look was refused with "look at the window",
+    /// so every look after it was refused too and the job gave up. A second look waits for the
+    /// window to fill; a third is sent back with words that do not ask for a fourth.
+    #[test]
+    fn a_window_may_be_looked_at_twice_and_the_third_is_not_told_to_look() {
+        let look = || act(1, Action::Look { window: Some("Firefox".into()), find: None });
+        let (mut e, rec, _) = engine_with(vec![screen_job(), plan(), look(), look(), look(), done(Action::ScreenLook { cell: None })], "window-look-twice");
+        e.handle_events("wait for firefox").unwrap();
+        assert_eq!(rec.desktop_calls.borrow().len(), 3, "two looks and the check: the third look in a row was sent back");
+        let p = &e.model.prompts.borrow()[5].user;
+        assert!(p.contains("you have looked at this window twice") && !p.contains("look at the window to see"), "{p}");
     }
 
     fn screen_job() -> Move { Move::Housekeep { goal: "use the screen".into(), understood: "Using the screen".into(), remember: None } }

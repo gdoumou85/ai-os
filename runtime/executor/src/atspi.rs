@@ -86,7 +86,29 @@ fn role_name(role: u32) -> &'static str {
 /// Where `open_app` will look for a `.desktop` file. The system folders only: a launcher the AI
 /// could write to its own home (`/home/ai/.local/share/applications`) would run whatever it
 /// named, as user `ai`, outside the sandbox — `open_app` is the one action that starts a program.
-const APP_DIRS: [&str; 2] = ["/usr/share/applications", "/usr/local/share/applications"];
+/// Snap and Flatpak keep theirs under `/var/lib`, owned by root: Ubuntu's Firefox is a snap, and
+/// without them the owner's run found no Firefox and tried to install one.
+const APP_DIRS: [&str; 4] = ["/usr/share/applications", "/usr/local/share/applications",
+    "/var/lib/snapd/desktop/applications", "/var/lib/flatpak/exports/share/applications"];
+
+/// The desktop id `open_app` launches for `name`: the entry itself, or a snap's `<name>_<name>`
+/// (`firefox` is `firefox_firefox`). None found: the installed ids that contain the name, so the
+/// model picks one instead of installing a second copy.
+fn find_app(dirs: &[&str], name: &str) -> Result<String, String> {
+    for id in [name.to_string(), format!("{name}_{name}")] {
+        if dirs.iter().any(|d| std::path::Path::new(d).join(format!("{id}.desktop")).is_file()) { return Ok(id); }
+    }
+    let want = name.to_lowercase();
+    let mut near: Vec<String> = dirs.iter().filter_map(|d| std::fs::read_dir(d).ok()).flatten().flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".desktop").map(str::to_string))
+        .filter(|id| id.to_lowercase().contains(&want)).collect();
+    near.sort(); near.dedup();
+    Err(if near.is_empty() {
+        format!("no application called {name} is installed; look with no window to see what is open, or ask the user before installing anything")
+    } else {
+        format!("no application is called exactly {name}; installed ones with that name: {} — open_app one of those", near.join(", "))
+    })
+}
 
 const REGISTRY: &str = "org.a11y.atspi.Registry";
 const ROOT: &str = "/org/a11y/atspi/accessible/root";
@@ -323,16 +345,16 @@ impl DesktopWorker {
         match action {
             Action::OpenApp { name, visible } => {
                 if !valid_app_name(name) { return Err(format!("invalid application name: {name}")); }
-                let entry = format!("{name}.desktop");
-                if !APP_DIRS.iter().any(|d| std::path::Path::new(d).join(&entry).is_file()) {
-                    return Err(format!("no application called {name} is installed (no {entry} in the system application folders)"));
-                }
+                let id = find_app(&APP_DIRS, name)?;
+                // gtk-launch resolves the id itself: only in the folders above, never the AI's home.
+                let data_dirs = APP_DIRS.map(|d| d.trim_end_matches("/applications")).join(":");
                 let display = if *visible { &displays.visible } else { &displays.invisible };
                 let conn = st.conn()?.clone();
                 let before = windows(&conn)?.len();
                 // `.status()`, not `.spawn()`: `gtk-launch` hands the app to the session and exits
                 // at once, so a spawned one is a zombie per launch for the life of the engine.
-                let ran = std::process::Command::new("gtk-launch").arg(name)
+                let ran = std::process::Command::new("gtk-launch").arg(&id)
+                    .env("XDG_DATA_DIRS", &data_dirs).env("XDG_DATA_HOME", APP_DIRS[0].trim_end_matches("/applications"))
                     .env("WAYLAND_DISPLAY", display).env("GNOME_ACCESSIBILITY", "1").env_remove("DISPLAY")
                     .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
                     .status().map_err(|e| format!("could not launch {name}: {e}"))?;
@@ -485,11 +507,26 @@ mod tests {
     /// would run as user `ai` with nothing of the sandbox around it.
     #[test]
     fn a_desktop_entry_is_only_ever_read_out_of_a_folder_the_ai_cannot_write() {
-        assert_eq!(APP_DIRS, ["/usr/share/applications", "/usr/local/share/applications"]);
         for d in APP_DIRS {
-            assert!(d.starts_with("/usr/"), "{d} is not a system folder");
+            assert!(d.starts_with("/usr/") || d.starts_with("/var/lib/"), "{d} is not a system folder");
             assert!(!d.contains("/home/") && !d.contains(".local"), "{d} is somewhere the AI can write");
         }
+    }
+
+    /// The owner's run: Ubuntu's Firefox is the snap entry `firefox_firefox`, "firefox" found
+    /// nothing, and the model set out to install Firefox.
+    #[test]
+    fn a_snap_answers_to_its_short_name_and_a_miss_names_what_is_installed() {
+        let d = std::env::temp_dir().join(format!("aios-apps-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["firefox_firefox.desktop", "org.gnome.Calculator.desktop"] { std::fs::write(d.join(f), "").unwrap(); }
+        let dirs = [d.to_str().unwrap()];
+        assert_eq!(find_app(&dirs, "firefox").unwrap(), "firefox_firefox");
+        assert_eq!(find_app(&dirs, "org.gnome.Calculator").unwrap(), "org.gnome.Calculator");
+        let e = find_app(&dirs, "calculator").unwrap_err();
+        assert!(e.contains("org.gnome.Calculator") && e.contains("open_app one of those"), "{e}");
+        assert!(find_app(&dirs, "blender").unwrap_err().contains("ask the user before installing"));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     /// "look first" was true and useless: the model had just looked — at the window *list*, which
