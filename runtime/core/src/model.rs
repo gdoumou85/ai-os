@@ -190,6 +190,13 @@ impl Model for RemoteModel {
                 *self.url.borrow_mut() = moved.url.clone();
                 self.ask_at(&moved.url, prompt).map_err(|(_, e)| e)
             }
+            // A read that timed out, once: the owner's VM slept mid-request and woke to a dead
+            // wait, and LM Studio reloading an unloaded model can outlast one wait too.
+            // ponytail: matched on ureq's wording; untested, since a test would sit out 180 s.
+            Err((false, ModelError::Http(e))) if e.contains("timed out") => {
+                eprintln!("the model did not answer in time ({e}); asking once more");
+                self.ask_at(&url, prompt).map_err(|(_, e)| e)
+            }
             answer => answer.map_err(|(_, e)| e),
         }
     }
