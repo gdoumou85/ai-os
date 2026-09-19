@@ -56,6 +56,27 @@ pub enum Action {
         #[serde(default)]
         visible: bool,
     },
+    // The screen fallback (2b design): pixels, for what the controls above cannot reach. Aiming
+    // is a grid then a zoom, so a click names a cell it has just looked into and a spot inside it.
+    /// No cell: the whole screen under a numbered 8 × 6 grid. A cell: that cell enlarged under 4 × 4.
+    ScreenLook {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cell: Option<u32>,
+    },
+    /// `name` is what the model says it is clicking — its own reading of the screen, for the risk rule.
+    ScreenClick {
+        cell: u32,
+        spot: u32,
+        name: String,
+        #[serde(default)]
+        double: bool,
+    },
+    /// Into whatever has the focus; Enter after when asked.
+    ScreenType {
+        text: String,
+        #[serde(default)]
+        enter: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

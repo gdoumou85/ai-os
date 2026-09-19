@@ -14,11 +14,13 @@ pub struct Outcome {
     pub detail: String,
     /// `Some` only when the action actually changed something reversible.
     pub undo: Option<UndoEntry>,
+    /// A picture for the model's next turn: the screen hand's look (2b).
+    pub image: Option<Vec<u8>>,
 }
 
 impl Outcome {
-    pub fn ok(detail: impl Into<String>) -> Self { Self { ok: true, detail: detail.into(), undo: None } }
-    pub fn err(detail: impl Into<String>) -> Self { Self { ok: false, detail: detail.into(), undo: None } }
+    pub fn ok(detail: impl Into<String>) -> Self { Self { ok: true, detail: detail.into(), undo: None, image: None } }
+    pub fn err(detail: impl Into<String>) -> Self { Self { ok: false, detail: detail.into(), undo: None, image: None } }
     pub fn with_undo(mut self, entry: UndoEntry) -> Self {
         self.undo = Some(entry);
         self

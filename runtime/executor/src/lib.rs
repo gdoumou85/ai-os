@@ -9,4 +9,6 @@ pub mod undo;
 pub mod admin;
 pub mod desktop;
 pub mod atspi;
+pub mod screen;
+pub mod awake;
 pub mod executor;
