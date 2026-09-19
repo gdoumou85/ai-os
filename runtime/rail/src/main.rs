@@ -136,6 +136,10 @@ const CSS: &str = "
 ";
 
 fn main() {
+    // The software renderer, unless the person chose one: GTK's GPU renderers left new cards
+    // undrawn until a scroll in the owner's VirtualBox VM, and a column of text cards gains
+    // nothing from the GPU on real hardware either.
+    if std::env::var_os("GSK_RENDERER").is_none() { std::env::set_var("GSK_RENDERER", "cairo"); }
     let app = gtk::Application::builder().application_id("org.aios.Rail").build();
     app.connect_activate(|app| {
         let css = gtk::CssProvider::new(); css.load_from_string(CSS);
@@ -159,7 +163,12 @@ fn main() {
         // Stay at the bottom, but only once GTK has allocated the new card: `upper` grows when the
         // child is laid out, which is after the event drain returns, so scrolling there left the
         // newest card below the fold until something else moved the view.
-        scroll.vadjustment().connect_changed(|a| a.set_value(a.upper() - a.page_size()));
+        // Moved on the next idle rather than inside `changed`: setting the value while GTK is still
+        // laying the card out left the view drawn stale until the person scrolled.
+        scroll.vadjustment().connect_changed(|a| {
+            let a = a.clone();
+            glib::idle_add_local_once(move || a.set_value(a.upper() - a.page_size()));
+        });
 
         let (to_ui, from_net) = channel::<FromNet>();
         let say = net_thread(to_ui);
