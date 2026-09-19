@@ -753,6 +753,7 @@ impl<M: Model> Engine<M> {
             job.rejections = 0;
             job.done_gated = 0;
             job.note_to_model = None;
+            if outcome.ok { job.replans = 0; }
             job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
             self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
             if outcome.ok {
@@ -796,6 +797,10 @@ impl<M: Model> Engine<M> {
                 // answering it correctly every time — would fail on the fourth.
                 job.done_gated = 0;
                 job.note_to_model = None;
+                // A step that worked is progress: the replan bound counts replans in a row without
+                // one (the owner's Django job, 2026-09-19, gave up after six replans spread over a
+                // job that was getting somewhere).
+                if outcome.ok { job.replans = 0; }
                 job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
                 self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
                 // Not gated on `outcome.ok`: a worker records an undo entry only when it really
@@ -1528,6 +1533,18 @@ mod tests {
         let out = e2.handle("python").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
         assert!(e2.open_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn replans_spread_over_a_job_that_makes_progress_never_add_up_to_giving_up() {
+        let mut moves = vec![Move::Housekeep { goal: "set up".into(), understood: "Setting up".into(), remember: None }, plan()];
+        for i in 0..4 { moves.push(Move::Replan { steps: vec![format!("first try {i}")], why: "x".into() }); }
+        moves.push(act(1, run("worked")));
+        for i in 0..4 { moves.push(Move::Replan { steps: vec![format!("second try {i}")], why: "x".into() }); }
+        moves.push(done(run("true")));
+        let (mut e, _, _) = engine_with(moves, "replan-progress");
+        let out = e.handle("set it up").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "8 replans, but never 6 in a row: {out:?}");
     }
 
     #[test]
