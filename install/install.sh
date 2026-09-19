@@ -99,7 +99,12 @@ saved_kind=""; native_update=0
 if [ "$update" = 1 ]; then
   unit_file="$HOME/.config/systemd/user/ai-os-engine.service"
   [ -f "$unit_file" ] || { echo "nothing to update: the AI OS is not installed for $owner yet — run the install command without --update" >&2; exit 1; }
-  saved() { sed -n "s/^Environment=$1=//p" "$unit_file" | tail -1; }
+  # What the engine runs with now — the chat window's Model button writes a drop-in over the
+  # unit, so the unit file alone can be out of date. The file is the fallback.
+  env_now=$(systemctl --user show ai-os-engine.service -p Environment --value 2>/dev/null | tr ' ' '\n' || true)
+  saved() { { printf '%s\n' "$env_now" | sed -n "s/^$1=//p"; sed -n "s/^Environment=$1=//p" "$unit_file"; } | sed -n 1p; }
+  # `sed -n 1p`, not `head -1`: head leaves early, and under pipefail the SIGPIPE it hands the
+  # writers would stop the whole installer here.
   model=${model:-$(saved AI_OS_MODEL)}; model_url=${model_url:-$(saved AI_OS_MODEL_URL)}; saved_kind=$(saved AI_OS_MODEL_KIND)
   model_key=${model_key:-$(sed -n 's/^AI_OS_MODEL_KEY=//p' "$HOME/.config/ai-os/model.env" 2>/dev/null || true)}
   [ -n "$model_url" ] || native_update=1
@@ -165,6 +170,11 @@ if [ "$line" != native ]; then
     *$'\n'"$model"$'\n'*) ;;
     *) echo "warning: $model_url does not list $model — the AI will say so until it does" >&2 ;;
   esac
+  # Names and addresses come off the network and go into a unit file: plain characters only, so
+  # none can smuggle in a line of its own (the chat window's Model button checks the same).
+  for v in "$model" "$model_url"; do
+    [[ $v =~ ^[A-Za-z0-9._:/@+-]+$ ]] || { echo "refusing an odd model name or address: $v" >&2; exit 1; }
+  done
   echo "using $model at $model_url"
   [ "$kind" = ollama ] || echo "in LM Studio, load $model with a context length of at least 8192"
   url_line="Environment=AI_OS_MODEL_URL=$model_url"$'\n'"Environment=AI_OS_MODEL_KIND=$kind"
@@ -199,6 +209,9 @@ unit=${unit//@MODEL@/"$model"}
 unit=${unit//@MODEL_URL_LINE@/"$url_line"}
 printf '%s\n' "$unit" > "$HOME/.config/systemd/user/ai-os-engine.service"
 sed -i 's/\r$//' "$HOME/.config/systemd/user/ai-os-engine.service"
+# The chat window's Model choice was folded into the unit above (an update reads it back first),
+# so its drop-in would only shadow what was just chosen.
+rm -f "$HOME/.config/systemd/user/ai-os-engine.service.d/model.conf"
 # The LM Studio key: out of the unit (which any user can read) and in a file only you can.
 install -d -m 0700 "$HOME/.config/ai-os"
 if [ -n "$model_key" ]; then
