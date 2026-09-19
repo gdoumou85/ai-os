@@ -386,7 +386,8 @@ impl<M: Model> Engine<M> {
             return Ok(());
         }
         // Idle: the model decides — chat, or work.
-        let mut p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &self.store.recent_messages(4)?, text);
+        let notebooks = crate::notes::notebooks(self.store.conn())?;
+        let mut p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &notebooks, &self.store.recent_messages(4)?, text);
         // An answer that is not a move gets one more try with the reason; a second one is said in
         // plain words, never as "something went wrong".
         let mv = match self.model.next_move(&p) {
