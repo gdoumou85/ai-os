@@ -7,6 +7,7 @@ pub mod find;
 pub mod job;
 pub mod model;
 pub mod moves;
+pub mod notes;
 pub mod prompt;
 pub mod schema;
 pub mod service;

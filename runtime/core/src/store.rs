@@ -23,6 +23,9 @@ impl Store {
     pub fn open(path: &str) -> Result<Self, StoreError> { Self::init(Connection::open(path)?) }
     pub fn open_in_memory() -> Result<Self, StoreError> { Self::init(Connection::open_in_memory()?) }
 
+    /// The notebooks live in this database too (`crate::notes` works on the connection).
+    pub fn conn(&self) -> &Connection { &self.conn }
+
     fn init(conn: Connection) -> Result<Self, StoreError> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY, folder TEXT NOT NULL, description TEXT NOT NULL, touched_at INTEGER NOT NULL);
@@ -32,6 +35,10 @@ impl Store {
              CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS undo(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, seq INTEGER NOT NULL, entry TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);",
         )?;
+        // The service reads and deletes notebook entries on its own connection while the engine
+        // works (Phase 3 §6): wait for the other side's write rather than fail on a locked file.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        crate::notes::init(&conn)?;
         Ok(Self { conn })
     }
 
