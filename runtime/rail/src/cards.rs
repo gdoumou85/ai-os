@@ -63,6 +63,9 @@ pub fn answer(questions: &[String], picks: &[Option<String>]) -> (String, bool) 
 
 fn btn(label: &str, say: &str) -> Button { Button { label: label.into(), say: say.into() } }
 
+const KEEP: &str = "keep what you learned";
+const DISCARD: &str = "discard what you learned";
+
 fn result_card(kind: CardKind, text: &str, files: &[ChangedFile], job_id: &str) -> Card {
     Card {
         kind, text: text.into(), buttons: vec![btn("Undo", "undo")],
@@ -117,19 +120,33 @@ impl Cards {
             Event::Stopped { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Stopped { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
             Event::Undone { job_id, lines, notes, .. } => self.push(Card { kind: CardKind::Undone { lines: lines.clone(), notes: notes.clone() }, text: lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
             Event::Learned { job_id, lines, pending } => {
+                // Keep/Discard act on whatever waits now, and every learning turn drops what the one
+                // before left waiting: an older card's buttons would keep an entry nobody read there.
+                let mut ch: Vec<Change> = vec![];
+                for (i, c) in self.list.iter_mut().enumerate() {
+                    let had = c.buttons.len();
+                    c.buttons.retain(|b| b.say != KEEP && b.say != DISCARD);
+                    if c.buttons.len() != had { ch.push(Change::Updated(i)); }
+                }
                 // Every learning turn now emits Learned, even when nothing was kept — that empty
                 // one draws nothing (Task 8 ruling): the spinner alone is what it is for.
-                if lines.is_empty() { return vec![]; }
+                if lines.is_empty() { return ch; }
+                let keep = || [btn("Keep", KEEP), btn("Discard", DISCARD)];
                 let at = self.list.iter().rposition(|c| c.job_id.as_deref() == Some(job_id.as_str()) && matches!(c.kind, CardKind::Done { .. }));
                 match at {
                     Some(i) => {
                         if let CardKind::Done { learned, .. } = &mut self.list[i].kind { learned.extend(lines.iter().cloned()); }
-                        if *pending { self.list[i].buttons.extend([btn("Keep", "keep what you learned"), btn("Discard", "discard what you learned")]); }
-                        vec![Change::Updated(i)]
+                        if *pending { self.list[i].buttons.extend(keep()); }
+                        if !ch.contains(&Change::Updated(i)) { ch.push(Change::Updated(i)); }
                     }
-                    // A failed job's "marked as not working" has no Done card to join: its own line.
-                    None => self.push(Card { kind: CardKind::Said, text: lines.join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: None }),
+                    // No Done card to join — a failed job's "marked as not working", or a Done card
+                    // cleared away: its own card, with Keep and Discard if something waits.
+                    None => {
+                        let buttons = if *pending { keep().to_vec() } else { vec![] };
+                        ch.extend(self.push(Card { kind: CardKind::Said, text: lines.join("\n"), buttons, opens: vec![], thumbnails: vec![], job_id: None }));
+                    }
                 }
+                ch
             }
             // The Skills screen is its own window (main.rs), not a card.
             Event::Skills { .. } => vec![],
