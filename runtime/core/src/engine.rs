@@ -2258,13 +2258,13 @@ mod tests {
         assert_eq!(windows, &vec!["Text Editor".to_string()]);
     }
 
-    fn housekeep() -> Move { Move::Housekeep { goal: "use the screen".into(), understood: "Using the screen".into(), remember: None } }
+    fn screen_job() -> Move { Move::Housekeep { goal: "use the screen".into(), understood: "Using the screen".into(), remember: None } }
 
     /// 2b: a look's picture is shown to the very next turn and to no other — one image is what
     /// fits the budget, and an old one would show the model a screen that is gone.
     #[test]
     fn a_screen_look_shows_its_picture_to_the_next_turn_only() {
-        let (mut e, rec, _) = engine_with(vec![housekeep(), plan(),
+        let (mut e, rec, _) = engine_with(vec![screen_job(), plan(),
             act(1, Action::ScreenLook { cell: None }), act(1, Action::ScreenLook { cell: Some(3) }),
             done(Action::ScreenLook { cell: None })], "screen-picture");
         rec.desktop_outcomes.borrow_mut().push_back(Outcome { image: Some(b"one".to_vec()), ..Outcome::ok("the screen") });
@@ -2281,7 +2281,7 @@ mod tests {
     /// to carry on over their hands.
     #[test]
     fn the_person_taking_the_screen_back_stops_the_job() {
-        let (mut e, rec, _) = engine_with(vec![housekeep(), plan(),
+        let (mut e, rec, _) = engine_with(vec![screen_job(), plan(),
             act(1, Action::ScreenLook { cell: Some(1) }),
             act(1, Action::ScreenClick { cell: 1, spot: 1, name: "Link".into(), double: false }),
             act(1, Action::ScreenLook { cell: None })], "screen-took-over");
