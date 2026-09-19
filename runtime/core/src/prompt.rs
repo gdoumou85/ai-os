@@ -70,7 +70,7 @@ fn allowed_moves(job: &Job) -> Vec<&'static str> {
 /// system rules live there). Render the two content-carrying actions compactly instead of
 /// dumping their payload; everything else keeps its JSON but capped, so an unexpectedly large
 /// argv or url still can't blow the budget either.
-fn compact_action(action: &Action) -> String {
+pub(crate) fn compact_action(action: &Action) -> String {
     match action {
         Action::WriteFile { path, contents } => format!("write_file {path} ({} bytes)", contents.len()),
         Action::EditFile { path, find, .. } => {

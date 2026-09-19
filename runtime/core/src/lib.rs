@@ -5,6 +5,7 @@ pub mod engine;
 pub mod event;
 pub mod find;
 pub mod job;
+pub mod learn;
 pub mod model;
 pub mod moves;
 pub mod notes;
