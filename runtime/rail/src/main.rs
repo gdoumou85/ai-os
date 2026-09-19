@@ -19,7 +19,13 @@ fn socket_path() -> PathBuf {
     PathBuf::from(dir).join("ai-os.sock")
 }
 
-enum FromNet { Event(Event), Down, Up, Update(String) }
+enum FromNet {
+    Event(Event), Down, Up, Update(String),
+    /// The finder's lines and the engine's current environment, for the Model card.
+    Models { found: String, env: String },
+    /// One LM Studio's models, asked for with the key the person typed.
+    Keyed { url: String, key: String, found: String },
+}
 
 /// The socket on its own thread: reconnects every 3 s; every event goes to a plain std channel
 /// that the GTK loop drains on a timer (gtk4-rs 0.11 has no glib channel; std::mpsc + a 50 ms
@@ -84,6 +90,109 @@ fn update_card(version: &str, column: &gtk::Box) -> gtk::Widget {
     now.connect_clicked(move |_| { run_in_terminal(&aios_rail::update::update_command()); c1.remove(&w1); });
     let (c2, w2) = (column.clone(), w.clone());
     later.connect_clicked(move |_| c2.remove(&w2));
+    w
+}
+
+fn run(prog: &str, args: &[&str], key: Option<&str>) -> String {
+    let mut c = std::process::Command::new(prog);
+    c.args(args);
+    // The key rides in the environment, never on a command line anyone can read with ps.
+    if let Some(k) = key { c.env("AI_OS_MODEL_KEY", k); }
+    c.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+}
+
+fn engine_env() -> String { run("systemctl", &["--user", "show", "ai-os-engine.service", "-p", "Environment", "--value"], None) }
+
+/// Makes the engine use a choice: the drop-in, the key file, a restart. The service restarts under
+/// the rail, which reconnects on its own.
+fn apply_model(kind: &str, url: &str, model: &str, key: Option<&str>) -> Result<(), String> {
+    let text = aios_rail::models::dropin(kind, url, model).ok_or("that model's name or address has characters it may not")?;
+    let home = std::env::var("HOME").map_err(|_| "no home folder")?;
+    let dir = format!("{home}/.config/systemd/user/ai-os-engine.service.d");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(format!("{dir}/model.conf"), text).map_err(|e| e.to_string())?;
+    let env_file = format!("{home}/.config/ai-os/model.env");
+    match key {
+        Some(k) => {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::create_dir_all(format!("{home}/.config/ai-os")).map_err(|e| e.to_string())?;
+            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&env_file).map_err(|e| e.to_string())?;
+            writeln!(f, "AI_OS_MODEL_KEY={k}").map_err(|e| e.to_string())?;
+        }
+        None if kind == "ollama" => { let _ = std::fs::remove_file(&env_file); }
+        None => {}
+    }
+    for args in [&["--user", "daemon-reload"][..], &["--user", "restart", "ai-os-engine.service"][..]] {
+        let ok = std::process::Command::new("systemctl").args(args).status().map(|s| s.success()).unwrap_or(false);
+        if !ok { return Err(format!("systemctl {} failed", args.join(" "))); }
+    }
+    Ok(())
+}
+
+/// A card with a title and a line of text, for the Model card and the key box.
+fn plain_card(title: &str, text: &str) -> gtk::Box {
+    let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    b.add_css_class("card"); b.add_css_class("ask");
+    let t = gtk::Label::new(Some(title)); t.add_css_class("title"); t.set_xalign(0.0);
+    let l = gtk::Label::new(Some(text)); l.set_xalign(0.0); l.set_wrap(true);
+    b.append(&t); b.append(&l);
+    b
+}
+
+/// The Model card: what the engine uses now, and a button per model the finder saw.
+fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gtk::Label) -> gtk::Widget {
+    let now = match aios_rail::models::current(env) {
+        (Some(m), Some(u)) => format!("Now using {m} at {u}."),
+        (Some(m), None) => format!("Now using {m} on this machine."),
+        _ => "No model set yet.".into(),
+    };
+    let choices = aios_rail::models::parse_found(found);
+    let text = if choices.is_empty() { format!("{now} No models answered on your network.") } else { format!("{now} Pick one to switch; the AI restarts with it.") };
+    let b = plain_card("Choose a model", &text);
+    let w: gtk::Widget = b.clone().upcast();
+    for c in choices {
+        let btn = gtk::Button::with_label(&aios_rail::models::label(&c));
+        btn.set_halign(gtk::Align::Start);
+        let (col, me, tx, st, key) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), key.clone());
+        btn.connect_clicked(move |_| {
+            col.remove(&me);
+            match &c.model {
+                Some(m) => st.set_text(&match apply_model(&c.kind, &c.url, m, key.as_deref()) {
+                    Ok(()) => format!("Switched to {m}."),
+                    Err(e) => format!("Could not switch: {e}"),
+                }),
+                None => {
+                    // An LM Studio that wants its key: ask for it here, then list its models with it.
+                    let k = plain_card("Its API key", &format!("LM Studio at {} needs its API key (LM Studio → Developer → Server settings).", c.url));
+                    let entry = gtk::PasswordEntry::new();
+                    entry.set_show_peek_icon(true);
+                    let go = gtk::Button::with_label("Use this key");
+                    go.set_halign(gtk::Align::Start);
+                    k.append(&entry); k.append(&go);
+                    let kw: gtk::Widget = k.upcast();
+                    col.append(&kw);
+                    let (col2, tx2, url) = (col.clone(), tx.clone(), c.url.clone());
+                    go.connect_clicked(move |_| {
+                        let key = entry.text().to_string();
+                        if !aios_rail::models::safe_key(&key) { return; }
+                        col2.remove(&kw);
+                        let (tx3, url2) = (tx2.clone(), url.clone());
+                        std::thread::spawn(move || {
+                            let found = run("ai-os-find", &["--url", &url2], Some(&key));
+                            let _ = tx3.send(FromNet::Keyed { url: url2, key, found });
+                        });
+                    });
+                }
+            }
+        });
+        b.append(&btn);
+    }
+    let close = gtk::Button::with_label("Close");
+    close.set_halign(gtk::Align::Start);
+    let (col, me) = (column.clone(), w.clone());
+    close.connect_clicked(move |_| col.remove(&me));
+    b.append(&close);
     w
 }
 
@@ -180,6 +289,9 @@ fn main() {
         let clear = gtk::Button::with_label("Clear");
         clear.set_tooltip_text(Some("Clear the chat (a task still running stays)"));
         header.pack_start(&clear);
+        let model_btn = gtk::Button::with_label("Model");
+        model_btn.set_tooltip_text(Some("Switch the AI's model"));
+        header.pack_start(&model_btn);
         // Stop where it can always be reached while a job runs, not on a card scrolled out of view.
         let stop = gtk::Button::with_label("Stop");
         stop.add_css_class("destructive-action");
@@ -212,10 +324,18 @@ fn main() {
         // Once per login, off the GTK thread: a slow network never holds the window up.
         let up = to_ui.clone();
         std::thread::spawn(move || { if let Some(v) = aios_rail::update::check() { let _ = up.send(FromNet::Update(v)); } });
+        let (to_ui_models, to_ui2) = (to_ui.clone(), to_ui.clone());
         let say = net_thread(to_ui);
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
 
+        let (tx_m, cards_m, status_m) = (to_ui_models, cards.clone(), status.clone());
+        model_btn.connect_clicked(move |_| {
+            if cards_m.borrow().running() { status_m.set_text("Finish or stop the task first, then switch models."); return; }
+            status_m.set_text("Looking for models on your network…");
+            let tx = tx_m.clone();
+            std::thread::spawn(move || { let found = run("ai-os-find", &[], None); let _ = tx.send(FromNet::Models { found, env: engine_env() }); });
+        });
         let s_stop = say.clone();
         stop.connect_clicked(move |_| { let _ = s_stop.send("stop".into()); });
         let (cards3, widgets3, column3, say3) = (cards.clone(), widgets.clone(), column.clone(), say.clone());
@@ -234,6 +354,16 @@ fn main() {
                 match msg {
                     FromNet::Up => status2.set_text(""),
                     FromNet::Update(v) => column2.prepend(&update_card(&v, &column2)),
+                    FromNet::Models { found, env } => {
+                        status2.set_text("");
+                        column2.append(&models_card(&found, &env, None, &column2, &to_ui2, &status2));
+                    }
+                    FromNet::Keyed { url, key, found } => {
+                        // Only that runner's lines, and none still asking for a key: the key worked.
+                        let only: String = found.lines().filter(|l| l.split('\t').nth(1) == Some(url.as_str())).map(|l| format!("{l}\n")).collect();
+                        if only.is_empty() || only.contains("\t-\t") { status2.set_text("LM Studio did not accept that key."); }
+                        else { column2.append(&models_card(&only, &engine_env(), Some(key), &column2, &to_ui2, &status2)); }
+                    }
                     FromNet::Down => { spinner2.stop(); status2.set_text("The AI OS service is not running — retrying…"); }
                     FromNet::Event(ev) => {
                         match aios_rail::cards::busy_after(&ev) {
