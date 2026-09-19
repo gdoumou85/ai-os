@@ -57,6 +57,28 @@ pub fn accounts(tsv: &str) -> Vec<(String, String)> {
     tsv.lines().filter_map(|l| { let f: Vec<&str> = l.split('\t').collect(); (f.len() == 5).then(|| (f[0].to_string(), f[3].to_string())) }).collect()
 }
 
+/// A cloud provider the Cloud card can add an account for: where it answers and how it speaks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Provider { pub name: &'static str, pub kind: &'static str, pub url: &'static str }
+
+/// NVIDIA's hosted models (build.nvidia.com): free credits, OpenAI-style. The owner's pick,
+/// 2026-09-19, once Ollama's cloud stopped being free.
+pub const NVIDIA: Provider = Provider { name: "NVIDIA", kind: "openai", url: "https://integrate.api.nvidia.com" };
+pub const OLLAMA: Provider = Provider { name: "Ollama", kind: "ollama", url: "https://ollama.com" };
+
+/// The models worth offering from a provider's list. NVIDIA lists everything it hosts —
+/// embedders, safety filters, picture readers — and only some of those can hold a conversation.
+/// ponytail: a name filter; NVIDIA's own model types if its list ever says them.
+pub fn chat_models(provider: Provider, names: Vec<String>) -> Vec<String> {
+    if provider != NVIDIA { return names; }
+    const NOT_CHAT: [&str; 15] = ["embed", "rerank", "retriev", "guard", "safety", "reward", "vision", "-vl", "vlm", "clip", "parse", "detect", "translat", "pii", "content-"];
+    const CHAT: [&str; 9] = ["instruct", "chat", "-it", "deepseek", "kimi", "qwen3", "gpt-oss", "nemotron", "coder"];
+    names.into_iter().filter(|n| {
+        let l = n.to_lowercase();
+        !NOT_CHAT.iter().any(|w| l.contains(w)) && CHAT.iter().any(|w| l.contains(w))
+    }).collect()
+}
+
 /// `cloud.tsv` without its `i`th account.
 pub fn without(tsv: &str, i: usize) -> String {
     tsv.lines().filter(|l| l.split('\t').count() == 5).enumerate().filter(|(n, _)| *n != i).map(|(_, l)| format!("{l}\n")).collect()
@@ -74,6 +96,17 @@ mod tests {
         let tsv = format!("{l}{}", account_line("Groq", "openai", "https://api.groq.com/openai", "llama", "k2").unwrap());
         assert_eq!(accounts(&tsv), vec![("Ollama".into(), "gpt-oss:120b".into()), ("Groq".into(), "llama".into())]);
         assert_eq!(accounts(&without(&tsv, 0)), vec![("Groq".into(), "llama".into())]);
+    }
+
+    #[test]
+    fn nvidias_list_is_cut_to_the_models_that_can_talk() {
+        let names = ["meta/llama-3.3-70b-instruct", "nvidia/nv-embedqa-e5-v5", "nvidia/llama-3.1-nemoguard-8b-content-safety",
+            "deepseek-ai/deepseek-v3.1", "microsoft/phi-3.5-vision-instruct", "qwen/qwen3-coder-480b-a35b-instruct", "nvidia/nv-rerankqa-mistral-4b-v3",
+            "google/gemma-2-27b-it", "openai/gpt-oss-120b"].map(String::from).to_vec();
+        assert_eq!(chat_models(NVIDIA, names.clone()), vec!["meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-v3.1",
+            "qwen/qwen3-coder-480b-a35b-instruct", "google/gemma-2-27b-it", "openai/gpt-oss-120b"]);
+        assert_eq!(chat_models(OLLAMA, names.clone()), names, "Ollama's list is already its chat models");
+        assert!(account_line(NVIDIA.name, NVIDIA.kind, NVIDIA.url, "meta/llama-3.3-70b-instruct", "nvapi-abc_DEF-123").is_some(), "NVIDIA's names and keys are writable");
     }
 
     #[test]
