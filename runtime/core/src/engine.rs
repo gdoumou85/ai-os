@@ -1273,11 +1273,11 @@ mod tests {
     #[test]
     fn step_cap_fails_the_job() {
         let mut moves = vec![start("p", true), plan()];
-        for i in 0..30 { moves.push(act(1, write(&format!("f{i}")))); }
+        for i in 0..Engine::<crate::model::FakeModel>::MAX_STEPS + 5 { moves.push(act(1, write(&format!("f{i}")))); }
         let (mut e, rec, _) = engine_with(moves, "cap");
         let out = e.handle("go").unwrap();
         assert!(out.last().unwrap().to_lowercase().contains("gave up"), "{out:?}");
-        assert_eq!(rec.calls.borrow().len(), 25);
+        assert_eq!(rec.calls.borrow().len(), Engine::<crate::model::FakeModel>::MAX_STEPS);
     }
 
     #[test]
@@ -1716,7 +1716,7 @@ mod tests {
         let mut job = Job::new("p", &root.display().to_string(), "goal", true, "Starting p");
         job.plan = vec!["step".into()];
         job.state = State::WaitingApproval;
-        for i in 0..25 { job.steps.push(StepRecord { plan_step: 1, action: write(&format!("f{i}")), ok: true, detail: "ok".into() }); }
+        for i in 0..Engine::<crate::model::FakeModel>::MAX_STEPS { job.steps.push(StepRecord { plan_step: 1, action: write(&format!("f{i}")), ok: true, detail: "ok".into() }); }
         job.pending_action = Some((1, Action::HttpPost { url: "https://x".into(), body: "b".into() }));
         job.pending_reason = "network access".into();
         e.store.save_job(&job).unwrap();
