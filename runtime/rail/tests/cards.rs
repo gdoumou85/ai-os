@@ -130,6 +130,61 @@ fn the_spinner_runs_from_your_message_until_the_turn_comes_back() {
     assert_eq!(busy_after(&Event::Said { text: "hi".into() }), Some(false));
     assert_eq!(busy_after(&Event::Error { text: "bad".into() }), Some(false));
     assert_eq!(busy_after(&Event::State { job: None }), None);
+    // Done/Failed no longer stop the spinner: a slow local model's learning turn follows, and the
+    // Learned that always ends it is what does (Task 8 ruling).
+    assert_eq!(busy_after(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] }), None);
+    assert_eq!(busy_after(&Event::Learned { job_id: j(), lines: vec![], pending: false }), Some(false));
+}
+
+#[test]
+fn learned_lines_join_the_jobs_done_card_and_pending_ones_offer_keep_and_discard() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] });
+    let ch = cards.apply(&Event::Learned { job_id: j(), lines: vec!["Learned, if you keep it: get gimp (this computer)".into()], pending: true });
+    assert_eq!(ch, vec![Change::Updated(0)]);
+    let CardKind::Done { learned, .. } = &cards.list[0].kind else { panic!() };
+    assert_eq!(learned, &vec!["Learned, if you keep it: get gimp (this computer)".to_string()]);
+    let says: Vec<&str> = cards.list[0].buttons.iter().map(|b| b.say.as_str()).collect();
+    assert_eq!(says, vec!["undo", "keep what you learned", "discard what you learned"]);
+    // A failed job's "marked as not working" has no Done card to join: it is a line of its own.
+    // (Its learning turn dropped what waited, so the Done card above loses Keep and Discard.)
+    let ch = cards.apply(&Event::Learned { job_id: "other".into(), lines: vec!["Marked as not working: this computer/x".into()], pending: false });
+    assert_eq!(ch, vec![Change::Updated(0), Change::Added(1)]);
+    assert!(cards.apply(&Event::Skills { notebooks: vec![] }).is_empty());
+}
+
+#[test]
+fn only_the_newest_learned_card_keeps_keep_and_discard() {
+    let mut cards = Cards::default();
+    let says = |cards: &Cards, i: usize| cards.list[i].buttons.iter().map(|b| b.say.clone()).collect::<Vec<_>>();
+    cards.apply(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] });
+    cards.apply(&Event::Learned { job_id: j(), lines: vec!["Learned, if you keep it: get gimp (this computer)".into()], pending: true });
+    cards.apply(&Event::Done { job_id: "j2".into(), text: "done".into(), check: None, files: vec![], windows: vec![] });
+    let ch = cards.apply(&Event::Learned { job_id: "j2".into(), lines: vec!["Learned, if you keep it: get inkscape (this computer)".into()], pending: true });
+    assert_eq!(ch, vec![Change::Updated(0), Change::Updated(1)], "the older card is redrawn without them");
+    assert_eq!(says(&cards, 0), vec!["undo"]);
+    assert_eq!(says(&cards, 1), vec!["undo", "keep what you learned", "discard what you learned"]);
+    // A turn that learned nothing still dropped what waited: the buttons go with it.
+    assert_eq!(cards.apply(&Event::Learned { job_id: "j3".into(), lines: vec![], pending: false }), vec![Change::Updated(1)]);
+    assert_eq!(says(&cards, 1), vec!["undo"]);
+}
+
+#[test]
+fn a_pending_learned_with_no_done_card_still_offers_keep_and_discard() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] });
+    cards.clear();
+    assert_eq!(cards.apply(&Event::Learned { job_id: j(), lines: vec!["Learned, if you keep it: get gimp (this computer)".into()], pending: true }), vec![Change::Added(0)]);
+    assert!(matches!(cards.list[0].kind, CardKind::Said));
+    assert_eq!(cards.list[0].buttons.iter().map(|b| b.label.as_str()).collect::<Vec<_>>(), vec!["Keep", "Discard"]);
+}
+
+#[test]
+fn an_empty_learned_after_a_model_that_could_not_answer_draws_nothing() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] });
+    assert!(cards.apply(&Event::Learned { job_id: j(), lines: vec![], pending: false }).is_empty());
+    assert_eq!(cards.list.len(), 1, "no Said card either");
 }
 
 #[test]

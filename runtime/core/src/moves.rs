@@ -1,6 +1,20 @@
 use executor::action::Action;
 use serde::{Deserialize, Serialize};
 
+/// One notebook entry the learning turn proposes (Phase 3 §4). `steps` are job step numbers;
+/// what is stored comes from those steps in the record, never from these words.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LearnEntry {
+    pub notebook: String,
+    pub topic: String,
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub steps: Vec<usize>,
+    #[serde(default)]
+    pub links: Vec<String>,
+}
+
 /// One move per model turn (1b spec §4). The loop enforces which moves are legal in which state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "move", rename_all = "snake_case")]
@@ -17,6 +31,9 @@ pub enum Move {
         goal: String,
         creative: bool,
         understood: String,
+        /// The craft notebooks this job belongs to (Phase 3 §2); none for a plain errand.
+        #[serde(default)]
+        skills: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember: Option<String>,
     },
@@ -34,6 +51,13 @@ pub enum Move {
     Replan { steps: Vec<String>, why: String },
     Done { summary: String, check: Action },
     GiveUp { reason: String, missing: String },
+    /// Legal only in the learning turn after a job (Phase 3 §4).
+    Learn {
+        entries: Vec<LearnEntry>,
+        #[serde(default)] used: Vec<String>,
+        #[serde(default)] wrong: Vec<String>,
+        #[serde(default)] remove: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -47,6 +71,7 @@ mod tests {
             r#"{"move":"reply","text":"hi"}"#,
             r#"{"move":"reply","text":"noted","remember":"always use python3"}"#,
             r#"{"move":"start","project":"primes","new_project":true,"description":"prime printer","goal":"print 10 primes","creative":false,"understood":"Starting a new project primes"}"#,
+            r#"{"move":"start","project":"ball","new_project":true,"description":"d","goal":"g","creative":false,"understood":"u","skills":["blender"]}"#,
             r#"{"move":"housekeep","goal":"prepare /data/work","understood":"Housekeeping: preparing /data/work"}"#,
             r#"{"move":"ask","questions":["Which language?"]}"#,
             r#"{"move":"ask","questions":["Which language?","Its name?"],"options":[["Python","Rust"],[]]}"#,
@@ -61,6 +86,8 @@ mod tests {
             r#"{"move":"replan","steps":["use a loop instead"],"why":"recursion overflowed"}"#,
             r#"{"move":"done","summary":"printed them","check":{"kind":"run_command","argv":["python3","primes.py"]}}"#,
             r#"{"move":"give_up","reason":"no compiler","missing":"gcc"}"#,
+            r#"{"move":"learn","entries":[{"notebook":"this computer","topic":"open a website","kind":"technique","text":"open_app firefox with the address","steps":[7],"links":[]}],"used":["this computer/open a website"],"wrong":[],"remove":[]}"#,
+            r#"{"move":"learn","entries":[]}"#,
         ];
         for c in cases {
             let m: Move = serde_json::from_str(c).unwrap_or_else(|e| panic!("{c}: {e}"));
@@ -82,7 +109,7 @@ mod tests {
         let v = crate::schema::value();
         let names: Vec<String> = v["oneOf"].as_array().unwrap().iter()
             .map(|o| o["properties"]["move"]["enum"][0].as_str().unwrap().to_string()).collect();
-        assert_eq!(names, ["reply", "start", "housekeep", "ask", "plan", "act", "replan", "done", "give_up"]);
+        assert_eq!(names, ["reply", "start", "housekeep", "ask", "plan", "act", "replan", "done", "give_up", "learn"]);
     }
 
     #[test]

@@ -50,7 +50,7 @@ fn until(c: &mut Client, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
 
 fn write(p: &str) -> Action { Action::WriteFile { path: p.into(), contents: "x".into() } }
 fn job() -> Vec<Move> { vec![
-    Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), remember: None },
+    Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), skills: vec![], remember: None },
     Move::Plan { steps: vec!["write".into()] },
     Move::Act { step: 1, action: write("BLUEPRINT.md") },
     Move::Done { summary: "finished".into(), check: Action::RunCommand { argv: vec!["true".into()] } },
@@ -66,7 +66,7 @@ fn a_question_at_a_needs_ok_is_answered_never_answered_with_busy() {
     let dir = temp("ok-question");
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let moves = vec![
-        Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), remember: None },
+        Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), skills: vec![], remember: None },
         Move::Plan { steps: vec!["write outside".into()] },
         Move::Act { step: 1, action: write("/etc/ai-os-never-written") },
         Move::Reply { text: "the word hello".into(), remember: None },
@@ -224,6 +224,27 @@ fn bind_refuses_a_live_socket_and_removes_a_stale_file() {
     assert!(md.file_type().is_socket(), "the stale file was not replaced by a socket");
     assert_eq!(md.permissions().mode() & 0o777, 0o600);
     drop(listener);
+}
+
+#[test]
+fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
+    let dir = temp("skills");
+    let db = dir.join("notes.db");
+    std::env::set_var("AI_OS_DB", &db);
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        aios_core::notes::init(&c).unwrap();
+        aios_core::notes::put(&c, &aios_core::notes::Note { notebook: "this computer".into(), topic: "open a website".into(), kind: "technique".into(), text: "open_app firefox".into(), ..Default::default() }, None).unwrap();
+    }
+    let sock = start(&dir, vec![], Arc::new(Mutex::new(None)));
+    let (mut r, mut w) = Client::connect(&sock).unwrap().split();
+    w.request(&aios_proto::Request::Skills {}).unwrap();
+    let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event") };
+    assert_eq!(notebooks[0].name, "this computer");
+    assert_eq!(notebooks[0].entries[0].topic, "open a website");
+    w.request(&aios_proto::Request::Forget { notebook: "this computer".into(), topic: "open a website".into() }).unwrap();
+    let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event after forget") };
+    assert!(notebooks.is_empty(), "{notebooks:?}");
 }
 
 #[test]

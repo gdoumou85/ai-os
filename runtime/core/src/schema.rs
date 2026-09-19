@@ -33,14 +33,15 @@ pub const MOVE_SCHEMA: &str = r##"{
   },
   "oneOf": [
     { "type":"object", "properties": { "move": {"enum":["reply"]}, "text": {"type":"string"}, "remember": {"type":"string"} }, "required":["move","text"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["start"]}, "project": {"type":"string"}, "new_project": {"type":"boolean"}, "description": {"type":"string"}, "goal": {"type":"string"}, "creative": {"type":"boolean"}, "understood": {"type":"string"}, "remember": {"type":"string"} }, "required":["move","project","new_project","description","goal","creative","understood"], "additionalProperties": false },
+    { "type":"object", "properties": { "move": {"enum":["start"]}, "project": {"type":"string"}, "new_project": {"type":"boolean"}, "description": {"type":"string"}, "goal": {"type":"string"}, "creative": {"type":"boolean"}, "understood": {"type":"string"}, "skills": {"type":"array","items":{"type":"string"},"maxItems":3}, "remember": {"type":"string"} }, "required":["move","project","new_project","description","goal","creative","understood","skills"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["housekeep"]}, "goal": {"type":"string"}, "understood": {"type":"string"}, "remember": {"type":"string"} }, "required":["move","goal","understood"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["ask"]}, "questions": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":3}, "options": {"type":"array","items":{"type":"array","items":{"type":"string"},"maxItems":5},"maxItems":3} }, "required":["move","questions","options"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["plan"]}, "steps": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8} }, "required":["move","steps"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["act"]}, "step": {"type":"integer","minimum":1}, "action": {"$ref":"#/$defs/action"} }, "required":["move","step","action"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["replan"]}, "steps": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}, "why": {"type":"string"} }, "required":["move","steps","why"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["done"]}, "summary": {"type":"string"}, "check": {"$ref":"#/$defs/action"} }, "required":["move","summary","check"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["give_up"]}, "reason": {"type":"string"}, "missing": {"type":"string"} }, "required":["move","reason","missing"], "additionalProperties": false }
+    { "type":"object", "properties": { "move": {"enum":["give_up"]}, "reason": {"type":"string"}, "missing": {"type":"string"} }, "required":["move","reason","missing"], "additionalProperties": false },
+    { "type":"object", "properties": { "move": {"enum":["learn"]}, "entries": {"type":"array","maxItems":5,"items":{"type":"object","properties":{"notebook":{"type":"string"},"topic":{"type":"string"},"kind":{"enum":["technique","pitfall","taste"]},"text":{"type":"string"},"steps":{"type":"array","items":{"type":"integer","minimum":1},"maxItems":10},"links":{"type":"array","items":{"type":"string"},"maxItems":5}},"required":["notebook","topic","kind","text","steps","links"],"additionalProperties": false}}, "used": {"type":"array","items":{"type":"string"}}, "wrong": {"type":"array","items":{"type":"string"}}, "remove": {"type":"array","items":{"type":"string"}} }, "required":["move","entries","used","wrong","remove"], "additionalProperties": false }
   ]
 }"##;
 
@@ -86,5 +87,14 @@ mod tests {
             "look", "press", "type", "read", "open_app",
             "screen_look", "screen_click", "screen_type",
         ]);
+    }
+
+    #[test]
+    fn start_offers_skills_and_learn_entries_have_the_three_kinds() {
+        let v = value();
+        assert_eq!(v["oneOf"][1]["properties"]["skills"]["maxItems"], 3);
+        let learn = &v["oneOf"][9];
+        assert_eq!(learn["properties"]["move"]["enum"][0], "learn");
+        assert_eq!(learn["properties"]["entries"]["items"]["properties"]["kind"]["enum"], serde_json::json!(["technique", "pitfall", "taste"]));
     }
 }

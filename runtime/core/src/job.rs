@@ -106,6 +106,15 @@ pub struct Job {
     /// `#[serde(default)]`: see `declined_actions` (I3).
     #[serde(default)]
     pub done_gated: u32,
+    /// The craft notebooks this job belongs to (Phase 3 §2). `serde(default)`: I3.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// The tips shown on every turn, fixed when the job starts (Phase 3 §3). `serde(default)`: I3.
+    #[serde(default)]
+    pub notes_block: String,
+    /// The keys (`notebook/topic`) of those tips, so the learning turn can mark only what was shown.
+    #[serde(default)]
+    pub shown_notes: Vec<String>,
 }
 
 impl Job {
@@ -124,6 +133,7 @@ impl Job {
             folder: folder.into(), new_project: false, request: String::new(),
             started_at: (millis / 1000) as u64,
             ok_questions: 0, done_gated: 0,
+            skills: vec![], notes_block: String::new(), shown_notes: vec![],
         }
     }
 
@@ -188,5 +198,15 @@ mod tests {
         value.as_object_mut().unwrap().remove("started_at");
         let back: Job = serde_json::from_value(value).unwrap();
         assert_eq!(back.started_at, 0);
+    }
+
+    #[test]
+    fn a_job_saved_before_skills_still_deserialises() {
+        let job = Job::new("p", "/data/projects/p", "g", true, "u");
+        let mut value = serde_json::to_value(&job).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        for k in ["skills", "notes_block", "shown_notes"] { assert!(obj.remove(k).is_some(), "{k}"); }
+        let back: Job = serde_json::from_value(value).unwrap();
+        assert!(back.skills.is_empty() && back.notes_block.is_empty() && back.shown_notes.is_empty());
     }
 }

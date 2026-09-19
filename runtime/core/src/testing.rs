@@ -192,6 +192,13 @@ pub fn events_of(e: &mut crate::engine::Engine<crate::model::FakeModel>, text: &
     e.handle_events(text).unwrap()
 }
 
+/// A finished job's own last event — every job that ends Done or Failed now emits a `Learned`
+/// right after it, even an empty one (Task 8 ruling: the rail's spinner needs it), so a test that
+/// wants the job's own last word skips that tail event.
+pub fn before_learned(ev: &[aios_proto::Event]) -> &aios_proto::Event {
+    ev.iter().rev().find(|e| !matches!(e, aios_proto::Event::Learned { .. })).unwrap()
+}
+
 /// Same engine, with the files half of undo faked so a temp root can exercise it.
 pub fn engine_with_snapshots(moves: Vec<crate::moves::Move>, tag: &str, snap: &FakeSnapshotter)
     -> (crate::engine::Engine<crate::model::FakeModel>, Recorder, PathBuf) {

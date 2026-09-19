@@ -46,6 +46,14 @@ pub struct JobState {
     pub waiting: Waiting,
 }
 
+/// One entry as the Skills screen draws it (Phase 3 §6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoteView { pub topic: String, pub kind: String, pub text: String, pub uses: i64, pub failed: bool, pub needs_check: bool }
+
+/// One notebook ("this computer" or a craft) and its entries, most-used first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Notebook { pub name: String, pub entries: Vec<NoteView> }
+
 /// One event, `kind` first (the same first-key rule the move grammar lives by).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -63,6 +71,10 @@ pub enum Event {
     Failed { job_id: String, text: String, files: Vec<ChangedFile> },
     Stopped { job_id: String, text: String, files: Vec<ChangedFile> },
     Undone { job_id: String, name: String, lines: Vec<UndoLine>, notes: Vec<String> },
+    /// What the learning turn after a job kept (Phase 3 §6). `pending`: something waits for Keep.
+    Learned { job_id: String, lines: Vec<String>, #[serde(default)] pending: bool },
+    /// The Skills screen's notebooks, answered to the client that asked (Phase 3 §6).
+    Skills { notebooks: Vec<Notebook> },
     Busy { job_id: String, text: String },
     State { job: Option<JobState> },
     /// The service could not read a client line. Sent to that client only.
@@ -76,7 +88,7 @@ impl Event {
             Event::Understood { job_id, .. } | Event::Plan { job_id, .. } | Event::Step { job_id, .. }
             | Event::NeedsAnswer { job_id, .. } | Event::NeedsOk { job_id, .. } | Event::Done { job_id, .. }
             | Event::Failed { job_id, .. } | Event::Stopped { job_id, .. } | Event::Undone { job_id, .. }
-            | Event::Busy { job_id, .. } => Some(job_id),
+            | Event::Learned { job_id, .. } | Event::Busy { job_id, .. } => Some(job_id),
             _ => None,
         }
     }
@@ -93,6 +105,10 @@ pub fn window_note(windows: &[String]) -> Option<String> {
 pub enum Request {
     #[serde(rename = "say")] Say(String),
     #[serde(rename = "hello")] Hello(serde_json::Map<String, serde_json::Value>),
+    /// The Skills screen asks for the notebooks (Phase 3 §6); answered to that client only.
+    #[serde(rename = "skills")] Skills {},
+    /// The Skills screen's ✕ on one entry.
+    #[serde(rename = "forget")] Forget { notebook: String, topic: String },
 }
 
 /// One connection: a writer half and a line-reader half over the same socket. `split` hands the
@@ -124,6 +140,8 @@ impl Writer {
     }
     pub fn say(&mut self, text: &str) -> std::io::Result<()> { self.send(&Request::Say(text.to_string())) }
     pub fn hello(&mut self) -> std::io::Result<()> { self.send(&Request::Hello(Default::default())) }
+    /// Any request, for a client (the Skills screen) that builds its own.
+    pub fn request(&mut self, r: &Request) -> std::io::Result<()> { self.send(r) }
     /// Close the connection in both directions. `split` handed out two fds over one socket
     /// (`try_clone`), so dropping the writer leaves the reader's thread parked on a live socket;
     /// this makes its `read_line` return 0 so it can end. Idempotent enough to call on any exit.
@@ -163,6 +181,8 @@ mod tests {
             Event::Failed { job_id: "j".into(), text: "gave up".into(), files: vec![] },
             Event::Stopped { job_id: "j".into(), text: "Stopped".into(), files: vec![] },
             Event::Undone { job_id: "j".into(), name: "p".into(), lines: vec![UndoLine { text: "put back".into(), ok: true }], notes: vec!["n".into()] },
+            Event::Learned { job_id: "j".into(), lines: vec!["Learned: open a website (this computer)".into()], pending: false },
+            Event::Skills { notebooks: vec![Notebook { name: "this computer".into(), entries: vec![NoteView { topic: "t".into(), kind: "technique".into(), text: "x".into(), uses: 2, failed: false, needs_check: true }] }] },
             Event::Busy { job_id: "j".into(), text: "working".into() },
             Event::State { job: None },
             Event::Error { text: "bad".into() },
@@ -173,6 +193,15 @@ mod tests {
             let back: Event = serde_json::from_str(&s).unwrap();
             assert_eq!(back, e);
         }
+    }
+
+    #[test]
+    fn skills_requests_have_the_wire_shape_the_service_reads() {
+        assert_eq!(serde_json::to_string(&Request::Skills {}).unwrap(), r#"{"skills":{}}"#);
+        let f = Request::Forget { notebook: "blender".into(), topic: "bevel".into() };
+        assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&f).unwrap()).unwrap(), f);
+        let e = Event::Skills { notebooks: vec![Notebook { name: "this computer".into(), entries: vec![NoteView { topic: "t".into(), kind: "technique".into(), text: "x".into(), uses: 2, failed: false, needs_check: true }] }] };
+        assert!(serde_json::to_string(&e).unwrap().starts_with(r#"{"kind":"skills""#));
     }
 
     #[test]

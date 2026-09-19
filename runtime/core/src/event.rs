@@ -45,7 +45,7 @@ pub fn lines(event: &Event) -> Vec<String> {
         Event::Said { text } | Event::Understood { text, .. }
         | Event::Failed { text, .. } | Event::Stopped { text, .. } | Event::Busy { text, .. } => vec![text.clone()],
         Event::Done { text, windows, .. } => { let mut v = vec![text.clone()]; v.extend(aios_proto::window_note(windows)); v }
-        Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } => vec![],
+        Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } | Event::Skills { .. } => vec![],
         Event::NeedsAnswer { questions, options, .. } => questions.iter().enumerate().map(|(i, q)| match options.get(i).filter(|o| !o.is_empty()) {
             Some(o) => format!("Question: {q} ({})", o.join(" / ")),
             None => format!("Question: {q}"),
@@ -55,6 +55,11 @@ pub fn lines(event: &Event) -> Vec<String> {
             let mut v = vec![format!("Undoing the last job ({name}):")];
             v.extend(lines.iter().map(|l| l.text.clone()));
             v.extend(notes.iter().cloned());
+            v
+        }
+        Event::Learned { lines, pending, .. } => {
+            let mut v = lines.clone();
+            if *pending { v.push("Say \"keep what you learned\" to keep what changes the machine, or \"discard what you learned\".".into()); }
             v
         }
         Event::Error { text } => vec![format!("(error: {text})")],

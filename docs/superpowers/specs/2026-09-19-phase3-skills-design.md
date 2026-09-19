@@ -50,7 +50,6 @@ CREATE TABLE IF NOT EXISTS notes(
   uses INTEGER NOT NULL DEFAULT 0,
   failed INTEGER NOT NULL DEFAULT 0,       -- 1: led to a failure last time it was used
   needs_check INTEGER NOT NULL DEFAULT 0,  -- 1: a topic it points to was removed
-  pending_job TEXT,                -- set while it waits for the owner's Keep (§5)
   updated_at INTEGER NOT NULL,
   PRIMARY KEY(notebook, topic));
 ```
@@ -58,7 +57,12 @@ CREATE TABLE IF NOT EXISTS notes(
 - `put` replaces by (notebook, topic), keeping `uses`, clearing `failed`/`needs_check`.
 - After a `put`, a notebook over **200** entries drops the one with the fewest uses, oldest first.
 - Removing a "this computer" topic sets `needs_check` on every entry whose `links` names it.
-- `pending_job` entries are invisible to prompts and skipped by the cap until kept.
+- Names are cut to 60 chars. The front door lists at most 20 notebooks ("this computer" first,
+  then by total uses); the Skills screen lists all.
+- An entry waiting for the owner's Keep (§5) lives in a separate table, `notes_pending` (same
+  columns plus the job id): it never hides, replaces or evicts a kept entry, and only Keep moves it
+  into `notes` through the normal `put`. *(As built: the first draft marked pending rows in `notes`
+  itself, and a discarded proposal could delete the kept entry it replaced.)*
 
 Limits live as constants beside the code (`MAX_ENTRIES = 200`, text ≤ 200 chars, steps ≤ 400
 chars). The Settings screen (memory: settings-screen) may expose them later; not now.
@@ -122,23 +126,27 @@ The engine then applies it, trusting the record over the model:
 `used` apply (no new entries — nothing was proven). A cancelled job gets no learning turn.
 
 The learning turn is bounded to one model call. If the model is unreachable, nothing is learned.
+After a failed job that was shown no tips there is nothing it could change, so no call is made.
 
 ## 5. Entries that change the machine
 
 A technique whose cited steps include `install`, `remove`, `service`, `set_setting`, or a
-`write_file`/`edit_file`/`make_dir` outside the job's folder is stored with `pending_job = job id`
-and shown on the Done card with **Keep** / **Discard**. Keep clears `pending_job`; Discard deletes
-it. Pending entries left from an earlier job are deleted when the next learning turn runs.
+`write_file`/`edit_file`/`make_dir` outside the job's folder is stored in `notes_pending`
+and shown on the Done card — topic, text and the steps it did — with **Keep** / **Discard** (the
+fixed words `keep what you learned` / `discard what you learned`). Proposals left from an earlier
+job are discarded when the next learning turn starts, and only the newest card keeps the buttons.
 
 ## 6. Protocol and the chat window
 
-- `Event::Learned { job_id, lines: Vec<String>, pending: Vec<LearnedEntry> }` after the learning
-  turn when anything was added or changed. The rail appends "Learned: …" lines to that job's Done
-  card, with Keep/Discard per pending entry.
+- `Event::Learned { job_id, lines: Vec<String>, pending: bool }` after every learning turn — empty
+  when nothing changed, so the chat window's spinner keeps turning until the learning turn is over
+  (a slow model can take minutes for it). The rail appends "Learned: …" lines to that job's Done
+  card, with Keep/Discard when `pending`.
 - `Request::Skills` → `Event::Skills { notebooks: Vec<Notebook> }` (name, entries with kind,
   topic, text, uses, failed, needs_check).
-- `Request::Forget { notebook, topic }` and `Request::KeepLearned { notebook, topic, keep }` →
-  answered with a fresh `Event::Skills` (Forget) or a one-line `Said`.
+- `Request::Forget { notebook, topic }` → a fresh `Event::Skills`. Both are answered on the
+  client's own thread from its own database connection, so the screen opens while a job runs.
+  Keep/Discard are the fixed words above, not requests.
 - **Skills button** in the title bar beside Model and Help: a card listing notebooks, "This
   computer" first; clicking one lists its entries (topic, text, "used N times", a red mark when
   failed or needs checking) each with ✕.
