@@ -15,6 +15,8 @@ pub struct Prompt {
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
     #[error("model http: {0}")] Http(String),
+    /// 402 or 429: the account's allowance is used up for now; the cloud pool moves on.
+    #[error("model allowance used up: {0}")] Quota(String),
     #[error("model answer was not a valid move: {0}")] BadJson(String),
     #[error("fake model has no more scripted moves")] Exhausted,
 }
@@ -91,7 +93,10 @@ impl RemoteModel {
             Err(ureq::Error::Transport(t)) if t.kind() == ureq::ErrorKind::ConnectionFailed => return Err((true, ModelError::Http(t.to_string()))),
             // The runner's own reason, not just its number: a 402 from a signed-in Ollama means a
             // cloud model's allowance ran out, and only the body says so.
-            Err(ureq::Error::Status(code, r)) => return Err((false, ModelError::Http(format!("{endpoint}: status {code}: {}", runner_reason(&r.into_string().unwrap_or_default()))))),
+            Err(ureq::Error::Status(code, r)) => {
+                let why = format!("{endpoint}: status {code}: {}", runner_reason(&r.into_string().unwrap_or_default()));
+                return Err((false, if matches!(code, 402 | 429) { ModelError::Quota(why) } else { ModelError::Http(why) }));
+            }
             Err(e) => return Err((false, ModelError::Http(e.to_string()))),
         };
         match self.kind { Kind::Ollama => parse_ollama(&resp), Kind::OpenAi => parse_openai(&resp) }.map_err(|e| (false, e))
