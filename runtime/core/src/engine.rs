@@ -691,9 +691,17 @@ impl<M: Model> Engine<M> {
         // row without looking once, toggling the one popover open and shut until the job ran out
         // of replans, and every press answered "pressed Main Menu" as if it had got somewhere.
         let trailing = job.steps.iter().rev().take_while(|s| s.ok && serde_json::to_string(&s.action).unwrap_or_default() == key).count();
-        let repeatable = matches!(action, Action::Press { .. } | Action::Type { .. }) && trailing < 2;
+        // A second look at the screen is waiting for a page or a program to come up (the owner's
+        // run, 2026-09-19); a third in a row is not looking at what the first two showed.
+        let repeatable = matches!(action, Action::Press { .. } | Action::Type { .. } | Action::ScreenLook { .. }) && trailing < 2;
         if !is_check && !repeatable && trailing >= 1 {
-            return self.reject(job, if on_the_desktop(&action) {
+            // Pointed at the eye that can see what the action did: `look` sees no web page, so
+            // "look at the window" after a screen click sent the owner's run round in circles.
+            return self.reject(job, if matches!(action, Action::ScreenLook { .. }) {
+                "you have looked at the screen twice and it is the same: act on what it shows (enlarge a square, click a spot) or replan"
+            } else if matches!(action, Action::ScreenClick { .. } | Action::ScreenType { .. }) {
+                "that exact action already worked; screen_look to see what it did, then take the next step"
+            } else if on_the_desktop(&action) {
                 "that exact action already worked; look at the window to see what it did, then take the next step"
             } else {
                 "that exact action just succeeded — its result is in the steps above; move on to the next step"
@@ -899,6 +907,11 @@ impl<M: Model> Engine<M> {
                     if self.perform(&mut job, step, action, false, false)? { return Ok(()); }
                     None
                 }
+                // A check proves the work, it does not do it: the owner's run said done with a
+                // click on the Firefox icon as its check, "I will now click it", and the job ended
+                // with the browser never opened.
+                (State::Working, Move::Done { check: Action::Press { .. } | Action::Type { .. } | Action::OpenApp { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. }, .. }) =>
+                    Some("a check proves the work is done, it does not do the work: do that with act first, then say done with a check that only looks (screen_look, look, read)".to_string()),
                 (State::Working, Move::Done { summary, check }) => {
                     // The absolute gate: a new project must leave a real BLUEPRINT.md behind,
                     // whether or not this job happened to change code — the counters only
@@ -2287,6 +2300,25 @@ mod tests {
                   "What should the site be called?", "Do you want a dark theme?"] {
             assert!(!asks_permission(q), "{q}");
         }
+    }
+
+    #[test]
+    fn a_check_that_clicks_is_sent_back() {
+        let click = Action::ScreenClick { cell: 1, spot: 1, name: "Firefox".into(), double: false };
+        let (mut e, rec, _) = engine_with(vec![screen_job(), plan(), act(1, Action::ScreenLook { cell: Some(1) }),
+            done(click.clone()), done(Action::ScreenLook { cell: None })], "check-clicks");
+        e.handle_events("open firefox").unwrap();
+        assert!(!rec.desktop_calls.borrow().contains(&click), "the click never ran as a check");
+        assert!(e.model.prompts.borrow()[4].user.contains("a check proves the work is done"));
+    }
+
+    #[test]
+    fn the_screen_may_be_looked_at_twice_while_something_loads() {
+        let look = || act(1, Action::ScreenLook { cell: None });
+        let (mut e, rec, _) = engine_with(vec![screen_job(), plan(), look(), look(), look(), done(Action::ScreenLook { cell: None })], "look-twice");
+        e.handle_events("wait for it").unwrap();
+        assert_eq!(rec.desktop_calls.borrow().len(), 3, "two looks and the check: the third look in a row was sent back");
+        assert!(e.model.prompts.borrow()[5].user.contains("you have looked at the screen twice"));
     }
 
     fn screen_job() -> Move { Move::Housekeep { goal: "use the screen".into(), understood: "Using the screen".into(), remember: None } }
