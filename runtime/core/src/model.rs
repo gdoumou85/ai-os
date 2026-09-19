@@ -89,10 +89,21 @@ impl RemoteModel {
         let resp: serde_json::Value = match req.send_json(body) {
             Ok(r) => r.into_json().map_err(|e| (false, ModelError::Http(e.to_string())))?,
             Err(ureq::Error::Transport(t)) if t.kind() == ureq::ErrorKind::ConnectionFailed => return Err((true, ModelError::Http(t.to_string()))),
+            // The runner's own reason, not just its number: a 402 from a signed-in Ollama means a
+            // cloud model's allowance ran out, and only the body says so.
+            Err(ureq::Error::Status(code, r)) => return Err((false, ModelError::Http(format!("{endpoint}: status {code}: {}", runner_reason(&r.into_string().unwrap_or_default()))))),
             Err(e) => return Err((false, ModelError::Http(e.to_string()))),
         };
         match self.kind { Kind::Ollama => parse_ollama(&resp), Kind::OpenAi => parse_openai(&resp) }.map_err(|e| (false, e))
     }
+}
+
+/// The reason in a runner's error body: Ollama's `{"error":"…"}`, OpenAI's `{"error":{"message":"…"}}`,
+/// or the text itself, cut short.
+fn runner_reason(body: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let why = v["error"]["message"].as_str().or(v["error"].as_str()).unwrap_or(body.trim());
+    why.chars().take(300).collect()
 }
 
 /// Narrow `format.oneOf` to the moves legal for this call (decision 13): the model physically
@@ -214,6 +225,14 @@ mod tests {
 
     const OLLAMA_HI: &str = r#"{"message":{"role":"assistant","content":"{\"move\":\"reply\",\"text\":\"hi\"}"}}"#;
     const OPENAI_HI: &str = r#"{"choices":[{"message":{"role":"assistant","content":"{\"move\":\"reply\",\"text\":\"hi\"}"}}]}"#;
+
+    #[test]
+    fn a_runners_error_says_why() {
+        assert_eq!(runner_reason(r#"{"error":"you have reached your weekly usage limit"}"#), "you have reached your weekly usage limit");
+        assert_eq!(runner_reason(r#"{"error":{"message":"invalid key","type":"auth"}}"#), "invalid key");
+        assert_eq!(runner_reason("  Payment Required
+"), "Payment Required");
+    }
 
     #[test]
     fn ollama_http_error_status_is_model_error_http() {

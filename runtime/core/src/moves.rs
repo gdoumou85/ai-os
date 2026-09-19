@@ -26,7 +26,9 @@ pub enum Move {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember: Option<String>,
     },
-    Ask { questions: Vec<String> },
+    /// `options[i]` are the answers to offer for `questions[i]` as buttons (the owner, 2026-09-19);
+    /// empty for a question only the person can answer in words.
+    Ask { questions: Vec<String>, #[serde(default)] options: Vec<Vec<String>> },
     Plan { steps: Vec<String> },
     Act { step: usize, action: Action },
     Replan { steps: Vec<String>, why: String },
@@ -47,6 +49,7 @@ mod tests {
             r#"{"move":"start","project":"primes","new_project":true,"description":"prime printer","goal":"print 10 primes","creative":false,"understood":"Starting a new project primes"}"#,
             r#"{"move":"housekeep","goal":"prepare /data/work","understood":"Housekeeping: preparing /data/work"}"#,
             r#"{"move":"ask","questions":["Which language?"]}"#,
+            r#"{"move":"ask","questions":["Which language?","Its name?"],"options":[["Python","Rust"],[]]}"#,
             r#"{"move":"plan","steps":["write primes.py","run it"]}"#,
             r#"{"move":"act","step":1,"action":{"kind":"write_file","path":"primes.py","contents":"print(2)"}}"#,
             r#"{"move":"act","step":1,"action":{"kind":"install","packages":["cowsay"]}}"#,

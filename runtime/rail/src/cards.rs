@@ -11,7 +11,8 @@ pub struct StepLine { pub text: String, pub done: bool, pub ok: bool, pub detail
 pub enum CardKind {
     You, Said,
     Building { name: String, understood: String, steps: Vec<StepLine>, collapsed: bool },
-    NeedsAnswer { questions: Vec<String> },
+    /// `options[i]`: buttons for `questions[i]`, maybe none.
+    NeedsAnswer { questions: Vec<String>, options: Vec<Vec<String>> },
     NeedsOk { what: String, why: String },
     Done { text: String, check: Option<String>, files: Vec<ChangedFile>, windows: Vec<String> },
     Failed { text: String, files: Vec<ChangedFile> },
@@ -48,6 +49,15 @@ pub fn busy_after(ev: &Event) -> Option<bool> {
 
 #[derive(Default)]
 pub struct Cards { pub list: Vec<Card>, building: Option<usize> }
+
+/// The answer the person has clicked so far on a question card: the choice alone for one question,
+/// each question with its choice for several. `true` once every question has one, and it is sent;
+/// until then the text waits in the box, where a question with no buttons gets typed.
+pub fn answer(questions: &[String], picks: &[Option<String>]) -> (String, bool) {
+    if let [_] = questions { if let Some(Some(p)) = picks.first() { return (p.clone(), true) } }
+    let text = questions.iter().zip(picks).filter_map(|(q, p)| p.as_ref().map(|p| format!("{q} {p}."))).collect::<Vec<_>>().join(" ");
+    (text, picks.len() == questions.len() && picks.iter().all(Option::is_some))
+}
 
 fn btn(label: &str, say: &str) -> Button { Button { label: label.into(), say: say.into() } }
 
@@ -93,7 +103,7 @@ impl Cards {
                 }
                 None => vec![],
             },
-            Event::NeedsAnswer { job_id, questions } => self.push(Card { kind: CardKind::NeedsAnswer { questions: questions.clone() }, text: questions.join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
+            Event::NeedsAnswer { job_id, questions, options } => self.push(Card { kind: CardKind::NeedsAnswer { questions: questions.clone(), options: options.clone() }, text: questions.join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
             Event::NeedsOk { job_id, what, why } => self.push(Card { kind: CardKind::NeedsOk { what: what.clone(), why: why.clone() }, text: format!("{what}\n{why}"), buttons: vec![btn("Yes", "yes"), btn("No", "no")], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
             Event::Done { job_id, text, check, files, windows } => {
                 let mut ch = self.close_building();
@@ -148,8 +158,8 @@ impl Cards {
     fn waiting_card(&mut self, st: &JobState) -> Vec<Change> {
         let (kind, ev) = match &st.waiting {
             Waiting::None => return vec![],
-            Waiting::Answer { questions } => (CardKind::NeedsAnswer { questions: questions.clone() },
-                Event::NeedsAnswer { job_id: st.id.clone(), questions: questions.clone() }),
+            Waiting::Answer { questions, options } => (CardKind::NeedsAnswer { questions: questions.clone(), options: options.clone() },
+                Event::NeedsAnswer { job_id: st.id.clone(), questions: questions.clone(), options: options.clone() }),
             Waiting::Ok { what, why } => (CardKind::NeedsOk { what: what.clone(), why: why.clone() },
                 Event::NeedsOk { job_id: st.id.clone(), what: what.clone(), why: why.clone() }),
         };

@@ -225,7 +225,7 @@ impl<M: Model> Engine<M> {
             plan: job.plan.clone(),
             steps: job.steps.iter().map(|s| StepView { plan_step: s.plan_step, text: crate::event::describe(&s.action), ok: s.ok }).collect(),
             waiting: match (job.state, &job.pending_action) {
-                (State::WaitingAnswer, _) => Waiting::Answer { questions: job.pending_questions.clone() },
+                (State::WaitingAnswer, _) => Waiting::Answer { questions: job.pending_questions.clone(), options: job.pending_options.clone() },
                 (State::WaitingApproval, Some((_, a))) => Waiting::Ok { what: crate::event::describe(a), why: job.pending_reason.clone() },
                 _ => Waiting::None,
             },
@@ -339,6 +339,7 @@ impl<M: Model> Engine<M> {
                     let q = job.pending_questions.join(" / ");
                     job.answers.push((q, text.to_string()));
                     job.pending_questions.clear();
+                    job.pending_options.clear();
                     job.state = if job.plan.is_empty() { State::Planning } else { State::Working };
                     job.rejections = 0;
                     self.store.save_job(&job)?;
@@ -836,18 +837,19 @@ impl<M: Model> Engine<M> {
             p.image = self.image.take();
             let mv = self.model.next_move(&p)?;
             let rejected = match (job.state, mv) {
-                (State::Asking, Move::Ask { questions }) | (State::Working, Move::Ask { questions }) | (State::Planning, Move::Ask { questions }) if !job.creative => {
+                (State::Asking, Move::Ask { questions, options }) | (State::Working, Move::Ask { questions, options }) | (State::Planning, Move::Ask { questions, options }) if !job.creative => {
                     if questions.is_empty() {
                         Some("ask needs at least one question".to_string())
                     } else if questions.iter().any(|q| asks_permission(q)) {
                         Some("never ask for permission: take the step itself — where it needs the user's yes, the machine stops it and asks them".to_string())
                     } else {
                         job.pending_questions = questions.clone();
+                        job.pending_options = options.clone();
                         job.state = State::WaitingAnswer;
                         job.rejections = 0;
                         job.note_to_model = None;
                         self.store.save_job(&job)?;
-                        self.emit(Event::NeedsAnswer { job_id: job.id.clone(), questions });
+                        self.emit(Event::NeedsAnswer { job_id: job.id.clone(), questions, options });
                         return Ok(());
                     }
                 }
@@ -994,7 +996,7 @@ mod tests {
     fn start_creates_project_folder_and_job_and_says_what_it_understood() {
         // The trailing Ask is unused by this task's stub loop; once Task 8 lands, the real
         // loop consumes it and pauses the job as waiting_answer — the assertions hold both ways.
-        let (mut e, _, root) = engine_with(vec![start("Primes Printer", false), Move::Ask { questions: vec!["Which language?".into()] }], "start");
+        let (mut e, _, root) = engine_with(vec![start("Primes Printer", false), Move::Ask { questions: vec!["Which language?".into()], options: vec![] }], "start");
         let out = e.handle("make me a primes script").unwrap();
         assert_eq!(out[0], "Starting a new project Primes Printer");
         let job = e.open_job().unwrap().expect("a job is open");
@@ -1026,7 +1028,7 @@ mod tests {
 
     #[test]
     fn stop_cancels_an_open_job_through_handle() {
-        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()] }], "cancel");
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()], options: vec![] }], "cancel");
         e.handle("make p").unwrap();
         let out = e.handle("Stop.").unwrap();
         assert!(out.iter().any(|l| l.contains("Stopped")), "{out:?}");
@@ -1051,7 +1053,7 @@ mod tests {
         // Both doors at once: the service arms the flag AND queues the word. The job is waiting
         // for an answer, so the flag has nothing to land between — the word ends the job, and it
         // must clear the flag on its way out or the next job would start with a stop pending.
-        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["which language?".into()] }], "waiting-stop");
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["which language?".into()], options: vec![] }], "waiting-stop");
         e.handle("make p").unwrap();
         assert!(matches!(e.open_job().unwrap().unwrap().state, State::WaitingAnswer));
         let flag = e.stop_flag();
@@ -1126,7 +1128,7 @@ mod tests {
 
     #[test]
     fn stop_cancels_the_open_job_without_asking_the_model() {
-        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()] }], "stop");
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()], options: vec![] }], "stop");
         e.handle("make p").unwrap();
         assert_eq!(e.open_job().unwrap().unwrap().state, State::WaitingAnswer);
         let out = e.handle("stop").unwrap();
@@ -1139,7 +1141,7 @@ mod tests {
     fn asks_then_answer_resumes_and_answer_is_in_the_prompt() {
         let (mut e, _, _) = engine_with(vec![
             start("p", false),
-            Move::Ask { questions: vec!["Which language?".into()] },
+            Move::Ask { questions: vec!["Which language?".into()], options: vec![] },
             plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
         ], "ask");
         let out = e.handle("make it").unwrap();
@@ -1154,7 +1156,7 @@ mod tests {
     #[test]
     fn ask_in_creative_mode_is_rejected_then_model_complies() {
         let (mut e, _, _) = engine_with(vec![
-            start("p", true), Move::Ask { questions: vec!["?".into()] }, plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+            start("p", true), Move::Ask { questions: vec!["?".into()], options: vec![] }, plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
         ], "creative-ask");
         let out = e.handle("decide yourself").unwrap();
         assert!(out.last().unwrap().contains("finished"), "{out:?}");
@@ -1431,7 +1433,7 @@ mod tests {
 
     #[test]
     fn a_waiting_job_resumes_from_the_store_after_a_restart() {
-        let (mut e, _, root) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Language?".into()] }], "restart");
+        let (mut e, _, root) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Language?".into()], options: vec![] }], "restart");
         e.handle("make it").unwrap();
         let store = std::mem::replace(&mut e.store, crate::store::Store::open_in_memory().unwrap());
         drop(e);
@@ -1461,7 +1463,7 @@ mod tests {
     #[test]
     fn empty_ask_is_rejected_then_a_real_question_goes_through() {
         let (mut e, _, _) = engine_with(vec![
-            start("p", false), Move::Ask { questions: vec![] }, Move::Ask { questions: vec!["Which language?".into()] },
+            start("p", false), Move::Ask { questions: vec![], options: vec![] }, Move::Ask { questions: vec!["Which language?".into()], options: vec![] },
         ], "empty-ask");
         let out = e.handle("go").unwrap();
         assert!(out.iter().any(|l| l.contains("Which language?")), "{out:?}");
@@ -1687,7 +1689,7 @@ mod tests {
         let post = Action::HttpPost { url: "https://x".into(), body: "b".into() };
         let (mut e, _, _) = engine_with(vec![
             start("p", true), plan(), act(1, write("BLUEPRINT.md")),
-            Move::Ask { questions: vec!["?".into()] },   // rejected: creative mode (rejections -> 1)
+            Move::Ask { questions: vec!["?".into()], options: vec![] },   // rejected: creative mode (rejections -> 1)
             act(2, post.clone()),                          // blocked -> should reset rejections to 0
         ], "blocked-resets");
         let out = e.handle("go").unwrap();
@@ -1892,7 +1894,7 @@ mod tests {
     #[test]
     fn housekeep_out_of_turn_is_rejected_like_start() {
         let (mut e, _, _) = engine_with(vec![
-            start("p", false), Move::Ask { questions: vec!["Which language?".into()] },
+            start("p", false), Move::Ask { questions: vec!["Which language?".into()], options: vec![] },
             housekeep(),                                   // out of turn: a job is already running
             plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
         ], "hk-out-of-turn");
@@ -1953,7 +1955,7 @@ mod tests {
     #[test]
     fn undo_while_a_job_is_open_is_refused() {
         let (mut e, _, _) = engine_with(vec![
-            start("p", false), Move::Ask { questions: vec!["Which language?".into()] },
+            start("p", false), Move::Ask { questions: vec!["Which language?".into()], options: vec![] },
         ], "undo-open");
         e.handle("make p").unwrap();
         let before = e.open_job().unwrap().expect("a job is open");
@@ -2001,7 +2003,7 @@ mod tests {
     #[test]
     fn cancelled_jobs_are_undoable() {
         let (mut e, rec, _) = engine_with(vec![
-            housekeep(), plan(), make_work(), Move::Ask { questions: vec!["Anything else?".into()] },
+            housekeep(), plan(), make_work(), Move::Ask { questions: vec!["Anything else?".into()], options: vec![] },
         ], "undo-cancelled");
         rec.admin_outcomes.borrow_mut().push_back(dir_undo());
         e.handle("prep").unwrap();
@@ -2180,9 +2182,12 @@ mod tests {
 
     #[test]
     fn questions_and_approvals_are_events() {
-        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Which language?".into()] }], "ev-ask");
+        let py = || vec![vec!["Python".to_string(), "Rust".to_string()]];
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Which language?".into()], options: py() }], "ev-ask");
         let ev = events_of(&mut e, "make it");
-        assert!(matches!(ev.last().unwrap(), Event::NeedsAnswer { questions, .. } if questions == &vec!["Which language?".to_string()]));
+        assert!(matches!(ev.last().unwrap(), Event::NeedsAnswer { questions, options, .. } if questions == &vec!["Which language?".to_string()] && options == &py()));
+        assert_eq!(e.state().unwrap().unwrap().waiting, aios_proto::Waiting::Answer { questions: vec!["Which language?".into()], options: py() }, "a reconnecting window gets the buttons back");
+        assert_eq!(crate::event::lines(ev.last().unwrap()), vec!["Question: Which language? (Python / Rust)".to_string()]);
 
         let (mut e, _, _) = engine_with(vec![start("p", true), plan(), act(1, Action::HttpPost { url: "https://x".into(), body: "b".into() })], "ev-ok");
         let ev = events_of(&mut e, "post it");
@@ -2191,7 +2196,7 @@ mod tests {
 
     #[test]
     fn stop_and_give_up_are_events_and_lines_match_the_old_prose() {
-        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()] }], "ev-stop");
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["?".into()], options: vec![] }], "ev-stop");
         e.handle("make p").unwrap();
         let ev = events_of(&mut e, "stop");
         assert!(matches!(&ev[0], Event::Stopped { text, .. } if text == "Stopped the job in p."));
@@ -2450,12 +2455,12 @@ mod tests {
     #[test]
     fn state_mirrors_the_open_job_and_what_it_waits_for() {
         use aios_proto::Waiting;
-        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Which language?".into()] }], "state-ans");
+        let (mut e, _, _) = engine_with(vec![start("p", false), Move::Ask { questions: vec!["Which language?".into()], options: vec![] }], "state-ans");
         assert!(e.state().unwrap().is_none());
         e.handle("make p").unwrap();
         let st = e.state().unwrap().unwrap();
         assert_eq!((st.name.as_str(), st.housekeeping, st.understood.as_str()), ("p", false, "Starting a new project p"));
-        assert_eq!(st.waiting, Waiting::Answer { questions: vec!["Which language?".into()] });
+        assert_eq!(st.waiting, Waiting::Answer { questions: vec!["Which language?".into()], options: vec![] });
 
         let (e, _) = waiting_ok("state-ok");
         let st = e.state().unwrap().unwrap();

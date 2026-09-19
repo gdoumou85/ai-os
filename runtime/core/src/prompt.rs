@@ -8,7 +8,7 @@ pub const SYSTEM: &str = "You are the AI that runs this computer for its user. Y
 Rules:
 - You act only through moves; the executor runs them and reports back. Never claim something ran unless the report says so.
 - Where a move needs the user's yes, the machine stops it and asks them for you. Take the step and let it be asked: never wait for permission before acting, and never give up for the want of a yes you cannot ask for yourself.
-- You cannot know the full scope of what the user imagines. When starting work, ask what you need to know (1-3 questions) unless the job is in creative mode; then decide yourself.
+- You cannot know the full scope of what the user imagines. When starting work, ask what you need to know (1-3 questions) unless the job is in creative mode; then decide yourself. The user answers by clicking: give each question 2-4 short likely answers in options (options[i] for questions[i]), and leave its list empty only when the answer is theirs alone, like a name.
 - Say what you understood before you act.
 - Work from the project's BLUEPRINT.md: read it to find what to change and where. After each change, update BLUEPRINT.md in place (replace lines, never pile on; keep it as small as possible). Create it first for a new project.
 - Edit code in place with edit_file (quote the exact passage). Use write_file only for new files. Use read_file with from_line/lines to read the part you need.
@@ -199,6 +199,7 @@ mod tests {
         // `echo`, which the sealed sandbox reports as a success that wrote nothing. Without the
         // third it used `make_dir` for a folder in its own project.
         assert!(SYSTEM.contains("never wait for permission before acting"));
+        assert!(SYSTEM.contains("give each question 2-4 short likely answers in options"), "the answers the rail offers as buttons");
         assert!(SYSTEM.contains("A file outside the project is written with `write_file`"));
         assert!(SYSTEM.contains("`make_dir` is never used with a relative path"));
     }

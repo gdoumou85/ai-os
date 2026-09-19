@@ -201,7 +201,7 @@ fn open_path(path: &str) {
     let _ = std::process::Command::new("xdg-open").arg(path).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
-fn render(card: &Card, say: &Sender<String>) -> gtk::Widget {
+fn render(card: &Card, say: &Sender<String>, entry: &gtk::Entry) -> gtk::Widget {
     let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
     b.add_css_class("card");
     let title = |t: &str| { let l = gtk::Label::new(Some(t)); l.add_css_class("title"); l.set_xalign(0.0); l.set_wrap(true); l };
@@ -233,7 +233,36 @@ fn render(card: &Card, say: &Sender<String>) -> gtk::Widget {
                 }
             }
         }
-        CardKind::NeedsAnswer { questions } => { b.add_css_class("ask"); b.append(&title("Needs your answer")); for q in questions { b.append(&text(q)); } }
+        CardKind::NeedsAnswer { questions, options } => {
+            b.add_css_class("ask"); b.append(&title("Needs your answer"));
+            // A click answers (cards::answer): one question sends at once; with several, the picks
+            // gather in the text box and go when every question has one. Typing always works too.
+            let picks = Rc::new(RefCell::new(vec![None::<String>; questions.len()]));
+            for (i, q) in questions.iter().enumerate() {
+                b.append(&text(q));
+                let Some(opts) = options.get(i).filter(|o| !o.is_empty()) else { continue };
+                let row = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).max_children_per_line(4).column_spacing(6).row_spacing(6).build();
+                for o in opts {
+                    let w = gtk::Button::with_label(o);
+                    let (picks, qs, s, e, o) = (picks.clone(), questions.clone(), say.clone(), entry.clone(), o.clone());
+                    w.connect_clicked(move |w| {
+                        // Found from the button, not held in a list: a list the buttons' own handlers
+                        // held would keep every answered card alive after Clear.
+                        let mut c = w.ancestor(gtk::FlowBox::static_type()).and_then(|f| f.first_child());
+                        while let Some(child) = c { if let Some(x) = child.first_child() { x.remove_css_class("suggested-action"); } c = child.next_sibling(); }
+                        w.add_css_class("suggested-action");
+                        picks.borrow_mut()[i] = Some(o.clone());
+                        let (t, complete) = aios_rail::cards::answer(&qs, &picks.borrow());
+                        if complete {
+                            let _ = s.send(t); e.set_text("");
+                            if let Some(card) = w.ancestor(gtk::Box::static_type()) { card.set_sensitive(false); }
+                        } else { e.set_text(&t); e.set_position(-1); e.grab_focus(); }
+                    });
+                    row.insert(&w, -1);
+                }
+                b.append(&row);
+            }
+        }
         CardKind::NeedsOk { what, why } => { b.add_css_class("ok"); b.append(&title("Needs your OK")); b.append(&text(what)); let l = text(why); l.add_css_class("dim"); b.append(&l); }
         CardKind::Done { text: t, check, files, windows } => {
             b.add_css_class("done"); b.append(&title("Done")); b.append(&text(t));
@@ -352,17 +381,17 @@ fn main() {
         });
         let s_stop = say.clone();
         stop.connect_clicked(move |_| { let _ = s_stop.send("stop".into()); });
-        let (cards3, widgets3, column3, say3) = (cards.clone(), widgets.clone(), column.clone(), say.clone());
+        let (cards3, widgets3, column3, say3, entry3) = (cards.clone(), widgets.clone(), column.clone(), say.clone(), entry.clone());
         clear.connect_clicked(move |_| {
             cards3.borrow_mut().clear();
             for w in widgets3.borrow_mut().drain(..) { column3.remove(&w); }
-            for c in &cards3.borrow().list { let w = render(c, &say3); column3.append(&w); widgets3.borrow_mut().push(w); }
+            for c in &cards3.borrow().list { let w = render(c, &say3, &entry3); column3.append(&w); widgets3.borrow_mut().push(w); }
         });
 
         let s = say.clone();
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(t); e.set_text(""); } });
 
-        let (cards2, widgets2, column2, status2, say2, spinner2, stop2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone());
+        let (cards2, widgets2, column2, status2, say2, spinner2, stop2, entry2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone(), entry.clone());
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
                 match msg {
@@ -389,8 +418,8 @@ fn main() {
                         let changes = cards2.borrow_mut().apply(&ev);
                         for ch in changes {
                             match ch {
-                                Change::Added(i) => { let w = render(&cards2.borrow().list[i], &say2); column2.append(&w); widgets2.borrow_mut().push(w); }
-                                Change::Updated(i) => { let old = widgets2.borrow()[i].clone(); let w = render(&cards2.borrow().list[i], &say2); column2.insert_child_after(&w, Some(&old)); column2.remove(&old); widgets2.borrow_mut()[i] = w; }
+                                Change::Added(i) => { let w = render(&cards2.borrow().list[i], &say2, &entry2); column2.append(&w); widgets2.borrow_mut().push(w); }
+                                Change::Updated(i) => { let old = widgets2.borrow()[i].clone(); let w = render(&cards2.borrow().list[i], &say2, &entry2); column2.insert_child_after(&w, Some(&old)); column2.remove(&old); widgets2.borrow_mut()[i] = w; }
                                 Change::Line(t) => status2.set_text(&t),
                             }
                         }
