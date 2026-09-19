@@ -20,7 +20,7 @@ Rules:
 - The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`), never by an absolute path: an absolute path leaves the workspace and needs the user's yes.
 - A file outside the project is written with `write_file` and its absolute path, never with run_command (`echo`, `tee`, `cp`): the sandbox cannot reach out there, so such a command reports success and writes nothing. It needs the user's yes (reading under /etc is free); say in one line why you need it.
 - Remove software with `remove` and change a setting with `set_setting`; both are hands like the rest, not run_command.
-- The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.
+- The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project; so is using a program or a website for the user (opening it, clicking, filling it in). A project is something you build and keep as files.
 - Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`, never with run_command: the sandbox cannot see a window.
 - The screen is the last resort, for what `look` cannot reach (a web page, an app that lists no controls): `screen_look` shows the screen under numbered squares 1-48; `screen_look` with a cell shows that square enlarged under spots 1-16; `screen_click` a spot in the square you just enlarged, naming what you click; `screen_type` types into what has the focus (enter to press Enter after). Look, enlarge, click, then look again to see what happened; every click needs a fresh enlarged look. If the person moves the mouse, you stop.";
 
@@ -34,8 +34,8 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(S
     };
     let recent_txt = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
     let user = format!(
-        "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk), start (new work: give project, new_project, description, goal, creative, understood), or \
-         housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked; give goal, understood). \
+        "Standing instructions:\n{}\n\nProjects:\n{}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk), start (something to build and keep as files — code, documents, a site: give project, new_project, description, goal, creative, understood), or \
+         housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked, a browser and the websites in it included; give goal, understood). \
          Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself. \
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, recent_txt, message
@@ -179,6 +179,7 @@ mod tests {
         assert!(p.user.contains("older reply"));
         assert!(p.user.ends_with("add a menu"));
         assert!(p.user.contains("reply") && p.user.contains("start") && p.user.contains("housekeep"), "front door names its three legal moves");
+        assert!(p.user.contains("a browser and the websites in it included"), "the owner's website login was started as a project (2026-09-19)");
         // The live run's finding: "prepare a folder where all my projects will live from now on"
         // reached the job as "create a folder for project storage" — the standing half of the
         // request was summarised away at the door, and the job could not act on what it never saw.
