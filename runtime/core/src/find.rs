@@ -1,5 +1,5 @@
-//! Finds model runners on the home network (network-models spec §1): every address of this
-//! machine's /24 is tried on Ollama's door and on LM Studio's, and whatever answers is asked for its
+//! Finds model runners on the home network (network-models spec §1): every address of each
+//! /24 this machine is on is tried on Ollama's door and on LM Studio's, and whatever answers is asked for its
 //! models. Used by the installer (through `ai-os-find`) and by the engine when its runner moves.
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::time::Duration;
@@ -23,17 +23,28 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Found { pub url: String, pub kind: Kind, pub model: Option<String> }
 
-/// 127.0.0.1, then the rest of the /24 this machine's default route leaves from.
+/// 127.0.0.1, then the rest of every /24 this machine is on: a VM with a NAT adapter (the laptop
+/// at 10.0.2.2) and a bridged one (the home network) needs both (the owner, 2026-09-19).
 pub fn home_hosts() -> Vec<Ipv4Addr> {
-    let mut hosts = vec![Ipv4Addr::LOCALHOST];
+    // `hostname -I` lists every address of every interface; the default route's address is added
+    // in case it is missing (no `hostname`).
+    let listed = std::process::Command::new("hostname").arg("-I").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let mut mine: Vec<Ipv4Addr> = listed.split_whitespace().filter_map(|a| a.parse().ok()).collect();
     // A UDP "connect" sends nothing; it only makes the OS pick the local address for that route.
-    // ponytail: the default-route /24 only; a real interface list if bigger or multi-NIC networks matter.
-    let local = UdpSocket::bind("0.0.0.0:0").and_then(|s| { s.connect("192.0.2.1:9")?; s.local_addr() });
-    if let Ok(SocketAddr::V4(a)) = local {
-        let me = *a.ip();
-        let [x, y, z, _] = me.octets();
-        // This machine itself is already 127.0.0.1: listing it twice would list its models twice.
-        hosts.extend((1..=254).map(|d| Ipv4Addr::new(x, y, z, d)).filter(|h| *h != me));
+    if let Ok(SocketAddr::V4(a)) = UdpSocket::bind("0.0.0.0:0").and_then(|s| { s.connect("192.0.2.1:9")?; s.local_addr() }) { mine.push(*a.ip()); }
+    hosts_around(&mine)
+}
+
+/// 127.0.0.1 and the /24 around each private address, without this machine's own addresses (it is
+/// already 127.0.0.1: listing it twice would list its models twice). A public address is never
+/// swept: that is someone else's network.
+/// ponytail: a /24 per interface; a wider sweep if bigger home networks matter.
+pub fn hosts_around(mine: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
+    let mut hosts = vec![Ipv4Addr::LOCALHOST];
+    let mut nets: Vec<[u8; 3]> = mine.iter().filter(|a| a.is_private()).map(|a| { let [x, y, z, _] = a.octets(); [x, y, z] }).collect();
+    nets.sort(); nets.dedup();
+    for [x, y, z] in nets {
+        hosts.extend((1..=254).map(|d| Ipv4Addr::new(x, y, z, d)).filter(|h| !mine.contains(h)));
     }
     hosts
 }
@@ -119,7 +130,19 @@ mod tests {
     fn the_home_network_starts_with_this_machine() {
         let hosts = home_hosts();
         assert_eq!(hosts[0], Ipv4Addr::LOCALHOST);
-        assert!(hosts.len() <= 255);
+        assert!(hosts.len() <= 1 + 253 * 8, "a /24 per interface at most");
+    }
+
+    #[test]
+    fn every_private_network_is_swept_once() {
+        let nat = Ipv4Addr::new(10, 0, 2, 15);
+        let home = Ipv4Addr::new(192, 168, 1, 40);
+        let hosts = hosts_around(&[nat, home, nat, Ipv4Addr::new(8, 8, 8, 8)]);
+        assert_eq!(hosts[0], Ipv4Addr::LOCALHOST);
+        assert_eq!(hosts.len(), 1 + 253 + 253, "two /24s, each without this machine, the public one skipped");
+        assert!(hosts.contains(&Ipv4Addr::new(10, 0, 2, 2)), "the VM's host laptop");
+        assert!(hosts.contains(&Ipv4Addr::new(192, 168, 1, 7)), "the second PC");
+        assert!(!hosts.contains(&nat) && !hosts.contains(&home));
     }
 
     #[test]
