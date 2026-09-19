@@ -21,7 +21,8 @@ Rules:
 - A file outside the project is written with `write_file` and its absolute path, never with run_command (`echo`, `tee`, `cp`): the sandbox cannot reach out there, so such a command reports success and writes nothing. It needs the user's yes (reading under /etc is free); say in one line why you need it.
 - Remove software with `remove` and change a setting with `set_setting`; both are hands like the rest, not run_command.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project.
-- Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`, never with run_command: the sandbox cannot see a window.";
+- Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`, never with run_command: the sandbox cannot see a window.
+- The screen is the last resort, for what `look` cannot reach (a web page, an app that lists no controls): `screen_look` shows the screen under numbered squares 1-48; `screen_look` with a cell shows that square enlarged under spots 1-16; `screen_click` a spot in the square you just enlarged, naming what you click; `screen_type` types into what has the focus (enter to press Enter after). Look, enlarge, click, then look again to see what happened; every click needs a fresh enlarged look. If the person moves the mouse, you stop.";
 
 fn join_instructions(instructions: &[String]) -> String {
     if instructions.is_empty() { "(none)".into() } else { instructions.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n") }
@@ -39,7 +40,7 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], recent: &[(S
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, recent_txt, message
     );
-    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"] }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"], image: None }
 }
 
 /// The moves legal right now, by job state and mode (decision 13): sent as `Prompt::allowed` so
@@ -145,7 +146,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         "Machine: Ubuntu Linux (python3, no `python`; apt via install; pip/npm/cargo via fetch_packages).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
         join_instructions(instructions), header, job.goal, verbatim, mode, job.understood, answers, plan, bp_block, last, summarise_steps(job), note, hint
     );
-    Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job) }
+    Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job), image: None }
 }
 
 /// The user asked something instead of yes or no while an action waits for their OK (1d §2.1).
@@ -155,7 +156,7 @@ pub fn approval_question(instructions: &[String], job: &Job, what: &str, why: &s
         "Standing instructions:\n{}\n\nJob: {} — {}\nAn action is waiting for the user's OK: {what} (reason: {why}).\nThe user asked: {question}\nAnswer the question in one or two plain sentences so they can decide. Do not act, do not decide for them, do not ask them for the OK yourself (the system asks again).",
         join_instructions(instructions), if job.housekeeping { "housekeeping" } else { &job.project }, job.goal,
     );
-    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply"] }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply"], image: None }
 }
 
 #[cfg(test)]
@@ -221,7 +222,7 @@ mod tests {
 
     #[test]
     fn system_rules_teach_the_desktop_hand_and_name_no_application() {
-        for w in ["`look`", "`press`", "`type`", "`read`", "`open_app`", "Look before you act"] { assert!(SYSTEM.contains(w), "{w}"); }
+        for w in ["`look`", "`press`", "`type`", "`read`", "`open_app`", "Look before you act", "`screen_look`", "`screen_click`", "`screen_type`", "last resort"] { assert!(SYSTEM.contains(w), "{w}"); }
         // The live 2a run: the model typed the line five times over and reached for Close, because
         // nothing told it that Save lives behind the menu button and answers to `Ctrl+S`.
         for w in ["look for its menu or menu button", "`Ctrl+S`"] { assert!(SYSTEM.contains(w), "{w}"); }

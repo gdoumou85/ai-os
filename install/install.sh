@@ -25,7 +25,8 @@ sudo -v
 echo "== packages"
 sudo env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y btrfs-progs libgtk-4-1 curl gnome-text-editor \
-  python3-venv npm cargo at-spi2-core
+  python3-venv npm cargo at-spi2-core \
+  gstreamer1.0-tools gstreamer1.0-pipewire imagemagick   # the screen hand: a frame, and the grid drawn on it
 
 echo "== /data (btrfs, where the AI works and what undo covers)"
 if ! mountpoint -q /data; then

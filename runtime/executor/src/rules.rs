@@ -235,6 +235,14 @@ pub fn classify(action: &Action, workspace: &Path) -> Risk {
         // yes could never make it work — and the live 2a run showed an unattended job stalling on
         // exactly that OK after the model reached for an app by its window title.
         Action::OpenApp { .. } => Risk::Auto,
+        // The screen (2b): looking and typing are what `look` and `type` are; a click is a press
+        // whose name is the model's own reading of the screen — the same words, the same rule.
+        // ponytail: `enter` on typed text can submit a form and is not asked about, as `type` isn't.
+        Action::ScreenLook { .. } | Action::ScreenType { .. } => Risk::Auto,
+        Action::ScreenClick { name, .. } => match risky_press(name) {
+            Some(why) => Risk::NeedsConfirm(format!("click {name} on the screen: it {why}")),
+            None => Risk::Auto,
+        },
     }
 }
 
@@ -399,6 +407,17 @@ mod tests {
     fn fetch_and_set_setting_are_auto() {
         assert_eq!(classify(&Action::FetchPackages { manager: Manager::Npm, packages: vec!["left-pad".into()] }, &ws()), Risk::Auto);
         assert_eq!(classify(&Action::SetSetting { key: "projects_root".into(), value: "/data/work".into() }, &ws()), Risk::Auto);
+    }
+
+    /// 2b: a screen click is a press whose name is the model's reading of the screen.
+    #[test]
+    fn a_screen_click_is_judged_by_the_name_the_model_gives_it() {
+        let click = |n: &str| Action::ScreenClick { cell: 1, spot: 1, name: n.into(), double: false };
+        assert_eq!(classify(&click("Next page"), &ws()), Risk::Auto);
+        assert!(matches!(classify(&click("Send"), &ws()), Risk::NeedsConfirm(r) if r == "click Send on the screen: it leaves the machine"));
+        assert!(matches!(classify(&click("Delete file"), &ws()), Risk::NeedsConfirm(_)));
+        assert_eq!(classify(&Action::ScreenLook { cell: None }, &ws()), Risk::Auto);
+        assert_eq!(classify(&Action::ScreenType { text: "hi".into(), enter: true }, &ws()), Risk::Auto);
     }
 
     #[test]

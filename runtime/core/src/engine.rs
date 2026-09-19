@@ -48,6 +48,9 @@ pub struct Engine<M: Model> {
     out: Vec<Event>,
     /// Raised from outside the turn loop to cancel the open job between steps.
     stop: Arc<AtomicBool>,
+    /// The screen hand's latest picture, for the next model turn only (2b): one image at a time is
+    /// what fits the 8k budget. In memory, never in the stored job.
+    image: Option<Vec<u8>>,
 }
 
 /// What the job left behind: entries under `folder` modified at or after `since` (unix
@@ -82,7 +85,8 @@ pub(crate) fn changed_files(folder: &Path, since: u64) -> Vec<ChangedFile> {
 /// The five actions that work a window (2a §3). Their world is the window, which moves on between
 /// steps, so neither the "just succeeded" guard nor the "already failed" one holds over them.
 fn on_the_desktop(action: &Action) -> bool {
-    matches!(action, Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. })
+    matches!(action, Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. }
+        | Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. })
 }
 
 /// The windows a job worked: those it looked into, in first-seen order, from the steps that
@@ -167,7 +171,7 @@ fn display_name(job: &Job) -> &str {
 
 impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf, snapshots_dir: PathBuf) -> Self {
-        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir, snapshotter: Box::new(RealSnapshotter), sink: Box::new(|_| {}), out: vec![], stop: Arc::new(AtomicBool::new(false)) }
+        Self { store, model, default_root, log_path, workers, housekeeping_dir, snapshots_dir, snapshotter: Box::new(RealSnapshotter), sink: Box::new(|_| {}), out: vec![], stop: Arc::new(AtomicBool::new(false)), image: None }
     }
 
     /// A clone of the engine's own stop flag — raise it to cancel the open job between steps.
@@ -458,6 +462,8 @@ impl<M: Model> Engine<M> {
 
     /// Mark a job finished (done/failed/cancelled) and say in one line what it came to.
     fn finish(&mut self, mut job: Job, state: State, text: String) -> Result<(), EngineError> {
+        // A picture of this job's screen must not open the next job's first turn.
+        self.image = None;
         job.state = state;
         job.outcome_text = text.clone();
         self.store.save_job(&job)?;
@@ -731,7 +737,15 @@ impl<M: Model> Engine<M> {
                 self.emit(Event::NeedsOk { job_id: job.id.clone(), what, why: reason });
                 Ok(true)
             }
-            ExecOutcome::Ran(outcome) => {
+            ExecOutcome::Ran(mut outcome) => {
+                // The person took the screen back (2b): the job ends here, told why, and the model
+                // is never asked to try again over their hands.
+                if !outcome.ok && outcome.detail == executor::screen::TOOK_OVER {
+                    let text = format!("I stopped {}: {}.", display_name(job), executor::screen::TOOK_OVER);
+                    self.finish(job.clone(), State::Cancelled, text)?;
+                    return Ok(true);
+                }
+                self.image = outcome.image.take();
                 job.rejections = 0;
                 // Like `rejections`: the counter bounds a model that is getting nowhere, so an
                 // action that actually ran clears it. Without this it is a lifetime count, and a
@@ -796,6 +810,9 @@ impl<M: Model> Engine<M> {
 
     /// Turn after turn until the job is done, failed, or needs the user (1b spec §3–§4).
     fn run_turns(&mut self, mut job: Job) -> Result<(), EngineError> {
+        // Asleep, the machine takes the job down with it: held while the turns run, let go when
+        // the job ends or waits on the person.
+        let _awake = executor::awake::hold("the AI is working on a job");
         loop {
             if self.stopped(&job)? { return Ok(()); }
             if job.steps.len() >= Self::MAX_STEPS {
@@ -803,7 +820,8 @@ impl<M: Model> Engine<M> {
                 return self.finish(job, State::Failed, text);
             }
             let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
-            let p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
+            let mut p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
+            p.image = self.image.take();
             let mv = self.model.next_move(&p)?;
             let rejected = match (job.state, mv) {
                 (State::Asking, Move::Ask { questions }) | (State::Working, Move::Ask { questions }) | (State::Planning, Move::Ask { questions }) if !job.creative => {
@@ -2238,6 +2256,39 @@ mod tests {
         let ev = e.handle_events("take my editor").unwrap();
         let Event::Done { windows, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
         assert_eq!(windows, &vec!["Text Editor".to_string()]);
+    }
+
+    fn housekeep() -> Move { Move::Housekeep { goal: "use the screen".into(), understood: "Using the screen".into(), remember: None } }
+
+    /// 2b: a look's picture is shown to the very next turn and to no other — one image is what
+    /// fits the budget, and an old one would show the model a screen that is gone.
+    #[test]
+    fn a_screen_look_shows_its_picture_to_the_next_turn_only() {
+        let (mut e, rec, _) = engine_with(vec![housekeep(), plan(),
+            act(1, Action::ScreenLook { cell: None }), act(1, Action::ScreenLook { cell: Some(3) }),
+            done(Action::ScreenLook { cell: None })], "screen-picture");
+        rec.desktop_outcomes.borrow_mut().push_back(Outcome { image: Some(b"one".to_vec()), ..Outcome::ok("the screen") });
+        e.handle_events("click the thing").unwrap();
+        let prompts = e.model.prompts.borrow();
+        let pictures: Vec<Option<&[u8]>> = prompts.iter().map(|p| p.image.as_deref()).collect();
+        let first = pictures.iter().position(Option::is_some).expect("a picture reached the model");
+        assert_eq!(pictures[first], Some(&b"one"[..]));
+        assert_eq!(pictures.iter().filter(|p| p.is_some()).count(), 1, "{pictures:?}");
+        assert!(matches!(prompts[first - 1].image, None), "not before the look ran");
+    }
+
+    /// 2b: the person moving the mouse ends the job, said plainly, and the model is never asked
+    /// to carry on over their hands.
+    #[test]
+    fn the_person_taking_the_screen_back_stops_the_job() {
+        let (mut e, rec, _) = engine_with(vec![housekeep(), plan(),
+            act(1, Action::ScreenLook { cell: Some(1) }),
+            act(1, Action::ScreenClick { cell: 1, spot: 1, name: "Link".into(), double: false }),
+            act(1, Action::ScreenLook { cell: None })], "screen-took-over");
+        rec.desktop_outcomes.borrow_mut().extend([Outcome::ok("square 1"), Outcome::err(executor::screen::TOOK_OVER)]);
+        let ev = e.handle_events("click the link").unwrap();
+        assert!(matches!(ev.last().unwrap(), Event::Stopped { text, .. } if text.contains("you moved the mouse")), "{ev:?}");
+        assert_eq!(rec.desktop_calls.borrow().len(), 2, "nothing ran after the person took over");
     }
 
     #[test]

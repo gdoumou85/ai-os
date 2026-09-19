@@ -4,7 +4,13 @@ use crate::schema;
 use std::cell::RefCell;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Prompt { pub system: String, pub user: String, pub allowed: Vec<&'static str> }
+pub struct Prompt {
+    pub system: String,
+    pub user: String,
+    pub allowed: Vec<&'static str>,
+    /// A PNG for the model to see with the user message: the screen hand's latest look (2b).
+    pub image: Option<Vec<u8>>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -113,17 +119,30 @@ pub(crate) fn narrow_schema(mut schema: serde_json::Value, allowed: &[&'static s
     schema
 }
 
+/// Standard base64 with padding, for a picture in a JSON body.
+/// ponytail: a dozen lines instead of a crate for the one place that needs it.
+pub fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
 pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
+    let mut user = serde_json::json!({ "role": "user", "content": prompt.user });
+    if let Some(png) = &prompt.image { user["images"] = serde_json::json!([base64(png)]); }
     serde_json::json!({
         "model": model,
         "stream": false,
         "think": false,
         "format": narrow_schema(schema::value(), &prompt.allowed),
         "options": { "temperature": 0.0, "num_ctx": NUM_CTX },
-        "messages": [
-            { "role": "system", "content": prompt.system },
-            { "role": "user", "content": prompt.user }
-        ]
+        "messages": [ { "role": "system", "content": prompt.system }, user ]
     })
 }
 
@@ -135,16 +154,21 @@ pub fn parse_ollama(resp: &serde_json::Value) -> Result<Move, ModelError> {
 /// LM Studio's OpenAI-style request: the same narrowed schema, forced through `response_format`.
 /// No context size: LM Studio fixes it when it loads the model (the installer asks for ≥ 8192).
 pub fn openai_body(model: &str, prompt: &Prompt) -> serde_json::Value {
+    // A picture makes the content a list of parts; without one it stays the plain string it was.
+    let content = match &prompt.image {
+        None => serde_json::json!(prompt.user),
+        Some(png) => serde_json::json!([
+            { "type": "text", "text": prompt.user },
+            { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", base64(png)) } }
+        ]),
+    };
     serde_json::json!({
         "model": model,
         "stream": false,
         "temperature": 0.0,
         "response_format": { "type": "json_schema", "json_schema": {
             "name": "move", "strict": true, "schema": narrow_schema(schema::value(), &prompt.allowed) } },
-        "messages": [
-            { "role": "system", "content": prompt.system },
-            { "role": "user", "content": prompt.user }
-        ]
+        "messages": [ { "role": "system", "content": prompt.system }, { "role": "user", "content": content } ]
     })
 }
 
@@ -177,7 +201,7 @@ impl Model for RemoteModel {
 mod tests {
     use super::*;
 
-    fn p() -> Prompt { Prompt { system: "sys".into(), user: "hello".into(), allowed: vec![] } }
+    fn p() -> Prompt { Prompt { system: "sys".into(), user: "hello".into(), allowed: vec![], image: None } }
 
     use crate::testing::{closed_port, json_response, serve};
 
@@ -200,7 +224,7 @@ mod tests {
 
     #[test]
     fn openai_request_is_grammar_forced_and_deterministic() {
-        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "start"] });
+        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "start"], image: None });
         assert_eq!(b["model"], "bonsai-8b");
         assert_eq!(b["stream"], false);
         assert_eq!(b["temperature"], 0.0);
@@ -209,6 +233,29 @@ mod tests {
         assert_eq!(b["response_format"]["json_schema"]["schema"]["oneOf"].as_array().unwrap().len(), 2);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn base64_matches_the_standard_vectors() {
+        for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
+            assert_eq!(base64(i.as_bytes()), o, "{i}");
+        }
+        assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
+    }
+
+    #[test]
+    fn a_picture_rides_with_the_user_message_to_both_kinds_of_runner() {
+        let with = Prompt { system: "s".into(), user: "look".into(), allowed: vec![], image: Some(b"png".to_vec()) };
+        let o = ollama_body("m", &with);
+        assert_eq!(o["messages"][1]["images"], serde_json::json!(["cG5n"]));
+        assert_eq!(o["messages"][1]["content"], "look");
+        let a = openai_body("m", &with);
+        assert_eq!(a["messages"][1]["content"][0], serde_json::json!({"type":"text","text":"look"}));
+        assert_eq!(a["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,cG5n");
+        // No picture: the bodies are exactly what they were before pictures existed.
+        let without = Prompt { image: None, ..with };
+        assert!(ollama_body("m", &without)["messages"][1].get("images").is_none());
+        assert_eq!(openai_body("m", &without)["messages"][1]["content"], "look");
     }
 
     #[test]
@@ -288,14 +335,14 @@ mod tests {
     fn the_ollama_connection_says_its_context_and_sends_the_same_number() {
         let m = RemoteModel::local("x");
         assert_eq!(m.context_tokens(), 8192);
-        let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![] });
+        let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![], image: None });
         assert_eq!(b["options"]["num_ctx"], m.context_tokens());
         assert_eq!(FakeModel::new(vec![]).context_tokens(), 8192, "the trait default");
     }
 
     #[test]
     fn ollama_body_narrows_the_schema_to_allowed_moves() {
-        let narrowed = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply", "start"] };
+        let narrowed = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply", "start"], image: None };
         let b = ollama_body("m", &narrowed);
         let one_of = b["format"]["oneOf"].as_array().unwrap();
         assert_eq!(one_of.len(), 2);
@@ -303,7 +350,7 @@ mod tests {
         assert_eq!(names, ["reply", "start"]);
         assert!(b["format"]["$defs"].is_object(), "$defs must survive narrowing");
 
-        let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![] };
+        let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None };
         let b2 = ollama_body("m", &all);
         assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 9);
     }
@@ -326,6 +373,7 @@ mod tests {
             system: "You answer with one move. For small talk use {\"move\":\"reply\",\"text\":...}.".into(),
             user: "hello, who are you?".into(),
             allowed: vec![],
+            image: None,
         };
         let mv = m.next_move(&prompt).unwrap();
         eprintln!("{mv:?}");

@@ -97,11 +97,11 @@ const MAX_NODES: usize = 6000;
 
 /// Shared by every `DesktopWorker` the factory hands out: the connection opens on first use,
 /// the id table lives as long as the process.
-pub struct DesktopState { conn: Option<Connection>, pub ids: IdTable, cap: usize, displays: Displays }
+pub struct DesktopState { conn: Option<Connection>, pub ids: IdTable, cap: usize, displays: Displays, pub screen: crate::screen::Screen }
 
 impl DesktopState {
     pub fn new(cap: usize, displays: Displays) -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(Self { conn: None, ids: IdTable::new(), cap, displays }))
+        Rc::new(RefCell::new(Self { conn: None, ids: IdTable::new(), cap, displays, screen: Default::default() }))
     }
     pub fn for_model(context_tokens: usize) -> Rc<RefCell<Self>> { Self::new(look_cap(context_tokens), Displays::from_env()) }
 
@@ -407,6 +407,12 @@ impl DesktopWorker {
 
 impl Worker for DesktopWorker {
     fn run(&self, action: &Action) -> Outcome {
+        if matches!(action, Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. }) {
+            return match crate::screen::run(&mut self.0.borrow_mut().screen, action) {
+                Ok((d, image)) => Outcome { image, ..Outcome::ok(d) },
+                Err(e) => Outcome::err(e),
+            };
+        }
         match self.run_inner(action) { Ok(d) => Outcome::ok(d), Err(e) => Outcome::err(e) }
     }
 }

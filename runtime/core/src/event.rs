@@ -28,6 +28,11 @@ pub fn describe(action: &Action) -> String {
         Action::Type { text, control, .. } => format!("typed {} into control {control}", plural(text.lines().count().max(1), "line")),
         Action::Read { control, .. } => format!("read control {control}"),
         Action::OpenApp { name, .. } => format!("opened {name}"),
+        // The card is the notice that the AI has the screen, so it says how to take it back.
+        Action::ScreenLook { cell: None } => "looked at the screen (move the mouse to stop me)".into(),
+        Action::ScreenLook { cell: Some(c) } => format!("looked closely at screen square {c}"),
+        Action::ScreenClick { name, double, .. } => format!("{} {name} on the screen", if *double { "double-clicked" } else { "clicked" }),
+        Action::ScreenType { text, enter } => format!("typed {} on the screen{}", plural(text.chars().count(), "character"), if *enter { " and pressed Enter" } else { "" }),
     }
 }
 

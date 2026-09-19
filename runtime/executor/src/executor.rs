@@ -42,7 +42,8 @@ pub fn lane(action: &Action, workspace: &Path, approved: bool) -> Lane {
         Action::RunCommand { .. } | Action::HttpPost { .. } | Action::FetchPackages { .. } => Lane::Sandbox,
         // The desktop hand (2a §6): its own lane, whatever the approval — the seat is the only
         // place these actions mean anything, and no approval moves them elsewhere.
-        Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. } => Lane::Desktop,
+        Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. }
+        | Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. } => Lane::Desktop,
     }
 }
 
