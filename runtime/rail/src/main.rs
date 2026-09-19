@@ -1,5 +1,5 @@
 //! The rail (1d design §4): a tall window of cards and a text box; a client of ai-os-engine.
-use aios_proto::{ChangedFile, Client, Event};
+use aios_proto::{ChangedFile, Client, Event, Notebook, Request};
 use aios_rail::cards::{Card, CardKind, Cards, Change};
 use gtk4 as gtk;
 use gtk::prelude::*;
@@ -123,8 +123,8 @@ fn cloud_models_card(provider: aios_rail::models::Provider, found: &str, key: St
 /// The socket on its own thread: reconnects every 3 s; every event goes to a plain std channel
 /// that the GTK loop drains on a timer (gtk4-rs 0.11 has no glib channel; std::mpsc + a 50 ms
 /// `timeout_add_local` needs no extra crate).
-fn net_thread(to_ui: Sender<FromNet>) -> Sender<String> {
-    let (say_tx, say_rx) = channel::<String>();
+fn net_thread(to_ui: Sender<FromNet>) -> Sender<Request> {
+    let (say_tx, say_rx) = channel::<Request>();
     std::thread::spawn(move || loop {
         match Client::connect(&socket_path()) {
             Ok(client) => {
@@ -136,7 +136,7 @@ fn net_thread(to_ui: Sender<FromNet>) -> Sender<String> {
                 let mut ui_gone = false;
                 while !pump.is_finished() {
                     match say_rx.recv_timeout(Duration::from_millis(200)) {
-                        Ok(t) => { if writer.say(&t).is_err() { break } }
+                        Ok(r) => { if writer.request(&r).is_err() { break } }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                         Err(_) => { ui_gone = true; break }
                     }
@@ -299,7 +299,7 @@ fn open_path(path: &str) {
     let _ = std::process::Command::new("xdg-open").arg(path).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
-fn render(card: &Card, say: &Sender<String>, entry: &gtk::Entry) -> gtk::Widget {
+fn render(card: &Card, say: &Sender<Request>, entry: &gtk::Entry) -> gtk::Widget {
     let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
     b.add_css_class("card");
     let title = |t: &str| { let l = gtk::Label::new(Some(t)); l.add_css_class("title"); l.set_xalign(0.0); l.set_wrap(true); l };
@@ -352,7 +352,7 @@ fn render(card: &Card, say: &Sender<String>, entry: &gtk::Entry) -> gtk::Widget 
                         picks.borrow_mut()[i] = Some(o.clone());
                         let (t, complete) = aios_rail::cards::answer(&qs, &picks.borrow());
                         if complete {
-                            let _ = s.send(t); e.set_text("");
+                            let _ = s.send(Request::Say(t)); e.set_text("");
                             if let Some(card) = w.ancestor(gtk::Box::static_type()) { card.set_sensitive(false); }
                         } else { e.set_text(&t); e.set_position(-1); e.grab_focus(); }
                     });
@@ -362,10 +362,11 @@ fn render(card: &Card, say: &Sender<String>, entry: &gtk::Entry) -> gtk::Widget 
             }
         }
         CardKind::NeedsOk { what, why } => { b.add_css_class("ok"); b.append(&title("Needs your OK")); b.append(&text(what)); let l = text(why); l.add_css_class("dim"); b.append(&l); }
-        CardKind::Done { text: t, check, files, windows } => {
+        CardKind::Done { text: t, check, files, windows, learned } => {
             b.add_css_class("done"); b.append(&title("Done")); b.append(&text(t));
             if let Some(c) = check { let l = text(&format!("check: {c}")); l.add_css_class("dim"); b.append(&l); }
             if let Some(n) = aios_proto::window_note(windows) { let l = text(&n); l.add_css_class("dim"); b.append(&l); }
+            for l in learned { let w = text(l); w.add_css_class("dim"); b.append(&w); }
             file_rows(&b, files);
         }
         CardKind::Failed { text: t, files } | CardKind::Stopped { text: t, files } => {
@@ -380,7 +381,7 @@ fn render(card: &Card, say: &Sender<String>, entry: &gtk::Entry) -> gtk::Widget 
     }
     if !card.buttons.is_empty() {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        for btn in &card.buttons { let w = gtk::Button::with_label(&btn.label); let s = say.clone(); let t = btn.say.clone(); w.connect_clicked(move |_| { let _ = s.send(t.clone()); }); row.append(&w); }
+        for btn in &card.buttons { let w = gtk::Button::with_label(&btn.label); let s = say.clone(); let t = btn.say.clone(); w.connect_clicked(move |_| { let _ = s.send(Request::Say(t.clone())); }); row.append(&w); }
         b.append(&row);
     }
     b.upcast()
@@ -407,6 +408,46 @@ fn show_guide(parent: &gtk::ApplicationWindow) {
     let scroll = gtk::ScrolledWindow::builder().child(&text).hscrollbar_policy(gtk::PolicyType::Never).build();
     let win = gtk::Window::builder().title("AI OS guide").transient_for(parent).default_width(520).default_height(600).child(&scroll).build();
     win.present();
+}
+
+/// The Skills screen (Phase 3 §6): each notebook, its entries with how often they helped, and a ✕
+/// that deletes one. Rebuilt from every `skills` answer, so a delete shows at once.
+fn show_skills(parent: &gtk::ApplicationWindow, slot: &Rc<RefCell<Option<gtk::Window>>>, notebooks: &[Notebook], say: &Sender<Request>) {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    column.set_margin_start(12); column.set_margin_end(12); column.set_margin_top(12); column.set_margin_bottom(12);
+    if notebooks.is_empty() {
+        let l = gtk::Label::new(Some("Nothing learned yet. After a job that worked, what the AI learned shows here."));
+        l.set_wrap(true); l.set_xalign(0.0); column.append(&l);
+    }
+    for nb in notebooks {
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        for n in &nb.entries {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let mark = if n.failed { " — did not work last time" } else if n.needs_check { " — needs checking" } else { "" };
+            let l = gtk::Label::new(Some(&format!("{}: {}\nused {} time{}{mark}", n.topic, n.text, n.uses, if n.uses == 1 { "" } else { "s" })));
+            l.set_wrap(true); l.set_xalign(0.0); l.set_hexpand(true); l.set_selectable(true);
+            row.append(&l);
+            let x = gtk::Button::with_label("✕");
+            x.set_tooltip_text(Some("Delete this"));
+            let (s, notebook, topic) = (say.clone(), nb.name.clone(), n.topic.clone());
+            x.connect_clicked(move |_| { let _ = s.send(Request::Forget { notebook: notebook.clone(), topic: topic.clone() }); });
+            row.append(&x);
+            list.append(&row);
+        }
+        let title = if nb.name == "this computer" { "This computer".to_string() } else { nb.name.clone() };
+        let ex = gtk::Expander::builder().label(format!("{title} ({})", nb.entries.len())).child(&list).expanded(notebooks.len() == 1).build();
+        column.append(&ex);
+    }
+    let scroll = gtk::ScrolledWindow::builder().child(&column).hscrollbar_policy(gtk::PolicyType::Never).build();
+    let mut slot_ref = slot.borrow_mut();
+    match slot_ref.as_ref().filter(|w| w.is_visible()) {
+        Some(w) => w.set_child(Some(&scroll)),
+        None => {
+            let w = gtk::Window::builder().title("What the AI has learned").transient_for(parent).default_width(480).default_height(560).child(&scroll).build();
+            w.present();
+            *slot_ref = Some(w);
+        }
+    }
 }
 
 fn main() {
@@ -441,6 +482,9 @@ fn main() {
         let help = gtk::Button::with_label("Help");
         help.set_tooltip_text(Some("How the AI OS works"));
         header.pack_end(&help);
+        let skills_btn = gtk::Button::with_label("Skills");
+        skills_btn.set_tooltip_text(Some("What the AI has learned, and a way to delete it"));
+        header.pack_end(&skills_btn);
         win.set_titlebar(Some(&header));
         let parent = win.clone();
         help.connect_clicked(move |_| show_guide(&parent));
@@ -472,6 +516,9 @@ fn main() {
         std::thread::spawn(move || { if let Some(v) = aios_rail::update::check() { let _ = up.send(FromNet::Update(v)); } });
         let (to_ui_models, to_ui2, to_ui_cloud) = (to_ui.clone(), to_ui.clone(), to_ui.clone());
         let say = net_thread(to_ui);
+        let s_skills = say.clone();
+        skills_btn.connect_clicked(move |_| { let _ = s_skills.send(Request::Skills {}); });
+        let skills_win: Rc<RefCell<Option<gtk::Window>>> = Rc::default();
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
 
@@ -492,7 +539,7 @@ fn main() {
             st_c.set_text(if t.is_active() { "Cloud is on: your cloud accounts answer first." } else { "Cloud is off: only your own models answer." });
         });
         let s_stop = say.clone();
-        stop.connect_clicked(move |_| { let _ = s_stop.send("stop".into()); });
+        stop.connect_clicked(move |_| { let _ = s_stop.send(Request::Say("stop".into())); });
         let (cards3, widgets3, column3, say3, entry3) = (cards.clone(), widgets.clone(), column.clone(), say.clone(), entry.clone());
         clear.connect_clicked(move |_| {
             cards3.borrow_mut().clear();
@@ -501,9 +548,10 @@ fn main() {
         });
 
         let s = say.clone();
-        entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(t); e.set_text(""); } });
+        entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(Request::Say(t)); e.set_text(""); } });
 
         let (cards2, widgets2, column2, status2, say2, spinner2, stop2, entry2, cloud2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone(), entry.clone(), cloud.clone());
+        let (parent_for_skills, skills_win2, say_for_skills) = (win.clone(), skills_win.clone(), say.clone());
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
                 match msg {
@@ -522,6 +570,7 @@ fn main() {
                     FromNet::Cloud { provider, key, found } => { status2.set_text(""); column2.append(&cloud_models_card(provider, &found, key, &column2, &status2, &cloud2)); }
                     FromNet::Down => { spinner2.stop(); status2.set_text("The AI OS service is not running — retrying…"); }
                     FromNet::Event(ev) => {
+                        if let Event::Skills { notebooks } = &ev { show_skills(&parent_for_skills, &skills_win2, notebooks, &say_for_skills); continue; }
                         match aios_rail::cards::busy_after(&ev) {
                             Some(true) => { spinner2.start(); status2.set_text("The AI is thinking…"); }
                             Some(false) => { spinner2.stop(); status2.set_text(""); }

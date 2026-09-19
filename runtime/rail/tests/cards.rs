@@ -130,6 +130,34 @@ fn the_spinner_runs_from_your_message_until_the_turn_comes_back() {
     assert_eq!(busy_after(&Event::Said { text: "hi".into() }), Some(false));
     assert_eq!(busy_after(&Event::Error { text: "bad".into() }), Some(false));
     assert_eq!(busy_after(&Event::State { job: None }), None);
+    // Done/Failed no longer stop the spinner: a slow local model's learning turn follows, and the
+    // Learned that always ends it is what does (Task 8 ruling).
+    assert_eq!(busy_after(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] }), None);
+    assert_eq!(busy_after(&Event::Learned { job_id: j(), lines: vec![], pending: false }), Some(false));
+}
+
+#[test]
+fn learned_lines_join_the_jobs_done_card_and_pending_ones_offer_keep_and_discard() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] });
+    let ch = cards.apply(&Event::Learned { job_id: j(), lines: vec!["Learned, if you keep it: get gimp (this computer)".into()], pending: true });
+    assert_eq!(ch, vec![Change::Updated(0)]);
+    let CardKind::Done { learned, .. } = &cards.list[0].kind else { panic!() };
+    assert_eq!(learned, &vec!["Learned, if you keep it: get gimp (this computer)".to_string()]);
+    let says: Vec<&str> = cards.list[0].buttons.iter().map(|b| b.say.as_str()).collect();
+    assert_eq!(says, vec!["undo", "keep what you learned", "discard what you learned"]);
+    // A failed job's "marked as not working" has no Done card to join: it is a line of its own.
+    let ch = cards.apply(&Event::Learned { job_id: "other".into(), lines: vec!["Marked as not working: this computer/x".into()], pending: false });
+    assert_eq!(ch, vec![Change::Added(1)]);
+    assert!(cards.apply(&Event::Skills { notebooks: vec![] }).is_empty());
+}
+
+#[test]
+fn an_empty_learned_after_a_model_that_could_not_answer_draws_nothing() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] });
+    assert!(cards.apply(&Event::Learned { job_id: j(), lines: vec![], pending: false }).is_empty());
+    assert_eq!(cards.list.len(), 1, "no Said card either");
 }
 
 #[test]

@@ -31,6 +31,7 @@ While the AI is working, the circle next to the status line turns.
 • <b>Clear</b> empties the chat. A job still running and a question still waiting stay.
 • <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop a job first. Your cloud accounts are there too.
 • <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
+• <b>Skills</b> shows what the AI has learned, and a way to delete it (see Skills below).
 • <b>Help</b> opens this guide.
 • <b>Stop</b> shows up only while a job runs.
 
@@ -45,6 +46,16 @@ When a new version is out, a card at login says so. Press <b>Update now</b>, typ
 • <b>The screen</b>, as a last resort, for what it can't reach any other way (a web page, for example). It looks at the screen, zooms in and clicks. <b>Move the mouse or type and it stops at once.</b>
 
 Its work runs in a closed area of its own that cannot reach the internet or your personal files. Anything outside that area needs your OK, except reading settings and installing.
+
+
+<big><b>Skills: what it learns</b></big>
+
+After a job that worked, the AI writes down what it would want to know straight away next time. It keeps these in notebooks:
+• <b>This computer</b>: how your computer and its programs are used, like how to open a website. It reads this before every job.
+• <b>A notebook per craft</b>, like "blender" or "web design": ways of doing things that worked, mistakes and how they were fixed, and what you liked. It reads one when a job is in that area.
+
+The Done card says what it learned ("Learned: open a website"). If it learned something that changes the computer, like installing a program, it asks first: press <b>Keep</b> or <b>Discard</b>.
+Press <b>Skills</b> at the top to read the notebooks and delete anything with ✕. A tip that stopped working is marked, and the AI fixes or removes it the next time.
 
 
 <big><b>The AI model: its brain</b></big>

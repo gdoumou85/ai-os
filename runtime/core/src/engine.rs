@@ -329,7 +329,7 @@ impl<M: Model> Engine<M> {
             let keep = is_keep_learned(text);
             let c = self.store.conn();
             let n = if keep { crate::notes::keep_pending(c)? } else { crate::notes::discard_pending(c)? };
-            let text = match (n, keep) { (0, _) => "There is nothing waiting to be kept.", (_, true) => "Kept what I learned.", (_, false) => "Discarded it." };
+            let text = match (n, keep) { (0, _) => "There is nothing waiting to be kept or discarded.", (_, true) => "Kept what I learned.", (_, false) => "Discarded it." };
             self.emit(Event::Said { text: text.into() });
             return Ok(());
         }
@@ -546,16 +546,21 @@ impl<M: Model> Engine<M> {
     }
 
     /// One model call after a job, never fatal (Phase 3 §4): the job is already over and said so.
+    ///
+    /// A `Learned` always follows, even with nothing kept: the rail's spinner keeps turning
+    /// through this whole turn (a slow local model can take minutes for it), and `Learned` is
+    /// the only event that tells it to stop (`cards::busy_after`).
     fn learn(&mut self, job: &Job, passed: bool) {
+        let job_id = job.id.clone();
+        let nothing = Event::Learned { job_id: job_id.clone(), lines: vec![], pending: false };
         let mv = match self.model.next_move(&prompt::learning_turn(job, passed)) {
             Ok(m) => m,
-            Err(e) => { eprintln!("engine: no learning turn ({e})"); return }
+            Err(e) => { eprintln!("engine: no learning turn ({e})"); self.emit(nothing); return }
         };
-        let Move::Learn { entries, used, wrong, remove } = mv else { return };
+        let Move::Learn { entries, used, wrong, remove } = mv else { self.emit(nothing); return };
         match crate::learn::apply(self.store.conn(), job, entries, &used, &wrong, &remove, passed) {
-            Ok(l) if !l.lines.is_empty() => self.emit(Event::Learned { job_id: job.id.clone(), lines: l.lines, pending: l.pending }),
-            Ok(_) => {}
-            Err(e) => eprintln!("engine: what was learned could not be saved ({e})"),
+            Ok(l) => self.emit(Event::Learned { job_id, lines: l.lines, pending: l.pending }),
+            Err(e) => { eprintln!("engine: what was learned could not be saved ({e})"); self.emit(nothing); }
         }
     }
 
@@ -1653,7 +1658,7 @@ mod tests {
             Outcome::ok("(lines 1-2 of 2)\nfirst line\nreviewed"),
         ]);
         let ev = e.handle_events("take my editor").unwrap();
-        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { .. }), "{ev:?}");
         assert_eq!(rec.desktop_calls.borrow().iter().filter(|a| **a == typing).count(), 2, "the second type reached the hand");
         assert!(e.model.prompts.borrow().iter().all(|p| !p.user.contains("already failed")), "nothing was held against it");
     }
@@ -1671,7 +1676,7 @@ mod tests {
             done(Action::Read { control: 1, from_line: None, lines: None }),
         ], "replan-is-an-action");
         let ev = e.handle_events("what is 12 times 34").unwrap();
-        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { .. }), "{ev:?}");
         let prompts = e.model.prompts.borrow();
         assert!(prompts.iter().any(|p| p.user.contains("that is an action, not a plan step; send it with act")), "{}", prompts.last().unwrap().user);
         // Never a rejection: that budget is two and fatal, and the live run died of it the first
@@ -1694,7 +1699,7 @@ mod tests {
             done(Action::Look { window: None, find: None }),
         ], "replan-same-plan");
         let ev = e.handle_events("tidy up").unwrap();
-        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { .. }), "{ev:?}");
         let prompts = e.model.prompts.borrow();
         assert!(prompts.iter().any(|p| p.user.contains("that is the plan you already have")), "no such note");
         // "rejected:" (the colon `reject()` always writes) — see the sibling test above for why
@@ -1725,7 +1730,7 @@ mod tests {
             Outcome::ok("(lines 1-1 of 1)\nfirst line"),
         ]);
         let ev = e.handle_events("take my editor").unwrap();
-        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { .. }), "{ev:?}");
         assert_eq!(rec.desktop_calls.borrow().iter().filter(|a| **a == read).count(), 4, "every read reached the hand");
         assert!(e.model.prompts.borrow().iter().all(|p| !p.user.contains("already failed")), "a desktop retry was rejected");
     }
@@ -1766,7 +1771,7 @@ mod tests {
             Outcome::ok("controls of Text Editor:\n1 [text] \"first line\""),
         ]);
         let ev = e.handle_events("read my note").unwrap();
-        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { .. }), "{ev:?}");
         assert_eq!(rec.calls.borrow().iter().filter(|a| **a == bad).count(), 1, "the repeat reached the sandbox");
         assert!(e.model.prompts.borrow().iter().any(|p| p.user.contains("rejected: that exact action already failed with: cat: /nope: No such file or directory")),
                 "the command was let through: {}", e.model.prompts.borrow().last().unwrap().user);
@@ -2309,7 +2314,7 @@ mod tests {
         assert_eq!(steps.len(), 4, "3 acts + the check: {ev:?}");
         assert!(matches!(steps[0], Event::Step { plan_step: 1, text, ok: true, .. } if text == "wrote BLUEPRINT.md"));
         assert!(matches!(steps[3], Event::Step { text, .. } if text == "ran python3"));
-        assert!(matches!(ev.last().unwrap(), Event::Done { text, check: Some(c), .. } if text == "finished" && c == "ran python3: ok"));
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { text, check: Some(c), .. } if text == "finished" && c == "ran python3: ok"));
     }
 
     #[test]
@@ -2348,7 +2353,7 @@ mod tests {
 
         let (mut e, _, _) = engine_with(vec![start("p", true), plan(), Move::GiveUp { reason: "no compiler".into(), missing: "gcc".into() }], "ev-giveup");
         let ev = events_of(&mut e, "make p");
-        assert!(matches!(ev.last().unwrap(), Event::Failed { text, .. } if text == "I gave up on p: no compiler. Missing: gcc."));
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { text, .. } if text == "I gave up on p: no compiler. Missing: gcc."));
     }
 
     #[test]
@@ -2387,7 +2392,7 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_millis(1100)); // started_at is whole seconds
         let ev = events_of(&mut e, "add primes to p");
-        let Event::Done { files, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
+        let Event::Done { files, .. } = crate::testing::before_learned(&ev) else { panic!("{ev:?}") };
         let names: Vec<&str> = files.iter().map(|f| f.path.rsplit('/').next().unwrap()).collect();
         assert_eq!(names, vec!["BLUEPRINT.md", "primes.py"], "{files:?}");
         assert!(files.iter().all(|f| f.path.starts_with(old.to_str().unwrap())), "absolute paths");
@@ -2398,7 +2403,7 @@ mod tests {
     fn a_failed_job_does_not_list_the_engines_own_last_run_note() {
         let (mut e, _, _) = engine_with(vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), Move::GiveUp { reason: "r".into(), missing: "m".into() }], "files-lastrun");
         let ev = events_of(&mut e, "make p");
-        let Event::Failed { files, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
+        let Event::Failed { files, .. } = crate::testing::before_learned(&ev) else { panic!("{ev:?}") };
         assert!(files.iter().all(|f| !f.path.ends_with("LAST_RUN.md")), "{files:?}");
     }
 
@@ -2417,7 +2422,7 @@ mod tests {
             done(Action::Read { control: 2, from_line: None, lines: None }),
         ], "windows-worked");
         let ev = e.handle_events("take my editor").unwrap();
-        let Event::Done { windows, .. } = ev.last().unwrap() else { panic!("{ev:?}") };
+        let Event::Done { windows, .. } = crate::testing::before_learned(&ev) else { panic!("{ev:?}") };
         assert_eq!(windows, &vec!["Text Editor".to_string()]);
     }
 
@@ -2489,7 +2494,7 @@ mod tests {
     fn a_project_job_with_no_desktop_steps_lists_no_windows() {
         let (mut e, _, _) = engine_with(happy_path(), "no-windows");
         let ev = e.handle_events("make p").unwrap();
-        assert!(matches!(ev.last().unwrap(), Event::Done { windows, .. } if windows.is_empty()), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { windows, .. } if windows.is_empty()), "{ev:?}");
     }
 
     #[test]
@@ -2533,7 +2538,7 @@ mod tests {
         e.store.save_job(&job).unwrap();
         e.model = crate::model::FakeModel::new(vec![act(1, write("BLUEPRINT.md")), done(run("true"))]);
         let ev = e.resume().unwrap();
-        assert!(matches!(ev.last().unwrap(), Event::Done { .. }), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { .. }), "{ev:?}");
         assert!(e.open_job().unwrap().is_none());
         assert!(e.resume().unwrap().is_empty(), "nothing open, nothing to resume");
     }
@@ -2590,7 +2595,7 @@ mod tests {
         let (mut e, rec) = waiting_ok("okq-no");
         e.model = crate::model::FakeModel::new(vec![Move::GiveUp { reason: "declined".into(), missing: "your ok".into() }]);
         let ev = events_of(&mut e, "no thanks");
-        assert!(matches!(ev.last().unwrap(), Event::Failed { .. }), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { .. }), "{ev:?}");
         assert!(rec.calls.borrow().is_empty());
         let (mut e, rec) = waiting_ok("okq-yes");
         // The post approved by "yes" runs no BLUEPRINT.md write, so the new-project gate in
@@ -2612,7 +2617,7 @@ mod tests {
         let ev = events_of(&mut e, "and why is that?");
         assert!(matches!(&ev[0], Event::Said { text } if text == "c"));
         assert!(matches!(&ev[1], Event::Said { text } if text.contains("taking that as a no")), "{ev:?}");
-        assert!(matches!(ev.last().unwrap(), Event::Failed { .. }), "{ev:?}");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { .. }), "{ev:?}");
     }
 
     #[test]
@@ -2674,8 +2679,13 @@ mod tests {
     fn a_learning_turn_the_model_cannot_answer_never_hurts_the_job() {
         let (mut e, _, _) = engine_with(vec![hk("open it"), plan(), act(1, open_ff()), done(Action::ScreenLook { cell: None })], "learn-none");
         let ev = crate::testing::events_of(&mut e, "open it");
-        assert!(ev.iter().any(|x| matches!(x, Event::Done { .. })));
-        assert!(!ev.iter().any(|x| matches!(x, Event::Learned { .. })));
+        let done_at = ev.iter().position(|x| matches!(x, Event::Done { .. })).expect("done");
+        // Exactly one Learned, empty: the spinner needs it even when there was nothing to learn.
+        assert_eq!(ev.iter().filter(|x| matches!(x, Event::Learned { .. })).count(), 1);
+        let learned_at = ev.iter().position(|x| matches!(x, Event::Learned { .. })).expect("learned");
+        assert!(done_at < learned_at, "still after Done");
+        let Event::Learned { lines, pending, .. } = &ev[learned_at] else { unreachable!() };
+        assert!(lines.is_empty() && !pending);
         assert_eq!(e.model.prompts.borrow().last().unwrap().allowed, vec!["learn"], "the learning turn was asked");
     }
 

@@ -14,7 +14,7 @@ pub enum CardKind {
     /// `options[i]`: buttons for `questions[i]`, maybe none.
     NeedsAnswer { questions: Vec<String>, options: Vec<Vec<String>> },
     NeedsOk { what: String, why: String },
-    Done { text: String, check: Option<String>, files: Vec<ChangedFile>, windows: Vec<String> },
+    Done { text: String, check: Option<String>, files: Vec<ChangedFile>, windows: Vec<String>, learned: Vec<String> },
     Failed { text: String, files: Vec<ChangedFile> },
     Stopped { text: String, files: Vec<ChangedFile> },
     Undone { lines: Vec<aios_proto::UndoLine>, notes: Vec<String> },
@@ -41,10 +41,11 @@ pub enum Change { Added(usize), Updated(usize), Line(String) }
 pub fn busy_after(ev: &Event) -> Option<bool> {
     match ev {
         Event::You { .. } | Event::Understood { .. } | Event::Plan { .. } | Event::Step { .. } => Some(true),
-        Event::Said { .. } | Event::NeedsAnswer { .. } | Event::NeedsOk { .. } | Event::Done { .. } | Event::Failed { .. }
-        | Event::Stopped { .. } | Event::Undone { .. } | Event::Error { .. } => Some(false),
-        // ponytail: stopgap, Task 8 gives the learning turn its own card and spinner behaviour.
-        Event::Busy { .. } | Event::State { .. } | Event::Learned { .. } | Event::Skills { .. } => None,
+        Event::Said { .. } | Event::NeedsAnswer { .. } | Event::NeedsOk { .. } | Event::Stopped { .. }
+        | Event::Undone { .. } | Event::Error { .. } | Event::Learned { .. } => Some(false),
+        // A slow local model can take minutes for the learning turn after Done/Failed, so the
+        // spinner keeps turning until the Learned that always follows (engine.rs `learn`) stops it.
+        Event::Done { .. } | Event::Failed { .. } | Event::Busy { .. } | Event::State { .. } | Event::Skills { .. } => None,
     }
 }
 
@@ -109,16 +110,28 @@ impl Cards {
             Event::Done { job_id, text, check, files, windows } => {
                 let mut ch = self.close_building();
                 let shown = match aios_proto::window_note(windows) { Some(n) => format!("{text}\n{n}"), None => text.clone() };
-                ch.extend(self.push(result_card(CardKind::Done { text: text.clone(), check: check.clone(), files: files.clone(), windows: windows.clone() }, &shown, files, job_id)));
+                ch.extend(self.push(result_card(CardKind::Done { text: text.clone(), check: check.clone(), files: files.clone(), windows: windows.clone(), learned: vec![] }, &shown, files, job_id)));
                 ch
             }
             Event::Failed { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Failed { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
             Event::Stopped { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Stopped { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
             Event::Undone { job_id, lines, notes, .. } => self.push(Card { kind: CardKind::Undone { lines: lines.clone(), notes: notes.clone() }, text: lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
-            // ponytail: stopgap, Task 8 gives the learning turn its own card.
-            Event::Learned { .. } => vec![],
-            // The Skills screen reads this event straight off its own connection (Task 8); the
-            // chat rail has no card for it.
+            Event::Learned { job_id, lines, pending } => {
+                // Every learning turn now emits Learned, even when nothing was kept — that empty
+                // one draws nothing (Task 8 ruling): the spinner alone is what it is for.
+                if lines.is_empty() { return vec![]; }
+                let at = self.list.iter().rposition(|c| c.job_id.as_deref() == Some(job_id.as_str()) && matches!(c.kind, CardKind::Done { .. }));
+                match at {
+                    Some(i) => {
+                        if let CardKind::Done { learned, .. } = &mut self.list[i].kind { learned.extend(lines.iter().cloned()); }
+                        if *pending { self.list[i].buttons.extend([btn("Keep", "keep what you learned"), btn("Discard", "discard what you learned")]); }
+                        vec![Change::Updated(i)]
+                    }
+                    // A failed job's "marked as not working" has no Done card to join: its own line.
+                    None => self.push(Card { kind: CardKind::Said, text: lines.join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: None }),
+                }
+            }
+            // The Skills screen is its own window (main.rs), not a card.
             Event::Skills { .. } => vec![],
             Event::Busy { text, .. } | Event::Error { text } => vec![Change::Line(text.clone())],
             Event::State { job: None } => vec![],
