@@ -86,7 +86,7 @@ impl RemoteModel {
             Kind::Ollama => (format!("{url}/api/chat"), ollama_body(&self.model, prompt)),
             Kind::OpenAi => (format!("{url}/v1/chat/completions"), openai_body(&self.model, prompt)),
         };
-        let mut req = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(180)).build().post(&endpoint);
+        let mut req = ureq::AgentBuilder::new().timeout(answer_timeout()).build().post(&endpoint);
         if let Some(k) = &self.key { req = req.set("Authorization", &format!("Bearer {k}")); }
         let resp: serde_json::Value = match req.send_json(body) {
             Ok(r) => r.into_json().map_err(|e| (false, ModelError::Http(e.to_string())))?,
@@ -101,6 +101,13 @@ impl RemoteModel {
         };
         match self.kind { Kind::Ollama => parse_ollama(&resp), Kind::OpenAi => parse_openai(&resp) }.map_err(|e| (false, e))
     }
+}
+
+/// How long one answer may take: 10 minutes, or `AI_OS_MODEL_TIMEOUT` seconds. Three minutes was
+/// too short for the owner's bigger LM Studio model on a long job (2026-09-19): a model that must
+/// load first, or a machine with no graphics card, can take several minutes over one answer.
+fn answer_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(std::env::var("AI_OS_MODEL_TIMEOUT").ok().and_then(|s| s.parse().ok()).filter(|s| *s > 0).unwrap_or(600))
 }
 
 /// The reason in a runner's error body: Ollama's `{"error":"…"}`, OpenAI's `{"error":{"message":"…"}}`,
@@ -208,7 +215,7 @@ impl Model for RemoteModel {
             }
             // A read that timed out, once: the owner's VM slept mid-request and woke to a dead
             // wait, and LM Studio reloading an unloaded model can outlast one wait too.
-            // ponytail: matched on ureq's wording; untested, since a test would sit out 180 s.
+            // ponytail: matched on ureq's wording; untested, since a test would sit out the whole answer timeout.
             Err((false, ModelError::Http(e))) if e.contains("timed out") => {
                 eprintln!("the model did not answer in time ({e}); asking once more");
                 self.ask_at(&url, prompt).map_err(|(_, e)| e)
