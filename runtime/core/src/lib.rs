@@ -2,6 +2,7 @@
 //! Each task adds its own `pub mod` line.
 pub mod engine;
 pub mod event;
+pub mod find;
 pub mod job;
 pub mod model;
 pub mod moves;
