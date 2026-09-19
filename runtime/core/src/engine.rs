@@ -389,7 +389,7 @@ impl<M: Model> Engine<M> {
                 }
                 Ok(())
             }
-            Move::Start { project, new_project: _, description, goal, creative, understood, remember } => {
+            Move::Start { project, new_project: _, description, goal, creative, understood, skills: _, remember } => {
                 let name = sanitize_project_name(&project);
                 let existing = self.store.get_project(&name)?;
                 let is_new = existing.is_none();
@@ -964,7 +964,7 @@ impl<M: Model> Engine<M> {
                 }
                 (_, Move::Act { .. }) | (_, Move::Done { .. }) | (_, Move::Replan { .. }) | (_, Move::GiveUp { .. }) => Some("give a plan first".to_string()),
                 (_, Move::Plan { .. }) => Some("not now".to_string()),
-                (_, Move::Reply { .. }) | (_, Move::Start { .. }) | (_, Move::Housekeep { .. }) => Some("a job is running: use ask, plan, act, replan, done or give_up".to_string()),
+                (_, Move::Reply { .. }) | (_, Move::Start { .. }) | (_, Move::Housekeep { .. }) | (_, Move::Learn { .. }) => Some("a job is running: use ask, plan, act, replan, done or give_up".to_string()),
             };
             if let Some(why) = rejected {
                 if self.reject(&mut job, &why)? { return Ok(()); }
@@ -981,7 +981,7 @@ mod tests {
     use crate::testing::Recorder;
 
     fn start(project: &str, creative: bool) -> Move {
-        Move::Start { project: project.into(), new_project: true, description: "prime printer".into(), goal: "print ten primes".into(), creative, understood: format!("Starting a new project {project}"), remember: None }
+        Move::Start { project: project.into(), new_project: true, description: "prime printer".into(), goal: "print ten primes".into(), creative, understood: format!("Starting a new project {project}"), skills: vec![], remember: None }
     }
 
     #[test]
@@ -1110,7 +1110,7 @@ mod tests {
 
     #[test]
     fn existing_project_is_reused_not_recreated() {
-        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add menu".into(), creative: true, understood: "Continuing p".into(), remember: None };
+        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add menu".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None };
         let (mut e, _, _) = engine_with(vec![
             start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
             again, plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
@@ -1430,7 +1430,7 @@ mod tests {
             start("p", true), plan(), act(1, run("python3")),
             Move::GiveUp { reason: "the script crashes".into(), missing: "a working loop".into() },
             // next job in the same project
-            Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "make it work".into(), creative: true, understood: "Continuing p".into(), remember: None },
+            Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "make it work".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None },
             plan(), act(1, write("BLUEPRINT.md")), done(run("python3")),
         ], "lastrun");
         rec.outcomes.borrow_mut().push_back(Outcome::err("exit 1; stderr: NameError: prmes"));
@@ -1751,7 +1751,7 @@ mod tests {
         // `Start` arm saved it silently. Same line must appear here too.
         let mv = Move::Start {
             project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(),
-            creative: true, understood: "Starting p".into(), remember: Some("always use python3".into()),
+            creative: true, understood: "Starting p".into(), skills: vec![], remember: Some("always use python3".into()),
         };
         let (mut e, _, _) = engine_with(vec![mv, plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "start-remember");
         let out = e.handle("go").unwrap();
@@ -2241,7 +2241,7 @@ mod tests {
     fn done_lists_the_files_the_job_changed() {
         // A new project refuses a folder that already exists, so the old files are planted
         // AFTER a first job created the folder, and the second job is the one measured.
-        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add more".into(), creative: true, understood: "Continuing p".into(), remember: None };
+        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add more".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None };
         let (mut e, _, root) = engine_with(vec![
             start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
             again, plan(), act(1, write("BLUEPRINT.md")), act(1, write("primes.py")), act(1, write("BLUEPRINT.md")), done(run("python3")),

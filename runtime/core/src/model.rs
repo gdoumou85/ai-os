@@ -39,6 +39,11 @@ impl FakeModel {
 impl Model for FakeModel {
     fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> {
         self.prompts.borrow_mut().push(prompt.clone());
+        // The real grammar forces a learn in the learning turn. A script that has none there
+        // answers "exhausted" and keeps its next move for the next job's prompt.
+        if prompt.allowed == ["learn"] && !matches!(self.queue.borrow().front(), Some(Move::Learn { .. })) {
+            return Err(ModelError::Exhausted);
+        }
         self.queue.borrow_mut().pop_front().ok_or(ModelError::Exhausted)
     }
 }
@@ -357,6 +362,16 @@ mod tests {
     }
 
     #[test]
+    fn the_fake_never_spends_a_scripted_move_on_a_learning_turn_that_is_not_learn() {
+        let m = FakeModel::new(vec![Move::Reply { text: "next job's move".into(), remember: None }]);
+        let learn_only = Prompt { system: String::new(), user: String::new(), allowed: vec!["learn"], image: None };
+        assert!(m.next_move(&learn_only).is_err());
+        assert!(matches!(m.next_move(&learn_only.clone()), Err(_)));
+        let any = Prompt { allowed: vec![], ..learn_only };
+        assert!(matches!(m.next_move(&any), Ok(Move::Reply { .. })), "still there for the next prompt");
+    }
+
+    #[test]
     fn ollama_request_is_grammar_forced_and_deterministic() {
         let b = ollama_body("qwen3.5:9b", &p());
         assert_eq!(b["model"], "qwen3.5:9b");
@@ -364,7 +379,7 @@ mod tests {
         assert_eq!(b["think"], false);
         assert_eq!(b["options"]["temperature"], 0.0);
         assert_eq!(b["options"]["num_ctx"], 8192);
-        assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 9);
+        assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 10);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
     }
@@ -390,7 +405,7 @@ mod tests {
 
         let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None };
         let b2 = ollama_body("m", &all);
-        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 9);
+        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 10);
     }
 
     #[test]

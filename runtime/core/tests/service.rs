@@ -50,7 +50,7 @@ fn until(c: &mut Client, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
 
 fn write(p: &str) -> Action { Action::WriteFile { path: p.into(), contents: "x".into() } }
 fn job() -> Vec<Move> { vec![
-    Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), remember: None },
+    Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), skills: vec![], remember: None },
     Move::Plan { steps: vec!["write".into()] },
     Move::Act { step: 1, action: write("BLUEPRINT.md") },
     Move::Done { summary: "finished".into(), check: Action::RunCommand { argv: vec!["true".into()] } },
@@ -66,7 +66,7 @@ fn a_question_at_a_needs_ok_is_answered_never_answered_with_busy() {
     let dir = temp("ok-question");
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let moves = vec![
-        Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), remember: None },
+        Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), skills: vec![], remember: None },
         Move::Plan { steps: vec!["write outside".into()] },
         Move::Act { step: 1, action: write("/etc/ai-os-never-written") },
         Move::Reply { text: "the word hello".into(), remember: None },
