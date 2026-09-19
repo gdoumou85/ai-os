@@ -26,7 +26,7 @@ enum FromNet {
     /// One LM Studio's models, asked for with the key the person typed.
     Keyed { url: String, key: String, found: String },
     /// The cloud models an account's key opened, for the card that adds one.
-    Cloud { key: String, found: String },
+    Cloud { provider: aios_rail::models::Provider, key: String, found: String },
 }
 
 /// Where the chat window and the engine's cloud pool share the switch and the accounts (core::cloud).
@@ -43,9 +43,9 @@ fn write_private(path: &str, text: &str) -> Result<(), String> {
     f.write_all(text.as_bytes()).map_err(|e| e.to_string())
 }
 
-/// The cloud accounts card: each account with Remove, and a box for an Ollama key.
-/// ponytail: Ollama's cloud only; the OpenAI-style providers (Groq, OpenRouter…) get a row each
-/// once someone has a key to test them with.
+/// The cloud accounts card: each account with Remove, and a key box with a button per provider.
+/// ponytail: NVIDIA and Ollama; the other OpenAI-style providers (Groq, OpenRouter…) get a button
+/// each once someone has a key to test them with.
 fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gtk::Label) -> gtk::Widget {
     let tsv = cloud_accounts();
     let list = aios_rail::models::accounts(&tsv);
@@ -67,41 +67,46 @@ fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gtk::Label) -
         row.append(&l); row.append(&rm);
         b.append(&row);
     }
-    let add = gtk::Label::new(Some("Add your Ollama account: make a key at ollama.com → Settings → Keys, and paste it here."));
+    let add = gtk::Label::new(Some("Add an account: paste its key here and press its provider.
+• NVIDIA: make a key at build.nvidia.com (sign in, then Get API Key).
+• Ollama: ollama.com → Settings → Keys."));
     add.set_xalign(0.0); add.set_wrap(true);
     let entry = gtk::PasswordEntry::new(); entry.set_show_peek_icon(true);
-    let go = gtk::Button::with_label("Use this key"); go.set_halign(gtk::Align::Start);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let close = gtk::Button::with_label("Close"); close.set_halign(gtk::Align::Start);
-    b.append(&add); b.append(&entry); b.append(&go); b.append(&close);
-    let (col, me, tx, st) = (column.clone(), w.clone(), to_ui.clone(), status.clone());
-    go.connect_clicked(move |_| {
-        let key = entry.text().to_string();
-        if !aios_rail::models::safe_key(&key) { st.set_text("That key has spaces or odd characters in it; paste just the key."); return; }
-        col.remove(&me);
-        st.set_text("Asking Ollama which cloud models your key opens…");
-        let tx = tx.clone();
-        std::thread::spawn(move || { let found = run("ai-os-find", &["--url", OLLAMA_CLOUD], Some(&key)); let _ = tx.send(FromNet::Cloud { key, found }); });
-    });
+    b.append(&add); b.append(&entry); b.append(&row); b.append(&close);
+    for provider in [aios_rail::models::NVIDIA, aios_rail::models::OLLAMA] {
+        let go = gtk::Button::with_label(&format!("{} key", provider.name));
+        row.append(&go);
+        let (col, me, tx, st, entry) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), entry.clone());
+        go.connect_clicked(move |_| {
+            let key = entry.text().to_string();
+            if !aios_rail::models::safe_key(&key) { st.set_text("That key has spaces or odd characters in it; paste just the key."); return; }
+            col.remove(&me);
+            st.set_text(&format!("Asking {} which models your key opens…", provider.name));
+            let tx = tx.clone();
+            std::thread::spawn(move || { let found = run("ai-os-find", &["--url", provider.url], Some(&key)); let _ = tx.send(FromNet::Cloud { provider, key, found }); });
+        });
+    }
     let (col, me) = (column.clone(), w.clone());
     close.connect_clicked(move |_| col.remove(&me));
     w
 }
 
-const OLLAMA_CLOUD: &str = "https://ollama.com";
-
-/// The models an Ollama key opens, a button each: a click adds the account and turns Cloud on.
-fn cloud_models_card(found: &str, key: String, column: &gtk::Box, status: &gtk::Label, switch: &gtk::ToggleButton) -> gtk::Widget {
-    let choices: Vec<_> = aios_rail::models::parse_found(found).into_iter().filter_map(|c| c.model).collect();
-    let b = plain_card("Pick a cloud model", if choices.is_empty() { "Ollama did not list any models for that key. Check the key and try again." } else { "The bigger the model, the better it works, and the sooner its free allowance runs out." });
+/// The models a provider's key opens, a button each: a click adds the account and turns Cloud on.
+fn cloud_models_card(provider: aios_rail::models::Provider, found: &str, key: String, column: &gtk::Box, status: &gtk::Label, switch: &gtk::ToggleButton) -> gtk::Widget {
+    let choices = aios_rail::models::chat_models(provider, aios_rail::models::parse_found(found).into_iter().filter_map(|c| c.model).collect());
+    let empty = format!("{} did not list any models for that key. Check the key and try again.", provider.name);
+    let b = plain_card("Pick a cloud model", if choices.is_empty() { &empty } else { "The bigger the model, the better it works, and the sooner its free allowance runs out." });
     let w: gtk::Widget = b.clone().upcast();
     for m in choices {
         let btn = gtk::Button::with_label(&m); btn.set_halign(gtk::Align::Start);
         let (col, me, st, sw, key) = (column.clone(), w.clone(), status.clone(), switch.clone(), key.clone());
         btn.connect_clicked(move |_| {
             col.remove(&me);
-            let Some(line) = aios_rail::models::account_line("Ollama", "ollama", OLLAMA_CLOUD, &m, &key) else { st.set_text("That model's name has characters it may not."); return };
+            let Some(line) = aios_rail::models::account_line(provider.name, provider.kind, provider.url, &m, &key) else { st.set_text("That model's name has characters it may not."); return };
             match write_private(&format!("{}/cloud.tsv", config_dir()), &(cloud_accounts() + &line)) {
-                Ok(()) => { sw.set_active(true); st.set_text(&format!("Added Ollama {m}. Cloud is on.")); }
+                Ok(()) => { sw.set_active(true); st.set_text(&format!("Added {} {m}. Cloud is on.", provider.name)); }
                 Err(e) => st.set_text(&format!("Could not save the account: {e}")),
             }
         });
@@ -513,7 +518,7 @@ fn main() {
                         if only.is_empty() || only.contains("\t-\t") { status2.set_text("LM Studio did not accept that key."); }
                         else { column2.append(&models_card(&only, &engine_env(), Some(key), &column2, &to_ui2, &status2)); }
                     }
-                    FromNet::Cloud { key, found } => { status2.set_text(""); column2.append(&cloud_models_card(&found, key, &column2, &status2, &cloud2)); }
+                    FromNet::Cloud { provider, key, found } => { status2.set_text(""); column2.append(&cloud_models_card(provider, &found, key, &column2, &status2, &cloud2)); }
                     FromNet::Down => { spinner2.stop(); status2.set_text("The AI OS service is not running — retrying…"); }
                     FromNet::Event(ev) => {
                         match aios_rail::cards::busy_after(&ev) {
