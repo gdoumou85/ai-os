@@ -63,6 +63,11 @@ same model on the network and carries on.
 Restart the computer once after it finishes. The engine picks up its new group membership then, and
 the chat window opens when you log back in.
 
+## Using it
+
+The chat window's **Help** button opens a guide: how to talk to the AI, what it can do, and
+the models and runners it works with.
+
 ## Checking it
 
 ```

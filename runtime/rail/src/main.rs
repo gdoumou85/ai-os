@@ -273,6 +273,15 @@ const CSS: &str = "
 .status { opacity: 0.6; font-style: italic; margin: 2px 12px; }
 ";
 
+/// The guide in a window of its own beside the chat, so the chat stays usable while it is open.
+fn show_guide(parent: &gtk::ApplicationWindow) {
+    let text = gtk::Label::builder().label(aios_rail::GUIDE).use_markup(true).wrap(true).xalign(0.0).selectable(true).focusable(false)
+        .margin_start(16).margin_end(16).margin_top(12).margin_bottom(16).build();
+    let scroll = gtk::ScrolledWindow::builder().child(&text).hscrollbar_policy(gtk::PolicyType::Never).build();
+    let win = gtk::Window::builder().title("AI OS guide").transient_for(parent).default_width(520).default_height(600).child(&scroll).build();
+    win.present();
+}
+
 fn main() {
     // The software renderer, unless the person chose one: GTK's GPU renderers left new cards
     // undrawn until a scroll in the owner's VirtualBox VM, and a column of text cards gains
@@ -297,7 +306,12 @@ fn main() {
         stop.add_css_class("destructive-action");
         stop.set_visible(false);
         header.pack_end(&stop);
+        let help = gtk::Button::with_label("Help");
+        help.set_tooltip_text(Some("How the AI OS works"));
+        header.pack_end(&help);
         win.set_titlebar(Some(&header));
+        let parent = win.clone();
+        help.connect_clicked(move |_| show_guide(&parent));
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&column).build();
         let status = gtk::Label::new(Some("Connecting to the AI OS service…")); status.add_css_class("status"); status.set_xalign(0.0);
