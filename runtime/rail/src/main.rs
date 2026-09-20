@@ -10,6 +10,19 @@ use std::rc::Rc;
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 
+/// The line under the cards, with the clock it is timed by: a local model can think for
+/// minutes, and a line that never changes looks stuck (the owner, 2026-09-20).
+type Live = Rc<RefCell<(String, std::time::Instant)>>;
+
+fn set_status(status: &gtk::Label, live: &Live, text: &str) {
+    *live.borrow_mut() = (text.to_string(), std::time::Instant::now());
+    status.set_text(text);
+}
+
+fn waited(secs: u64) -> String {
+    if secs < 90 { format!("{secs} seconds") } else { format!("{} min", secs / 60) }
+}
+
 fn socket_path() -> PathBuf {
     let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
         use std::os::unix::fs::MetadataExt;
@@ -489,6 +502,19 @@ fn main() {
         let spinner = gtk::Spinner::new(); spinner.set_margin_start(12);
         let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         status_row.append(&spinner); status_row.append(&status);
+        // The same line, retimed every five seconds while the AI works, so a long wait says
+        // how long it has been waiting. Only while the spinner turns: anything else on this line
+        // (a card's message, "service not running") is not a wait.
+        let live: Live = Rc::new(RefCell::new((String::new(), std::time::Instant::now())));
+        let (status_tick, live_tick, spinner_tick) = (status.clone(), live.clone(), spinner.clone());
+        glib::timeout_add_seconds_local(5, move || {
+            let (text, since) = &*live_tick.borrow();
+            let secs = since.elapsed().as_secs();
+            if spinner_tick.is_spinning() && !text.is_empty() && secs >= 20 {
+                status_tick.set_text(&format!("{text} — {}", waited(secs)));
+            }
+            glib::ControlFlow::Continue
+        });
         root.append(&scroll); root.append(&status_row); root.append(&entry);
         win.set_child(Some(&root));
 
@@ -543,6 +569,7 @@ fn main() {
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(Request::Say(t)); e.set_text(""); } });
 
         let (cards2, widgets2, column2, status2, say2, spinner2, stop2, entry2, cloud2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone(), entry.clone(), cloud.clone());
+        let live2 = live.clone();
         let (parent_for_skills, skills_win2, say_for_skills) = (win.clone(), skills_win.clone(), say.clone());
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
@@ -564,8 +591,8 @@ fn main() {
                     FromNet::Event(ev) => {
                         if let Event::Skills { notebooks } = &ev { show_skills(&parent_for_skills, &skills_win2, notebooks, &say_for_skills); continue; }
                         match aios_rail::cards::busy_after(&ev) {
-                            Some(true) => { spinner2.start(); status2.set_text("The AI is thinking…"); }
-                            Some(false) => { spinner2.stop(); status2.set_text(""); }
+                            Some(true) => { spinner2.start(); set_status(&status2, &live2, "The AI is thinking…"); }
+                            Some(false) => { spinner2.stop(); set_status(&status2, &live2, ""); }
                             None => {}
                         }
                         // `apply` on its own line: the RefMut must end before `render` borrows.
@@ -574,7 +601,9 @@ fn main() {
                             match ch {
                                 Change::Added(i) => { let w = render(&cards2.borrow().list[i], &say2, &entry2); column2.append(&w); widgets2.borrow_mut().push(w); }
                                 Change::Updated(i) => { let old = widgets2.borrow()[i].clone(); let w = render(&cards2.borrow().list[i], &say2, &entry2); column2.insert_child_after(&w, Some(&old)); column2.remove(&old); widgets2.borrow_mut()[i] = w; }
-                                Change::Line(t) => status2.set_text(&t),
+                                // What the AI is doing this second (engine `tick`): the step it is
+                                // on and the command or file it is working, while it works it.
+                                Change::Line(t) => set_status(&status2, &live2, &t),
                             }
                         }
                         stop2.set_visible(cards2.borrow().running());

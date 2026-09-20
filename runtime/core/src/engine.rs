@@ -88,8 +88,12 @@ fn on_the_desktop(action: &Action) -> bool {
 fn asks_permission(q: &str) -> bool {
     let words: String = q.to_lowercase().chars().map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' }).collect();
     let padded = format!(" {} ", words.split_whitespace().collect::<Vec<_>>().join(" "));
+    // "Would you like me to try launching it from the terminal?" — the owner's Blender run,
+    // 2026-09-20: three questions, and every answer on offer was a step the AI could simply take.
     ["okay to", "ok to", "all right to", "alright to", "may i", "shall i go", "go ahead", "your permission",
-     "should i proceed", "can i proceed", "shall i proceed", "want me to proceed", "should i go ahead"]
+     "should i proceed", "can i proceed", "shall i proceed", "want me to proceed", "should i go ahead",
+     "would you like me to", "do you want me to", "should i try", "shall i try", "how would you like me to",
+     "how would you like to handle"]
         .iter().any(|p| padded.contains(&format!(" {p} ")))
 }
 
@@ -145,6 +149,19 @@ fn not_a_move(allowed: &[&str], error: &str) -> String {
     format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\"{moves}.", error.chars().take(120).collect::<String>())
 }
 
+/// The live status line, in words the owner reads: which plan step of how many, and what is
+/// happening this second. No plan yet (asking, planning) means no number to give.
+fn step_line(job: &Job, step: usize, what: &str) -> String {
+    if job.plan.is_empty() { return what.to_string() }
+    format!("Step {} of {}: {what}", step.clamp(1, job.plan.len()), job.plan.len())
+}
+
+/// A plan step is a sentence the model wrote; the status line is one line under the cards.
+fn short(s: &str) -> String {
+    if s.chars().count() <= 60 { return s.to_string() }
+    format!("{}…", s.chars().take(60).collect::<String>().trim_end())
+}
+
 fn display_name(job: &Job) -> &str {
     if job.housekeeping { "housekeeping" } else { &job.project }
 }
@@ -167,6 +184,13 @@ impl<M: Model> Engine<M> {
     fn emit(&mut self, ev: Event) {
         (self.sink)(&ev);
         self.out.push(ev);
+    }
+
+    /// A passing status line: to the sink (the rail's status bar) and nowhere else. Not on
+    /// `out`, so it never reaches the chat history — four of these would push the person's own
+    /// last words out of the front door's `recent_messages(4)` window.
+    fn tick(&mut self, job_id: &str, text: String) {
+        (self.sink)(&Event::Busy { job_id: job_id.into(), text });
     }
 
     pub fn housekeeping_dir(&self) -> &Path { &self.housekeeping_dir }
@@ -331,6 +355,7 @@ impl<M: Model> Engine<M> {
         // Names to pick skills from, a help like the tips: unreadable means none listed, not no answer.
         let notebooks = crate::notes::notebooks(self.store.conn()).unwrap_or_else(|e| { eprintln!("engine: no notebooks for the front door ({e})"); vec![] });
         let mut p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &notebooks, &self.store.recent_messages(4)?, text);
+        self.tick("", "Working out what you are asking for…".into());
         // An answer that is not a move gets one more try with the reason; a second one is said in
         // plain words, never as "something went wrong".
         let mv = match self.model.next_move(&p) {
@@ -462,6 +487,7 @@ impl<M: Model> Engine<M> {
         // A job that did not pass can only mark the tips it was shown; with none, there is nothing
         // to ask the model.
         if !passed && job.shown_notes.is_empty() { self.emit(nothing); return }
+        self.tick(&job_id, "Thinking about what to remember from this job…".into());
         let mv = match self.model.next_move(&prompt::learning_turn(job, passed)) {
             Ok(m) => m,
             Err(e) => { eprintln!("engine: no learning turn ({e})"); self.emit(nothing); return }
@@ -639,6 +665,7 @@ impl<M: Model> Engine<M> {
             self.store.save_job(job)?;
             return Ok(false);
         }
+        self.tick(&job.id, step_line(job, plan_step, &crate::event::doing(&action)));
         let mut outcome = exec.execute(&job.id, &action)?;
         self.image = outcome.image.take();
         job.rejections = 0;
@@ -696,6 +723,12 @@ impl<M: Model> Engine<M> {
             let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
             let mut p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
             p.image = self.image.take();
+            let step = job.steps.last().map(|s| s.plan_step).unwrap_or(1);
+            let what = match job.plan.get(step.saturating_sub(1)) {
+                Some(t) => format!("{} — working out the next move", short(t)),
+                None => "working out how to do this".to_string(),
+            };
+            self.tick(&job.id, step_line(&job, step, &what));
             let mv = match self.model.next_move(&p) {
                 // A runner that let the model write outside the grammar: a rejected move like any
                 // other, told back to the model and bounded by the same two tries.
@@ -936,6 +969,49 @@ mod tests {
     /// A creative job that writes the blueprint, writes code, updates the blueprint, and proves it.
     fn happy_path() -> Vec<Move> {
         vec![start("p", true), plan(), act(1, write("BLUEPRINT.md")), act(1, write("primes.py")), act(1, write("BLUEPRINT.md")), done(run("python3"))]
+    }
+
+    /// The owner, 2026-09-20: "the local LLM keeps working and i do not know what it does."
+    /// Every wait — the model's turn, a long command, the learning turn — says what it is.
+    #[test]
+    fn the_status_line_says_which_step_and_what_is_happening() {
+        let (e, _, _) = engine_with(vec![
+            start("p", true), plan(), act(1, write("BLUEPRINT.md")),
+            act(2, run("sudo apt-get install -y blender")), done(run("true")),
+        ], "doing");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let keep = seen.clone();
+        let mut e = e.with_sink(Box::new(move |ev| keep.borrow_mut().push(ev.clone())));
+        e.handle("install blender").unwrap();
+        let lines: Vec<String> = seen.borrow().iter().filter_map(|e| match e { Event::Busy { text, .. } => Some(text.clone()), _ => None }).collect();
+        assert!(lines.iter().any(|l| l == "Working out what you are asking for…"), "{lines:?}");
+        assert!(lines.iter().any(|l| l == "Step 2 of 2: running sudo apt-get install -y blender"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("Step 1 of 2: write it — working out the next move")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("what to remember")), "{lines:?}");
+    }
+
+    /// A status line is not a message: the front door's window of the last four must still be
+    /// the person's own words.
+    #[test]
+    fn the_status_line_is_never_kept_as_a_message() {
+        let (mut e, _, _) = engine_with(happy_path(), "doing-history");
+        let ev = e.handle_events("make it, decide yourself").unwrap();
+        assert!(!ev.iter().any(|e| matches!(e, Event::Busy { .. })), "{ev:?}");
+        let msgs = e.store.recent_messages(4).unwrap();
+        assert!(!msgs.iter().any(|(_, t)| t.contains("working out")), "{msgs:?}");
+    }
+
+    #[test]
+    fn a_question_whose_answers_are_all_steps_is_refused() {
+        for q in ["Would you like me to try launching it from the terminal?",
+                  "Blender seems to be launching but no window is appearing. How would you like to handle this?",
+                  "Do you want me to check the running processes for blender?",
+                  "Should I try opening blender with a specific config file?"] {
+            assert!(asks_permission(q), "{q}");
+        }
+        for q in ["Which language should I use?", "What should the window be called?", "How many players?"] {
+            assert!(!asks_permission(q), "{q}");
+        }
     }
 
     #[test]
@@ -1771,8 +1847,11 @@ mod tests {
         let (e, _, _) = engine_with(happy_path(), "ev-sink");
         let mut e = e.with_sink(Box::new(move |ev| s2.borrow_mut().push(serde_json::to_string(ev).unwrap())));
         let ev = e.handle_events("make it").unwrap();
-        assert_eq!(seen.borrow().len(), ev.len());
-        assert!(seen.borrow()[0].starts_with("{\"kind\":\"understood\""));
+        // The status line (`tick`) goes to the sink and nowhere else, so it is not among the
+        // events returned: everything else must be, in the same order.
+        let flow: Vec<String> = seen.borrow().iter().filter(|s| !s.starts_with("{\"kind\":\"busy\"")).cloned().collect();
+        assert_eq!(flow.len(), ev.len());
+        assert!(flow[0].starts_with("{\"kind\":\"understood\""));
     }
 
     #[test]

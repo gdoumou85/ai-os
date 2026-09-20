@@ -29,6 +29,31 @@ pub fn describe(action: &Action) -> String {
     }
 }
 
+/// The same actions in the present tense, for the line that shows *while* one runs (the
+/// owner, 2026-09-20: "the local LLM keeps working and i do not know what it does"). `describe`
+/// is the past tense that lands on the card once the action is over.
+pub fn doing(action: &Action) -> String {
+    match action {
+        Action::WriteFile { path, .. } => format!("writing {path}"),
+        Action::EditFile { path, .. } => format!("editing {path}"),
+        Action::ReadFile { path, .. } => format!("reading {path}"),
+        Action::RunCommand { argv } => format!("running {}", argv.join(" ")),
+        Action::SetSetting { key, value } => format!("setting {key} = {value}"),
+        Action::Look { window, .. } => match window.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+            None => "looking at the open windows".into(),
+            Some(w) => format!("looking at {w}"),
+        },
+        Action::Press { name, .. } => format!("pressing {name}"),
+        Action::Type { control, .. } => format!("typing into control {control}"),
+        Action::Read { control, .. } => format!("reading control {control}"),
+        Action::OpenApp { name, .. } => format!("opening {name}"),
+        Action::ScreenLook { cell: None } => "looking at the screen".into(),
+        Action::ScreenLook { cell: Some(c) } => format!("looking closely at screen square {c}"),
+        Action::ScreenClick { name, .. } => format!("clicking {name} on the screen"),
+        Action::ScreenType { .. } => "typing on the screen".into(),
+    }
+}
+
 fn plural(n: usize, w: &str) -> String { if n == 1 { format!("1 {w}") } else { format!("{n} {w}s") } }
 
 /// The terminal's lines for one event. `plan`, `step` and `state` print nothing: the terminal
@@ -68,6 +93,14 @@ mod tests {
         assert_eq!(describe(&Action::Look { window: Some("  ".into()), find: Some("save".into()) }), "looked at the open windows");
         assert_eq!(describe(&Action::Look { window: Some("Calculator".into()), find: Some("save".into()) }), "looked for save in Calculator");
         assert_eq!(describe(&Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }), "opened org.gnome.Calculator");
+    }
+
+    #[test]
+    fn what_it_is_doing_reads_in_the_present_tense() {
+        assert_eq!(doing(&Action::RunCommand { argv: vec!["sudo".into(), "apt-get".into(), "install".into(), "blender".into()] }), "running sudo apt-get install blender");
+        assert_eq!(doing(&Action::WriteFile { path: "a.py".into(), contents: "x".into() }), "writing a.py");
+        assert_eq!(doing(&Action::OpenApp { name: "firefox".into(), visible: true }), "opening firefox");
+        assert_eq!(doing(&Action::Look { window: Some(String::new()), find: None }), "looking at the open windows");
     }
 
     #[test]

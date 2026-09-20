@@ -398,3 +398,19 @@ Design `2026-09-19-full-access-design.md`, plan `2026-09-19-full-access.md`.
 - Stays: the loop guards and budgets, the answer timeout, Skills (Keep/Discard now counts a `sudo`
   command as changing the machine), the Stop button.
 
+## 2026-09-20: what it is doing, and windows it cannot see (v0.8.1)
+
+Two things the owner hit on his first full-access run.
+
+- **The line under the cards says what is happening now**: which plan step of how many, and the
+  command, file or window being worked this second; after twenty seconds it says how long the wait
+  has been. The turn after a job ("thinking about what to remember") says so too — that one is
+  minutes of silence on a local model. `Engine::tick` sends it to the sink only, never onto `out`:
+  a status line is not a message and must not fill the front door's `recent_messages(4)`.
+- **A window the accessibility bus cannot see is on the screen, not missing**: Blender (like games
+  and anything drawing its own interface) lists nothing, so `look` and `open_app` both read as
+  failure and the AI asked him what to do, then opened Blender three more times. Every miss now
+  points at `screen_look` and at the program's own command line; `open_app` will not make a second
+  copy within two minutes; the rules say to drive a program headless when it can be
+  (`blender --background --python …`); "Would you like me to…" now counts as asking permission.
+

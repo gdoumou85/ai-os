@@ -23,7 +23,7 @@ The AI does not remember the chat itself. What is worth keeping it writes down: 
 • <b>Done</b> (green): the job is finished and proved. The files it changed are listed with an Open button.
 • <b>Failed</b> (red): what went wrong, in plain words.
 
-While the AI is working, the circle next to the status line turns.
+While the AI is working, the circle at the bottom turns and the line beside it says what it is doing right now: which step of how many, and the command or file it is working on — for example <tt>Step 2 of 4: running sudo apt-get install -y blender</tt>. After twenty seconds it also says how long that has been going, so you can tell a long job from a stuck one. When a job ends, it says it is thinking about what to remember; that is the last thing it does, and it can take a few minutes on a slow model.
 
 
 <big><b>The buttons at the top</b></big>
@@ -43,7 +43,7 @@ When a new version is out, a card at login says so. Press <b>Update now</b>, typ
 • <b>Files and projects</b>: write, change and run code and documents anywhere. Projects live in <tt>/data/projects</tt>. Each project keeps a short notes file, BLUEPRINT.md, so the AI knows the project the next time.
 • <b>Programs</b>: install and remove programs, start and stop services, change settings.
 • <b>Your windows</b>: open a program and press its buttons, type into it and read it, the way a person would. Say "take my Text Editor window" to hand it a window you have open.
-• <b>The screen</b>, as a last resort, for what it can't reach any other way (a web page, for example). It looks at the screen, zooms in and clicks, using the real mouse. It keeps going if you move the mouse too, so leave it alone while it clicks, or the two of you pull the pointer from each other.
+• <b>The screen</b>, as a last resort, for what it can't reach any other way (a web page, for example, or a program like Blender or a game, which draws its own buttons and lists nothing the AI can read). It looks at the screen, zooms in and clicks, using the real mouse. It keeps going if you move the mouse too, so leave it alone while it clicks, or the two of you pull the pointer from each other.
 
 
 <big><b>Skills: what it learns</b></big>
