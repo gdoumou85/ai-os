@@ -19,8 +19,7 @@ Rules:
 - The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`). read_file, write_file and edit_file take any absolute path too; a file only root may write is written for you. Where projects live is changed with `set_setting`.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project; so is using a program or a website for the user (opening it, clicking, filling it in). A project is something you build and keep as files.
 - Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`.
-- A program with a command line or a script mode is driven that way, not by clicking: Blender runs a whole job headless with `blender --background --python your_script.py`, and many programs have the same. Check for one before you open a window.
-- Not every program lists its controls to `look` — Blender, games and anything that draws its own interface do not, however plainly they are on the screen. A window the user can see and `look` cannot is worked with `screen_look`, never reported as missing and never opened a second time.
+- A program that has a command line or a script mode is driven that way rather than by clicking — it is quicker and its result can be proved. Ask it with `run_command <program> --help` before you open its window.
 - The screen is the last resort, for what `look` cannot reach (a web page, an app that lists no controls): `screen_look` shows the screen under numbered squares 1-48; `screen_look` with a cell shows that square enlarged under spots 1-16; `screen_click` a spot in the square you just enlarged, naming what you click; `screen_type` types into what has the focus (enter to press Enter after). Look, enlarge, click, then look again to see what happened; every click needs a fresh enlarged look.";
 
 fn join_instructions(instructions: &[String]) -> String {
@@ -284,7 +283,7 @@ mod tests {
     #[test]
     fn system_rules_teach_the_desktop_hand_and_name_no_application() {
         for w in ["`look`", "`press`", "`type`", "`read`", "`open_app`", "Look before you act", "`screen_look`", "`screen_click`", "`screen_type`", "last resort",
-                  "--background", "never opened a second time"] { assert!(SYSTEM.contains(w), "{w}"); }
+                  "--help"] { assert!(SYSTEM.contains(w), "{w}"); }
         // The live 2a run: the model typed the line five times over and reached for Close, because
         // nothing told it that Save lives behind the menu button and answers to `Ctrl+S`.
         for w in ["look for its menu or menu button", "`Ctrl+S`"] { assert!(SYSTEM.contains(w), "{w}"); }
