@@ -418,4 +418,10 @@ Two things the owner hit on his first full-access run.
   itself when `look` finds no window, when nothing lists one, or when `open_app` leaves none — the
   answer comes back with the picture in it — and the two special-case rules left the prompt. Asking
   the user what they want is allowed again; only asking for leave to act is refused.
+- **Same day again** ("i told it just now to open blender and its first thought was to install it…
+  apparently is not registered to its toolset"): nothing told a model what this machine already
+  holds. A plain `apt-get install` whose packages dpkg already has is answered, not run; anything
+  else (reinstall, fix, local .deb, pinned version) runs as written. A program with no desktop
+  entry is no longer called uninstalled — `open_app` says to run it and to install only if that
+  fails.
 
