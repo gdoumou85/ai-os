@@ -424,4 +424,9 @@ Two things the owner hit on his first full-access run.
   else (reinstall, fix, local .deb, pinned version) runs as written. A program with no desktop
   entry is no longer called uninstalled — `open_app` says to run it and to install only if that
   fails.
-
+- **Same day, once more** ("blender successfully opened. But after that the ui appears as this is
+  still working… the llm is doing nothing"): it had started Blender with `run_command blender`, and
+  a program with a window never gives the command line back — the machine hand sat on it in
+  silence to the 30-minute bound. A plain program name that has a desktop entry is now answered,
+  not run ("open it with open_app blender"); a command-line use, anything carrying an option, runs
+  as written. The screen grab runs under `timeout` too: it was the one action with no bound at all.
