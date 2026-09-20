@@ -104,7 +104,7 @@ fn find_app(dirs: &[&str], name: &str) -> Result<String, String> {
         .filter(|id| id.to_lowercase().contains(&want)).collect();
     near.sort(); near.dedup();
     Err(if near.is_empty() {
-        format!("no application called {name} is installed; look with no window to see what is open, or ask the user before installing anything")
+        format!("no application called {name} is installed; install it with run_command `sudo apt-get install -y {name}` and open it again")
     } else {
         format!("no application is called exactly {name}; installed ones with that name: {} — open_app one of those", near.join(", "))
     })
@@ -119,11 +119,20 @@ const MAX_NODES: usize = 6000;
 
 /// Shared by every `DesktopWorker` the factory hands out: the connection opens on first use,
 /// the id table lives as long as the process.
-pub struct DesktopState { conn: Option<Connection>, pub ids: IdTable, cap: usize, displays: Displays, pub screen: crate::screen::Screen }
+pub struct DesktopState {
+    conn: Option<Connection>, pub ids: IdTable, cap: usize, displays: Displays, pub screen: crate::screen::Screen,
+    /// What `open_app` has launched and when. A program this hand cannot see looks unopened, and
+    /// the owner's run, 2026-09-20, opened Blender three times over: three copies, still nothing
+    /// listed. Anything launched in the last `RELAUNCH_SECS` is answered, not launched again.
+    opened: Vec<(String, Instant)>,
+}
+
+/// How long a launch counts as "it is already running" (see `DesktopState::opened`).
+const RELAUNCH_SECS: u64 = 120;
 
 impl DesktopState {
     pub fn new(cap: usize, displays: Displays) -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(Self { conn: None, ids: IdTable::new(), cap, displays, screen: Default::default() }))
+        Rc::new(RefCell::new(Self { conn: None, ids: IdTable::new(), cap, displays, screen: Default::default(), opened: vec![] }))
     }
     pub fn for_model(context_tokens: usize) -> Rc<RefCell<Self>> { Self::new(look_cap(context_tokens), Displays::from_env()) }
 
@@ -288,7 +297,7 @@ impl DesktopWorker {
         let all = windows(conn)?;
         let hits: Vec<_> = all.iter().filter(|(app, title, _)| names_window(app, title, wanted)).collect();
         match hits.len() {
-            0 => Err(format!("no window matches {wanted}; look with no window to see what is open")),
+            0 => Err(format!("no window matches {wanted}; this hand only sees programs that list their controls, and {wanted} may be on the screen all the same — look at the screen with screen_look and work it there. look with no window lists the ones this hand can see.")),
             1 => Ok((window_line(&hits[0].0, &hits[0].1), hits[0].2.clone())),
             n => Err(format!("{n} windows match {wanted}: {}; say which", hits.iter().map(|(a, t, _)| window_line(a, t)).collect::<Vec<_>>().join(", "))),
         }
@@ -346,6 +355,10 @@ impl DesktopWorker {
             Action::OpenApp { name, visible } => {
                 if !valid_app_name(name) { return Err(format!("invalid application name: {name}")); }
                 let id = find_app(&APP_DIRS, name)?;
+                st.opened.retain(|(_, at)| at.elapsed() < Duration::from_secs(RELAUNCH_SECS));
+                if st.opened.iter().any(|(n, _)| n == name) {
+                    return Ok(format!("you opened {name} a moment ago and it is already running — another copy would not help. If it lists no window it is one of the programs that never does: look at the screen with screen_look, or drive it from the command line."));
+                }
                 // gtk-launch resolves the id itself: only in the folders above, never the AI's home.
                 let data_dirs = APP_DIRS.map(|d| d.trim_end_matches("/applications")).join(":");
                 let display = if *visible { &displays.visible } else { &displays.invisible };
@@ -361,6 +374,7 @@ impl DesktopWorker {
                 if !ran.success() {
                     return Err(format!("could not launch {name}: gtk-launch exited {}", ran.code().unwrap_or(-1)));
                 }
+                st.opened.push((name.clone(), Instant::now()));
                 let t = Instant::now();
                 while t.elapsed() < Duration::from_secs(10) {
                     std::thread::sleep(Duration::from_millis(500));
@@ -370,13 +384,13 @@ impl DesktopWorker {
                         return Ok(format!("opened {name}; its window is {app} — {title}"));
                     }
                 }
-                Ok(format!("opened {name}; no window appeared within 10 s, look again later"))
+                Ok(format!("opened {name}; it has listed no window in 10 s. Some programs (Blender, games, anything that draws its own interface) never list one, so it may be on the screen already: look at the screen with screen_look, or drive it from the command line if it has one."))
             }
             Action::Look { window, find } => {
                 let conn = st.conn()?.clone();
                 let Some(w) = asked_window(window) else {
                     let all = windows(&conn)?;
-                    if all.is_empty() { return Ok("no windows are open".into()); }
+                    if all.is_empty() { return Ok("no window lists itself to this hand; anything on the screen must be worked with screen_look".into()); }
                     return Ok(format!("windows:\n{}", all.iter().map(|(a, t, _)| format!("- {}", window_line(a, t))).collect::<Vec<_>>().join("\n")));
                 };
                 let (title, frame) = Self::find_window(&conn, w)?;
@@ -525,7 +539,7 @@ mod tests {
         assert_eq!(find_app(&dirs, "org.gnome.Calculator").unwrap(), "org.gnome.Calculator");
         let e = find_app(&dirs, "calculator").unwrap_err();
         assert!(e.contains("org.gnome.Calculator") && e.contains("open_app one of those"), "{e}");
-        assert!(find_app(&dirs, "blender").unwrap_err().contains("ask the user before installing"));
+        assert!(find_app(&dirs, "blender").unwrap_err().contains("sudo apt-get install -y blender"), "full access installs it instead of asking");
         std::fs::remove_dir_all(&d).unwrap();
     }
 

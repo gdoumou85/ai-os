@@ -88,8 +88,12 @@ fn on_the_desktop(action: &Action) -> bool {
 fn asks_permission(q: &str) -> bool {
     let words: String = q.to_lowercase().chars().map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' }).collect();
     let padded = format!(" {} ", words.split_whitespace().collect::<Vec<_>>().join(" "));
+    // "Would you like me to try launching it from the terminal?" — the owner's Blender run,
+    // 2026-09-20: three questions, and every answer on offer was a step the AI could simply take.
     ["okay to", "ok to", "all right to", "alright to", "may i", "shall i go", "go ahead", "your permission",
-     "should i proceed", "can i proceed", "shall i proceed", "want me to proceed", "should i go ahead"]
+     "should i proceed", "can i proceed", "shall i proceed", "want me to proceed", "should i go ahead",
+     "would you like me to", "do you want me to", "should i try", "shall i try", "how would you like me to",
+     "how would you like to handle"]
         .iter().any(|p| padded.contains(&format!(" {p} ")))
 }
 
@@ -995,6 +999,19 @@ mod tests {
         assert!(!ev.iter().any(|e| matches!(e, Event::Busy { .. })), "{ev:?}");
         let msgs = e.store.recent_messages(4).unwrap();
         assert!(!msgs.iter().any(|(_, t)| t.contains("working out")), "{msgs:?}");
+    }
+
+    #[test]
+    fn a_question_whose_answers_are_all_steps_is_refused() {
+        for q in ["Would you like me to try launching it from the terminal?",
+                  "Blender seems to be launching but no window is appearing. How would you like to handle this?",
+                  "Do you want me to check the running processes for blender?",
+                  "Should I try opening blender with a specific config file?"] {
+            assert!(asks_permission(q), "{q}");
+        }
+        for q in ["Which language should I use?", "What should the window be called?", "How many players?"] {
+            assert!(!asks_permission(q), "{q}");
+        }
     }
 
     #[test]
