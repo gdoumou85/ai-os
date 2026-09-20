@@ -104,7 +104,7 @@ fn find_app(dirs: &[&str], name: &str) -> Result<String, String> {
         .filter(|id| id.to_lowercase().contains(&want)).collect();
     near.sort(); near.dedup();
     Err(if near.is_empty() {
-        format!("no application called {name} is installed; install it with run_command `sudo apt-get install -y {name}` and open it again")
+        format!("no application called {name} has a desktop entry to open. It may still be installed: run it with run_command `{name}` (or `{name} --help` to see what it does without a window). Install it with `sudo apt-get install -y {name}` only if that says it is not there.")
     } else {
         format!("no application is called exactly {name}; installed ones with that name: {} — open_app one of those", near.join(", "))
     })
@@ -566,7 +566,9 @@ mod tests {
         assert_eq!(find_app(&dirs, "org.gnome.Calculator").unwrap(), "org.gnome.Calculator");
         let e = find_app(&dirs, "calculator").unwrap_err();
         assert!(e.contains("org.gnome.Calculator") && e.contains("open_app one of those"), "{e}");
-        assert!(find_app(&dirs, "blender").unwrap_err().contains("sudo apt-get install -y blender"), "full access installs it instead of asking");
+        let miss = find_app(&dirs, "blender").unwrap_err();
+        assert!(miss.contains("run_command `blender`") && miss.contains("sudo apt-get install -y blender"),
+                "a program with no desktop entry may still be installed: try it before installing it");
         std::fs::remove_dir_all(&d).unwrap();
     }
 

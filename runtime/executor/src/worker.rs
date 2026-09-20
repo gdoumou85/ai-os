@@ -64,6 +64,15 @@ impl MachineWorker {
     fn path(&self, p: &str) -> PathBuf { self.workspace.join(p) }
 
     fn command(&self, argv: &[String]) -> Outcome {
+        // The owner, 2026-09-20: he said "open blender", and the AI — which had installed Blender
+        // itself an hour before and kept no note of it — set out to install it again. Nothing
+        // tells a model what this machine already has, so the hand answers for it: a check costs
+        // a moment, and apt on his VM costs minutes.
+        if let Some(pkgs) = packages_to_install(argv) {
+            if pkgs.iter().all(|p| installed(p)) {
+                return Outcome::ok(format!("nothing to install: {} already installed. Open a program with open_app, or run it with run_command.", pkgs.join(", ")));
+            }
+        }
         let out = Command::new("timeout").arg(COMMAND_SECS).args(argv).current_dir(&self.workspace)
             .env("DEBIAN_FRONTEND", "noninteractive").stdin(Stdio::null()).output();
         match out {
@@ -144,6 +153,35 @@ impl Worker for MachineWorker {
             _ => Outcome::err("commands and files have no hand for this action"),
         }
     }
+}
+
+/// The packages a plain `apt-get install` would install, or `None` when the command is anything
+/// else — a reinstall, a fix, a local .deb, a pinned version, a shell line. Only the plain form is
+/// answered from the machine's own records; everything else runs as written.
+pub(crate) fn packages_to_install(argv: &[String]) -> Option<Vec<String>> {
+    let mut it = argv.iter().map(String::as_str);
+    let mut head = it.next()?;
+    if head == "sudo" { head = it.next()?; }
+    if !matches!(head, "apt" | "apt-get") || it.next()? != "install" { return None; }
+    let mut pkgs = vec![];
+    for a in it {
+        if a.starts_with('-') {
+            if !matches!(a, "-y" | "--yes" | "-q" | "-qq" | "--quiet" | "--no-install-recommends") { return None; }
+        } else if a.contains('/') || a.contains('=') || a.ends_with(".deb") {
+            return None;
+        } else {
+            pkgs.push(a.to_string());
+        }
+    }
+    (!pkgs.is_empty()).then_some(pkgs)
+}
+
+/// Whether dpkg holds this package as installed. Anything it cannot answer is "not installed",
+/// so the command runs as written.
+pub(crate) fn installed(pkg: &str) -> bool {
+    Command::new("dpkg-query").args(["-W", "-f=${db:Status-Status}", pkg]).stdin(Stdio::null()).output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "installed")
+        .unwrap_or(false)
 }
 
 /// Last `n` chars of `s` — for failures the reason is at the end of the output, not the start.
@@ -240,6 +278,24 @@ mod tests {
         assert!(!many.ok && many.detail.contains("2 places"), "{}", many.detail);
         assert_eq!(fs::read_to_string(ws.join("a.py")).unwrap(), "x = 1\nx = 1\n", "file untouched");
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn only_a_plain_install_is_answered_from_what_is_already_there() {
+        let argv = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(packages_to_install(&argv("sudo apt-get install -y blender")), Some(vec!["blender".to_string()]));
+        assert_eq!(packages_to_install(&argv("apt install blender cowsay")), Some(vec!["blender".to_string(), "cowsay".to_string()]));
+        for other in ["sudo apt-get install --reinstall blender", "sudo apt-get remove -y blender",
+                      "sudo apt-get install ./local.deb", "sudo apt-get install blender=1.2",
+                      "pip install requests", "sh -c apt-get install blender", "sudo apt-get install -y"] {
+            assert_eq!(packages_to_install(&argv(other)), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn dpkg_says_what_is_installed() {
+        assert!(installed("dpkg"), "dpkg itself is installed wherever dpkg-query answers");
+        assert!(!installed("no-such-package-anywhere-xyz"));
     }
 
     #[test]

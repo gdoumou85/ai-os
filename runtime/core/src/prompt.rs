@@ -15,6 +15,7 @@ Rules:
 - A step that failed once will fail again. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
 - If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.
+- Never install what is already there: this machine has had programs installed on it before, some by you. `run_command <program> --help` answers in a second; an install takes minutes.
 - Install, remove and set up software with run_command: `sudo apt-get install -y …`, `sudo apt-get remove -y …`, `sudo systemctl …`; language packages with pip (into the working directory's .venv), npm or cargo. Make folders with `run_command mkdir -p`.
 - The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`). read_file, write_file and edit_file take any absolute path too; a file only root may write is written for you. Where projects live is changed with `set_setting`.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project; so is using a program or a website for the user (opening it, clicking, filling it in). A project is something you build and keep as files.
@@ -283,7 +284,7 @@ mod tests {
     #[test]
     fn system_rules_teach_the_desktop_hand_and_name_no_application() {
         for w in ["`look`", "`press`", "`type`", "`read`", "`open_app`", "Look before you act", "`screen_look`", "`screen_click`", "`screen_type`", "last resort",
-                  "--help"] { assert!(SYSTEM.contains(w), "{w}"); }
+                  "--help", "Never install what is already there"] { assert!(SYSTEM.contains(w), "{w}"); }
         // The live 2a run: the model typed the line five times over and reached for Close, because
         // nothing told it that Save lives behind the menu button and answers to `Ctrl+S`.
         for w in ["look for its menu or menu button", "`Ctrl+S`"] { assert!(SYSTEM.contains(w), "{w}"); }
