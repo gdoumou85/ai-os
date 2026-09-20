@@ -413,4 +413,9 @@ Two things the owner hit on his first full-access run.
   points at `screen_look` and at the program's own command line; `open_app` will not make a second
   copy within two minutes; the rules say to drive a program headless when it can be
   (`blender --background --python …`); "Would you like me to…" now counts as asking permission.
+- **Same day, on his word** ("it will be the same issue with every app we install. The AI must just
+  be able to understand"): the advice became behaviour. The desktop hand takes the screen look
+  itself when `look` finds no window, when nothing lists one, or when `open_app` leaves none — the
+  answer comes back with the picture in it — and the two special-case rules left the prompt. Asking
+  the user what they want is allowed again; only asking for leave to act is refused.
 
