@@ -1830,8 +1830,11 @@ mod tests {
         let (e, _, _) = engine_with(happy_path(), "ev-sink");
         let mut e = e.with_sink(Box::new(move |ev| s2.borrow_mut().push(serde_json::to_string(ev).unwrap())));
         let ev = e.handle_events("make it").unwrap();
-        assert_eq!(seen.borrow().len(), ev.len());
-        assert!(seen.borrow()[0].starts_with("{\"kind\":\"understood\""));
+        // The status line (`tick`) goes to the sink and nowhere else, so it is not among the
+        // events returned: everything else must be, in the same order.
+        let flow: Vec<String> = seen.borrow().iter().filter(|s| !s.starts_with("{\"kind\":\"busy\"")).cloned().collect();
+        assert_eq!(flow.len(), ev.len());
+        assert!(flow[0].starts_with("{\"kind\":\"understood\""));
     }
 
     #[test]
