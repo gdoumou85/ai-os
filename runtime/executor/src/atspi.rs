@@ -130,6 +130,12 @@ pub struct DesktopState {
 /// How long a launch counts as "it is already running" (see `DesktopState::opened`).
 const RELAUNCH_SECS: u64 = 120;
 
+/// The end of every answer that means "this hand cannot see it, but the screen can". `DesktopWorker::run`
+/// takes the screen look itself and hands back the picture: no rule to remember, no list of which
+/// programs list their windows and which do not (the owner, 2026-09-20: "it will be the same issue
+/// with every app we install. The AI must just be able to understand").
+const SCREEN_INSTEAD: &str = "Here is the screen instead: work it with screen_look, screen_click and screen_type.";
+
 impl DesktopState {
     pub fn new(cap: usize, displays: Displays) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self { conn: None, ids: IdTable::new(), cap, displays, screen: Default::default(), opened: vec![] }))
@@ -297,7 +303,7 @@ impl DesktopWorker {
         let all = windows(conn)?;
         let hits: Vec<_> = all.iter().filter(|(app, title, _)| names_window(app, title, wanted)).collect();
         match hits.len() {
-            0 => Err(format!("no window matches {wanted}; this hand only sees programs that list their controls, and {wanted} may be on the screen all the same — look at the screen with screen_look and work it there. look with no window lists the ones this hand can see.")),
+            0 => Err(format!("nothing that lists its controls is called {wanted}, and many programs list none however plainly they are open. {SCREEN_INSTEAD}")),
             1 => Ok((window_line(&hits[0].0, &hits[0].1), hits[0].2.clone())),
             n => Err(format!("{n} windows match {wanted}: {}; say which", hits.iter().map(|(a, t, _)| window_line(a, t)).collect::<Vec<_>>().join(", "))),
         }
@@ -357,7 +363,7 @@ impl DesktopWorker {
                 let id = find_app(&APP_DIRS, name)?;
                 st.opened.retain(|(_, at)| at.elapsed() < Duration::from_secs(RELAUNCH_SECS));
                 if st.opened.iter().any(|(n, _)| n == name) {
-                    return Ok(format!("you opened {name} a moment ago and it is already running — another copy would not help. If it lists no window it is one of the programs that never does: look at the screen with screen_look, or drive it from the command line."));
+                    return Ok(format!("you opened {name} a moment ago and it is already running; another copy would not help. {SCREEN_INSTEAD}"));
                 }
                 // gtk-launch resolves the id itself: only in the folders above, never the AI's home.
                 let data_dirs = APP_DIRS.map(|d| d.trim_end_matches("/applications")).join(":");
@@ -384,13 +390,13 @@ impl DesktopWorker {
                         return Ok(format!("opened {name}; its window is {app} — {title}"));
                     }
                 }
-                Ok(format!("opened {name}; it has listed no window in 10 s. Some programs (Blender, games, anything that draws its own interface) never list one, so it may be on the screen already: look at the screen with screen_look, or drive it from the command line if it has one."))
+                Ok(format!("opened {name}; it has listed no window in 10 s, which many programs never do. {SCREEN_INSTEAD}"))
             }
             Action::Look { window, find } => {
                 let conn = st.conn()?.clone();
                 let Some(w) = asked_window(window) else {
                     let all = windows(&conn)?;
-                    if all.is_empty() { return Ok("no window lists itself to this hand; anything on the screen must be worked with screen_look".into()); }
+                    if all.is_empty() { return Ok(format!("no program lists a window to this hand. {SCREEN_INSTEAD}")); }
                     return Ok(format!("windows:\n{}", all.iter().map(|(a, t, _)| format!("- {}", window_line(a, t))).collect::<Vec<_>>().join("\n")));
                 };
                 let (title, frame) = Self::find_window(&conn, w)?;
@@ -449,7 +455,28 @@ impl Worker for DesktopWorker {
                 Err(e) => Outcome::err(e),
             };
         }
-        match self.run_inner(action) { Ok(d) => Outcome::ok(d), Err(e) => Outcome::err(e) }
+        match self.run_inner(action) {
+            Ok(d) if d.ends_with(SCREEN_INSTEAD) => self.with_the_screen(d, true),
+            // Not a failure any more: the model asked to see a window, and it is about to see it.
+            Err(e) if e.ends_with(SCREEN_INSTEAD) => self.with_the_screen(e, false),
+            Ok(d) => Outcome::ok(d),
+            Err(e) => Outcome::err(e),
+        }
+    }
+}
+
+impl DesktopWorker {
+    /// Answer `detail` with a look at the screen attached, so a window the accessibility bus
+    /// cannot show is seen anyway. A screen that cannot be read leaves the answer as it was.
+    fn with_the_screen(&self, detail: String, was_ok: bool) -> Outcome {
+        let look = Action::ScreenLook { cell: None };
+        match crate::screen::run(&mut self.0.borrow_mut().screen, &look) {
+            Ok((line, image)) => Outcome { image, ..Outcome::ok(format!("{detail} {line}")) },
+            Err(e) => {
+                let detail = format!("{detail} (the screen could not be read either: {e})");
+                if was_ok { Outcome::ok(detail) } else { Outcome::err(detail) }
+            }
+        }
     }
 }
 
