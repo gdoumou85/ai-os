@@ -91,13 +91,22 @@ fn role_name(role: u32) -> &'static str {
 const APP_DIRS: [&str; 4] = ["/usr/share/applications", "/usr/local/share/applications",
     "/var/lib/snapd/desktop/applications", "/var/lib/flatpak/exports/share/applications"];
 
+/// The desktop entry `name` has, if it has one: the entry itself or a snap's `<name>_<name>`.
+/// A program with one is a program with a window — `find_app`'s exact half, and the machine
+/// hand's check before it runs a name in the foreground.
+pub(crate) fn entry_in(dirs: &[&str], name: &str) -> Option<String> {
+    [name.to_string(), format!("{name}_{name}")].into_iter()
+        .find(|id| dirs.iter().any(|d| std::path::Path::new(d).join(format!("{id}.desktop")).is_file()))
+}
+
+/// `entry_in` over the system folders.
+pub fn desktop_entry(name: &str) -> Option<String> { entry_in(&APP_DIRS, name) }
+
 /// The desktop id `open_app` launches for `name`: the entry itself, or a snap's `<name>_<name>`
 /// (`firefox` is `firefox_firefox`). None found: the installed ids that contain the name, so the
 /// model picks one instead of installing a second copy.
 fn find_app(dirs: &[&str], name: &str) -> Result<String, String> {
-    for id in [name.to_string(), format!("{name}_{name}")] {
-        if dirs.iter().any(|d| std::path::Path::new(d).join(format!("{id}.desktop")).is_file()) { return Ok(id); }
-    }
+    if let Some(id) = entry_in(dirs, name) { return Ok(id); }
     let want = name.to_lowercase();
     let mut near: Vec<String> = dirs.iter().filter_map(|d| std::fs::read_dir(d).ok()).flatten().flatten()
         .filter_map(|e| e.file_name().to_str()?.strip_suffix(".desktop").map(str::to_string))

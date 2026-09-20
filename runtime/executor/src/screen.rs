@@ -131,11 +131,16 @@ impl Session {
     fn frame(&self) -> Result<Vec<u8>, String> {
         let path = scratch("frame.png");
         let _ = std::fs::remove_file(&path);
-        let out = std::process::Command::new("gst-launch-1.0")
-            .args(["-e", "-q", "pipewiresrc", &format!("path={}", self.node), "num-buffers=3", "!", "videoconvert", "!", "pngenc", "snapshot=true", "!", "filesink", &format!("location={path}")])
+        // Under `timeout`, like every command the machine hand runs: a stream that negotiates
+        // but never hands over a buffer leaves gst-launch waiting for one forever, and an action
+        // that never returns holds the whole job with nothing on screen to say why.
+        let out = std::process::Command::new("timeout")
+            .args([FRAME_SECS, "gst-launch-1.0", "-e", "-q", "pipewiresrc", &format!("path={}", self.node), "num-buffers=3", "!", "videoconvert", "!", "pngenc", "snapshot=true", "!", "filesink", &format!("location={path}")])
             .output().map_err(|e| format!("cannot run gst-launch-1.0 ({e}); the installer puts it in"))?;
-        std::fs::read(&path).ok().filter(|b| b.len() > 1000)
-            .ok_or_else(|| format!("no frame came from the screen: {}", String::from_utf8_lossy(&out.stderr).trim()))
+        std::fs::read(&path).ok().filter(|b| b.len() > 1000).ok_or_else(|| {
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            format!("no frame came from the screen: {}", if why.is_empty() { format!("nothing came in {FRAME_SECS} s") } else { why })
+        })
     }
 
     fn click(&self, x: f64, y: f64, double: bool) -> Result<(), String> {
@@ -166,6 +171,9 @@ impl Drop for Session {
         let _ = self.input("Stop", &());
     }
 }
+
+/// How long one frame may take before the screen counts as unreadable (see `Session::frame`).
+const FRAME_SECS: &str = "20";
 
 /// A file under the user's runtime folder, private to them and gone at logout.
 fn scratch(name: &str) -> String {
