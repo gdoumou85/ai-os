@@ -70,7 +70,17 @@ impl MachineWorker {
         // a moment, and apt on his VM costs minutes.
         if let Some(pkgs) = packages_to_install(argv) {
             if pkgs.iter().all(|p| installed(p)) {
-                return Outcome::ok(format!("nothing to install: {} already installed. Open a program with open_app, or run it with run_command.", pkgs.join(", ")));
+                return Outcome::ok(format!("nothing to install: {} already installed. Open a program with open_app; run_command is for a command that finishes, like `{} --help`.", pkgs.join(", "), pkgs[0]));
+            }
+        }
+        // The owner, 2026-09-20: told to open Blender, the AI ran the name with run_command.
+        // Blender opened — and the command never came back, so the job sat on it in silence with
+        // the model idle, all the way to the 30-minute bound. A program with a desktop entry is a
+        // program with a window, and windows are `open_app`'s: the hand answers for that here,
+        // because a rule in the prompt did not hold.
+        if let Some(name) = opens_a_window(argv) {
+            if let Some(id) = crate::atspi::desktop_entry(name) {
+                return Outcome::err(format!("{name} opens a window, and a command that opens a window never comes back. Open it with open_app {id} (visible if the user is to see it). To use {name} without a window, give it arguments, like `{name} --help`."));
             }
         }
         let out = Command::new("timeout").arg(COMMAND_SECS).args(argv).current_dir(&self.workspace)
@@ -176,6 +186,14 @@ pub(crate) fn packages_to_install(argv: &[String]) -> Option<Vec<String>> {
     (!pkgs.is_empty()).then_some(pkgs)
 }
 
+/// The program an argv just starts: a plain name with no options after it (`blender`,
+/// `blender scene.blend`). An option means a command-line use (`blender --background x.py`),
+/// which finishes on its own and runs as written.
+pub(crate) fn opens_a_window(argv: &[String]) -> Option<&str> {
+    let (first, rest) = argv.split_first()?;
+    (crate::action::valid_app_name(first) && !rest.iter().any(|a| a.starts_with('-'))).then_some(first.as_str())
+}
+
 /// Whether dpkg holds this package as installed. Anything it cannot answer is "not installed",
 /// so the command runs as written.
 pub(crate) fn installed(pkg: &str) -> bool {
@@ -210,6 +228,21 @@ pub(crate) fn window(text: &str, from_line: Option<usize>, lines: Option<usize>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner's hang, 2026-09-20: `run_command blender` opened Blender and never returned,
+    /// so the job held for half an hour with nothing on screen but a spinner.
+    #[test]
+    fn a_bare_program_name_starts_a_window_but_a_command_line_use_does_not() {
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(opens_a_window(&argv("blender")), Some("blender"));
+        assert_eq!(opens_a_window(&argv("blender scene.blend")), Some("blender"), "a file to open is still opening the program");
+        assert_eq!(opens_a_window(&argv("blender --background x.py")), None, "a command line use finishes on its own");
+        assert_eq!(opens_a_window(&argv("ls -la")), None);
+        assert_eq!(opens_a_window(&argv("./run")), None, "a path is not a desktop name");
+        assert_eq!(opens_a_window(&[]), None);
+        // The entry is the gate: a name with no desktop file runs as written.
+        assert!(crate::atspi::desktop_entry("no-such-program-anywhere").is_none());
+    }
 
     #[test]
     fn tail_cuts_from_the_end_and_never_splits_a_char() {
