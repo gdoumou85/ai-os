@@ -23,7 +23,7 @@ The AI does not remember the chat itself. What is worth keeping it writes down: 
 • <b>Done</b> (green): the job is finished and proved. The files it changed are listed with an Open button.
 • <b>Failed</b> (red): what went wrong, in plain words.
 
-While the AI is working, the circle next to the status line turns.
+While the AI is working, the circle at the bottom turns and the line beside it says what it is doing right now: which step of how many, and the command or file it is working on — for example <tt>Step 2 of 4: running sudo apt-get install -y blender</tt>. After twenty seconds it also says how long that has been going, so you can tell a long job from a stuck one. When a job ends, it says it is thinking about what to remember; that is the last thing it does, and it can take a few minutes on a slow model.
 
 
 <big><b>The buttons at the top</b></big>

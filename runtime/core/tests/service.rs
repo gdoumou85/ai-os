@@ -70,8 +70,11 @@ fn both_clients_see_every_event_in_order_with_contiguous_seq() {
     let ea = until(&mut a, |e| matches!(e, Event::Done { .. }));
     let eb = until(&mut b, |e| matches!(e, Event::Done { .. }));
     assert_eq!(ea, eb);
-    assert!(matches!(&ea[0], Event::You { text } if text == "make p"));
-    assert!(matches!(&ea[1], Event::Understood { .. }));
+    // The status line (engine `tick`) comes through as `busy` between these: it says what the
+    // AI is doing this second, not what happened, so the flow of the job reads without it.
+    let flow: Vec<&Event> = ea.iter().filter(|e| !matches!(e, Event::Busy { .. })).collect();
+    assert!(matches!(flow[0], Event::You { text } if text == "make p"));
+    assert!(matches!(flow[1], Event::Understood { .. }));
 }
 
 #[test]
@@ -113,8 +116,8 @@ fn hello_answers_state_and_busy_is_answered_during_a_job() {
     let Some(Event::State { job: Some(st) }) = b.next_event() else { panic!() };
     assert_eq!((st.name.as_str(), st.plan.len(), st.waiting), ("p", 1, Waiting::None));
     b.say("use python").unwrap();
-    assert!(matches!(b.next_event(), Some(Event::You { .. })));
-    assert!(matches!(b.next_event(), Some(Event::Busy { text, .. }) if text.contains("working on p")));
+    until(&mut b, |e| matches!(e, Event::You { .. }));
+    until(&mut b, |e| matches!(e, Event::Busy { text, .. } if text.contains("working on p")));
     gtx.send(()).unwrap(); gtx.send(()).unwrap(); // Act, Done
     until(&mut a, |e| matches!(e, Event::Done { .. }));
     b.hello().unwrap();
@@ -220,5 +223,5 @@ fn a_message_while_only_a_chat_reply_is_in_progress_is_queued_not_busy() {
     a.say("hi again").unwrap(); // the engine is inside the first reply (gated) — no job, so no busy
     gtx.send(()).unwrap(); gtx.send(()).unwrap();
     let got = until(&mut a, |e| matches!(e, Event::Said { text } if text == "two"));
-    assert!(!got.iter().any(|e| matches!(e, Event::Busy { .. })), "{got:?}");
+    assert!(!got.iter().any(|e| matches!(e, Event::Busy { text, .. } if text.contains("Say stop"))), "{got:?}");
 }
