@@ -24,20 +24,49 @@ pub fn parse_found(out: &str) -> Vec<Choice> {
     }).collect()
 }
 
+/// The sizes the Model card's bar stops on: every context length a runner actually offers.
+pub const HOLDS: [usize; 6] = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144];
+
+/// The mark written under a notch.
+pub fn hold_label(n: usize) -> String { format!("{}k", n / 1024) }
+
+/// Which notch a size already set sits on: the largest notch that is not above it, so a hand-set
+/// 100000 shows as 64k rather than snapping the person up to something the model cannot hold.
+pub fn hold_index(n: usize) -> usize { HOLDS.iter().rposition(|h| *h <= n).unwrap_or(0) }
+
+/// How much the model can hold at once, as the Model card takes it: a plain number of tokens.
+/// Under 8192 the standing rules alone crowd out the work; over a million is a typo.
+pub fn safe_context(s: &str) -> Option<usize> {
+    s.trim().parse().ok().filter(|n| (8192..=1_000_000).contains(n))
+}
+
 /// The drop-in that makes the engine use a choice. It is applied after the installer's unit, so
-/// its lines win.
-pub fn dropin(kind: &str, url: &str, model: &str) -> Option<String> {
-    (matches!(kind, "ollama" | "openai") && safe(url) && safe(model)).then(|| format!(
-        "# Written by the AI OS chat window's Model button.\n[Service]\nEnvironment=AI_OS_MODEL={model}\nEnvironment=AI_OS_MODEL_URL={url}\nEnvironment=AI_OS_MODEL_KIND={kind}\n"))
+/// its lines win. `context` is what the runner loaded the model with (the owner, 2026-09-21: he
+/// will not set it from a command line); left out, the engine keeps its own 8192.
+pub fn dropin(kind: &str, url: &str, model: &str, context: Option<usize>) -> Option<String> {
+    if !(matches!(kind, "ollama" | "openai") && safe(url) && safe(model)) { return None }
+    let mut t = format!(
+        "# Written by the AI OS chat window's Model button.\n[Service]\nEnvironment=AI_OS_MODEL={model}\nEnvironment=AI_OS_MODEL_URL={url}\nEnvironment=AI_OS_MODEL_KIND={kind}\n");
+    if let Some(n) = context { t.push_str(&format!("Environment=AI_OS_CONTEXT={n}\n")); }
+    Some(t)
 }
 
 /// A key for the private `model.env`: printable, no spaces, one line.
 pub fn safe_key(k: &str) -> bool { !k.is_empty() && k.len() <= 500 && k.chars().all(|c| c.is_ascii_graphic()) }
 
-/// The model and address the engine runs with, from `systemctl --user show -p Environment --value`.
+/// One value out of `systemctl --user show -p Environment --value`.
+pub fn env_value(env: &str, key: &str) -> Option<String> {
+    env.split_whitespace().filter_map(|kv| kv.strip_prefix(key)).last().map(String::from)
+}
+
+/// The model and address the engine runs with.
 pub fn current(env: &str) -> (Option<String>, Option<String>) {
-    let get = |k: &str| env.split_whitespace().filter_map(|kv| kv.strip_prefix(k)).last().map(String::from);
-    (get("AI_OS_MODEL="), get("AI_OS_MODEL_URL="))
+    (env_value(env, "AI_OS_MODEL="), env_value(env, "AI_OS_MODEL_URL="))
+}
+
+/// The whole choice the engine runs now, so the Model card can re-apply it with a new context.
+pub fn current_choice(env: &str) -> Option<(String, String, String)> {
+    Some((env_value(env, "AI_OS_MODEL_KIND=")?, env_value(env, "AI_OS_MODEL_URL=")?, env_value(env, "AI_OS_MODEL=")?))
 }
 
 /// The label on a choice's button.
@@ -131,13 +160,44 @@ mod tests {
     }
 
     #[test]
+    fn the_bar_lands_on_a_notch_the_runner_offers() {
+        assert_eq!(HOLDS.map(hold_label), ["8k", "16k", "32k", "64k", "128k", "256k"].map(String::from));
+        assert_eq!(hold_index(32_768), 2);
+        // A size set by hand between notches shows as the notch below, never above it.
+        assert_eq!(hold_index(100_000), 3);
+        assert_eq!(hold_index(1), 0, "below the smallest notch is still the smallest notch");
+        assert!(HOLDS.iter().all(|h| safe_context(&h.to_string()) == Some(*h)), "every notch is a size it takes");
+    }
+
+    #[test]
+    fn how_much_it_can_hold_is_a_plain_number_and_optional() {
+        let d = dropin("openai", "http://x:1", "m", Some(32768)).unwrap();
+        assert!(d.contains("Environment=AI_OS_CONTEXT=32768\n"));
+        assert!(!dropin("openai", "http://x:1", "m", None).unwrap().contains("AI_OS_CONTEXT"));
+        assert_eq!(safe_context(" 32768 "), Some(32768));
+        // Nothing that could land in the unit file as anything but a number, and nothing so
+        // small the standing rules alone would fill it.
+        for bad in ["", "lots", "4096", "0", "-1", "2000000", "8192 ExecStart=/bin/sh"] {
+            assert_eq!(safe_context(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_engines_own_choice_comes_back_out_of_its_environment() {
+        let env = "AI_OS_MODEL=m AI_OS_MODEL_URL=http://x:1 AI_OS_MODEL_KIND=openai AI_OS_CONTEXT=32768";
+        assert_eq!(current_choice(env), Some(("openai".into(), "http://x:1".into(), "m".into())));
+        assert_eq!(env_value(env, "AI_OS_CONTEXT=").as_deref(), Some("32768"));
+        assert_eq!(current_choice("AI_OS_MODEL=m"), None, "half a choice is no choice");
+    }
+
+    #[test]
     fn the_dropin_carries_only_safe_values() {
-        let d = dropin("openai", "http://10.0.2.2:1234", "bonsai-8b@q4_k_m").unwrap();
+        let d = dropin("openai", "http://10.0.2.2:1234", "bonsai-8b@q4_k_m", None).unwrap();
         assert!(d.contains("Environment=AI_OS_MODEL=bonsai-8b@q4_k_m\n"));
         assert!(d.contains("Environment=AI_OS_MODEL_KIND=openai\n"));
-        assert_eq!(dropin("ollama", "http://x:1", "m\nExecStart=/bin/sh"), None);
-        assert_eq!(dropin("ollama", "http://x:1", "100%"), None, "% is a systemd specifier");
-        assert_eq!(dropin("other", "http://x:1", "m"), None);
+        assert_eq!(dropin("ollama", "http://x:1", "m\nExecStart=/bin/sh", None), None);
+        assert_eq!(dropin("ollama", "http://x:1", "100%", None), None, "% is a systemd specifier");
+        assert_eq!(dropin("other", "http://x:1", "m", None), None);
     }
 
     #[test]

@@ -430,3 +430,12 @@ Two things the owner hit on his first full-access run.
   silence to the 30-minute bound. A plain program name that has a desktop entry is now answered,
   not run ("open it with open_app blender"); a command-line use, anything carrying an option, runs
   as written. The screen grab runs under `timeout` too: it was the one action with no bound at all.
+- **2026-09-21** ("8k window? only? isnt that as much context as i give it from LM Studio?"): it
+  was not. Ollama is sent `num_ctx: 8192`, but LM Studio and the cloud runners are sent no context
+  size at all — theirs is whatever the server loaded — so the hardcoded 8192 was only ever a guess
+  about them, and its one real consequence was `look_cap` = context/200: forty controls listed per
+  `look`, on a model holding four times that. The Model card now carries a bar, *How much it can
+  hold*, with a notch per size a runner offers (8k to 256k); it writes `AI_OS_CONTEXT` into the
+  same systemd drop-in the model choice already uses, and switching model keeps it. The step
+  summary's own limits (last 6 steps in full, 36 in the list, 3000 characters of blueprint) are
+  still fixed numbers and do not widen with it.

@@ -58,6 +58,18 @@ impl Model for FakeModel {
 /// so `ollama_body` and `context_tokens` can never drift apart.
 const NUM_CTX: usize = 8192;
 
+/// What the model was actually loaded with. LM Studio and the cloud runners are never told a
+/// context size — theirs is whatever the server loaded — so 8192 was only ever a guess about
+/// them, and it capped `look` at 40 controls on a model holding four times that. Set
+/// `AI_OS_CONTEXT` to the window the model really has.
+fn loaded_context() -> usize { parse_context(std::env::var("AI_OS_CONTEXT").ok()) }
+
+/// Nonsense (empty, words, a window smaller than the one the rules were written for) falls back
+/// to `NUM_CTX`. The Model card holds the same floor.
+fn parse_context(v: Option<String>) -> usize {
+    v.and_then(|s| s.trim().parse().ok()).filter(|n| *n >= NUM_CTX).unwrap_or(NUM_CTX)
+}
+
 /// A model runner over HTTP (parent §4.3): Ollama, or LM Studio through its OpenAI-style door
 /// (network-models spec §2). Grammar-forced, temperature 0, 8k context — the Phase 0 settings.
 /// When its address stops answering, `finder` looks for the same model on the home network (§3).
@@ -235,7 +247,7 @@ impl Model for RemoteModel {
         }
     }
 
-    fn context_tokens(&self) -> usize { NUM_CTX }
+    fn context_tokens(&self) -> usize { loaded_context() }
 }
 
 #[cfg(test)]
@@ -388,6 +400,15 @@ mod tests {
         assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 10);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn a_stated_context_wins_and_nonsense_falls_back() {
+        assert_eq!(parse_context(Some("32768".into())), 32768);
+        assert_eq!(parse_context(Some(" 16384 ".into())), 16384);
+        for bad in [None, Some("".into()), Some("lots".into()), Some("4096".into()), Some("-1".into())] {
+            assert_eq!(parse_context(bad), NUM_CTX);
+        }
     }
 
     #[test]

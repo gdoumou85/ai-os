@@ -29,7 +29,7 @@ While the AI is working, the circle at the bottom turns and the line beside it s
 <big><b>The buttons at the top</b></big>
 
 • <b>Clear</b> empties the chat. A job still running and a question still waiting stay.
-• <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop a job first. Your cloud accounts are there too.
+• <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop a job first. Your cloud accounts are there too. The same card has a bar, <b>How much it can hold</b>: move it to the context length you loaded the model with and press Set. The AI assumes 8k until you tell it otherwise, and on a bigger model that means it reads less of a window than it could.
 • <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
 • <b>Skills</b> shows what the AI has learned, and a way to delete it (see Skills below).
 • <b>Help</b> opens this guide.
@@ -62,7 +62,7 @@ The AI OS needs a model to think with. The model runs in a separate program, the
 
 <b>Runners it works with:</b>
 • <b>Ollama</b> (ollama.com): free, on Windows, Mac or Linux.
-• <b>LM Studio</b> (lmstudio.ai): free, on Windows, Mac or Linux. Turn on "Serve on Local Network" in its server settings, and load the model with a context length of 8192 or more. If it asks for an API key, the AI OS asks you for it once.
+• <b>LM Studio</b> (lmstudio.ai): free, on Windows, Mac or Linux. Turn on "Serve on Local Network" in its server settings, and load the model with a context length of 8192 or more — whatever you choose, move the <b>How much it can hold</b> bar on the Model card to the same number, or the AI keeps working as if it were 8k. If it asks for an API key, the AI OS asks you for it once.
 
 <b>Which model:</b> one that can read pictures, so it can use the screen. Bonsai, Gemma 4, Ornith and Qwen 3.5 can. A 9B model needs a graphics card with about 8 GB of memory. Without one it runs on the processor and is slow. A bigger model on a stronger computer in your home does better work.
 
