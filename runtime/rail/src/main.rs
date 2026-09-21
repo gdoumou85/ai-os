@@ -211,8 +211,8 @@ fn engine_env() -> String { run("systemctl", &["--user", "show", "ai-os-engine.s
 
 /// Makes the engine use a choice: the drop-in, the key file, a restart. The service restarts under
 /// the rail, which reconnects on its own.
-fn apply_model(kind: &str, url: &str, model: &str, key: Option<&str>) -> Result<(), String> {
-    let text = aios_rail::models::dropin(kind, url, model).ok_or("that model's name or address has characters it may not")?;
+fn apply_model(kind: &str, url: &str, model: &str, key: Option<&str>, context: Option<usize>) -> Result<(), String> {
+    let text = aios_rail::models::dropin(kind, url, model, context).ok_or("that model's name or address has characters it may not")?;
     let home = std::env::var("HOME").map_err(|_| "no home folder")?;
     let dir = format!("{home}/.config/systemd/user/ai-os-engine.service.d");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -254,17 +254,18 @@ fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, t
         _ => "No model set yet.".into(),
     };
     let choices = aios_rail::models::parse_found(found);
+    let held = aios_rail::models::env_value(env, "AI_OS_CONTEXT=").and_then(|v| aios_rail::models::safe_context(&v));
     let text = if choices.is_empty() { format!("{now} No models answered on your network.") } else { format!("{now} Pick one to switch; the AI restarts with it.") };
     let b = plain_card("Choose a model", &text);
     let w: gtk::Widget = b.clone().upcast();
     for c in choices {
         let btn = gtk::Button::with_label(&aios_rail::models::label(&c));
         btn.set_halign(gtk::Align::Start);
-        let (col, me, tx, st, key) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), key.clone());
+        let (col, me, tx, st, key, held) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), key.clone(), held);
         btn.connect_clicked(move |_| {
             col.remove(&me);
             match &c.model {
-                Some(m) => st.set_text(&match apply_model(&c.kind, &c.url, m, key.as_deref()) {
+                Some(m) => st.set_text(&match apply_model(&c.kind, &c.url, m, key.as_deref(), held) {
                     Ok(()) => format!("Switched to {m}."),
                     Err(e) => format!("Could not switch: {e}"),
                 }),
@@ -294,6 +295,37 @@ fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, t
         });
         b.append(&btn);
     }
+    // How much the model can hold (the owner, 2026-09-21: he will not set it from a command
+    // line). LM Studio and the cloud runners are never told a context size, so the engine only
+    // ever guessed 8192 — and that guess caps `look` at 40 controls however big the model is.
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let ctx = gtk::Entry::new();
+    ctx.set_width_chars(8);
+    ctx.set_placeholder_text(Some("8192"));
+    if let Some(n) = held { ctx.set_text(&n.to_string()); }
+    let set = gtk::Button::with_label("Set");
+    row.append(&gtk::Label::new(Some("How much it can hold:")));
+    row.append(&ctx);
+    row.append(&set);
+    b.append(&row);
+    let hint = gtk::Label::new(Some("The context length you loaded the model with. LM Studio shows it \
+beside the model; a cloud model holds far more. Leave it at 8192 if you are not sure — too high and the \
+AI reads more of a window than it can hold."));
+    hint.set_xalign(0.0); hint.set_wrap(true); hint.add_css_class("dim");
+    b.append(&hint);
+    let (st, env_now, key_now) = (status.clone(), env.to_string(), key.clone());
+    set.connect_clicked(move |_| {
+        let Some(n) = aios_rail::models::safe_context(&ctx.text()) else {
+            st.set_text("That is not a size it can use: a whole number, 8192 or more."); return;
+        };
+        let Some((kind, url, model)) = aios_rail::models::current_choice(&env_now) else {
+            st.set_text("Pick a model first, then set how much it can hold."); return;
+        };
+        st.set_text(&match apply_model(&kind, &url, &model, key_now.as_deref(), Some(n)) {
+            Ok(()) => format!("It can hold {n} now. The AI restarted with it."),
+            Err(e) => format!("Could not set it: {e}"),
+        });
+    });
     let accounts = gtk::Button::with_label("Cloud accounts…");
     accounts.set_halign(gtk::Align::Start);
     let (col, me, tx, st) = (column.clone(), w.clone(), to_ui.clone(), status.clone());

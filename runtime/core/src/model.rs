@@ -64,9 +64,10 @@ const NUM_CTX: usize = 8192;
 /// `AI_OS_CONTEXT` to the window the model really has.
 fn loaded_context() -> usize { parse_context(std::env::var("AI_OS_CONTEXT").ok()) }
 
-/// Nonsense (empty, words, a window too small to hold the rules) falls back to `NUM_CTX`.
+/// Nonsense (empty, words, a window smaller than the one the rules were written for) falls back
+/// to `NUM_CTX`. The Model card holds the same floor.
 fn parse_context(v: Option<String>) -> usize {
-    v.and_then(|s| s.trim().parse().ok()).filter(|n| *n >= 2048).unwrap_or(NUM_CTX)
+    v.and_then(|s| s.trim().parse().ok()).filter(|n| *n >= NUM_CTX).unwrap_or(NUM_CTX)
 }
 
 /// A model runner over HTTP (parent §4.3): Ollama, or LM Studio through its OpenAI-style door
@@ -405,7 +406,7 @@ mod tests {
     fn a_stated_context_wins_and_nonsense_falls_back() {
         assert_eq!(parse_context(Some("32768".into())), 32768);
         assert_eq!(parse_context(Some(" 16384 ".into())), 16384);
-        for bad in [None, Some("".into()), Some("lots".into()), Some("512".into()), Some("-1".into())] {
+        for bad in [None, Some("".into()), Some("lots".into()), Some("4096".into()), Some("-1".into())] {
             assert_eq!(parse_context(bad), NUM_CTX);
         }
     }
