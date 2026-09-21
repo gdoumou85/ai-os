@@ -23,19 +23,6 @@ Rules:
 - A program that has a command line or a script mode is driven that way rather than by clicking — it is quicker and its result can be proved. Ask it with `run_command <program> --help` before you open its window.
 - The screen is the last resort, for what `look` cannot reach (a web page, an app that lists no controls): `screen_look` shows the screen under numbered squares 1-48; `screen_look` with a cell shows that square enlarged under spots 1-16; `screen_click` a spot in the square you just enlarged, naming what you click; `screen_type` types into what has the focus (enter to press Enter after). Look, enlarge, click, then look again to see what happened; every click needs a fresh enlarged look.";
 
-/// The bare version, for the A/B (2026-09-21): does a capable model do better with the rules
-/// left off? Selected with `AI_OS_BARE_PROMPT=1`. Trial only — never the default.
-pub const SYSTEM_BARE: &str = "You are the AI that runs this computer for its user, an Ubuntu Linux machine.
-You have full access to it: every folder, the whole network, and root through `sudo` (it never asks for a password). Nobody is asked before you act.
-Use the computer the way a person would, and decide for yourself how to get the job done.
-You answer with exactly one JSON move. The executor runs it and reports back; never claim something ran unless the report says so.
-Programs with a window are worked through `look`, `press`, `type`, `read` and `open_app`; everything else through `run_command` and the file moves.";
-
-/// Which rules this run uses.
-fn system() -> &'static str {
-    if std::env::var("AI_OS_BARE_PROMPT").as_deref() == Ok("1") { SYSTEM_BARE } else { SYSTEM }
-}
-
 fn join_instructions(instructions: &[String]) -> String {
     if instructions.is_empty() { "(none)".into() } else { instructions.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n") }
 }
@@ -53,7 +40,7 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], notebooks: &
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, notebooks_txt, recent_txt, message
     );
-    Prompt { system: system().into(), user, allowed: vec!["reply", "start", "housekeep"], image: None }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"], image: None }
 }
 
 /// The moves legal right now, by job state and mode (decision 13): sent as `Prompt::allowed` so
@@ -160,7 +147,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         "Machine: Ubuntu Linux (python3, no `python`; root through sudo; pip packages go into the working directory's .venv — `python3 -m venv .venv`, then .venv/bin/pip — and run from there: .venv/bin/python, .venv/bin/django-admin).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
         join_instructions(instructions), header, job.goal, verbatim, mode, job.understood, answers, plan, bp_block, last, tips, summarise_steps(job), note, hint
     );
-    Prompt { system: system().into(), user, allowed: allowed_moves(job), image: None }
+    Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job), image: None }
 }
 
 /// Every step of the job, numbered as the learning turn cites them: the last 80 in full, compact.
@@ -192,7 +179,7 @@ pub fn learning_turn(job: &Job, passed: bool) -> Prompt {
         if passed { "passed its check" } else { "did not finish" },
         if job.housekeeping { "housekeeping" } else { &job.project }, job.goal, job.request, learn_steps(job), tips,
     );
-    Prompt { system: system().into(), user, allowed: vec!["learn"], image: None }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["learn"], image: None }
 }
 
 #[cfg(test)]

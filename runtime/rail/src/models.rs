@@ -24,6 +24,16 @@ pub fn parse_found(out: &str) -> Vec<Choice> {
     }).collect()
 }
 
+/// The sizes the Model card's bar stops on: every context length a runner actually offers.
+pub const HOLDS: [usize; 6] = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144];
+
+/// The mark written under a notch.
+pub fn hold_label(n: usize) -> String { format!("{}k", n / 1024) }
+
+/// Which notch a size already set sits on: the largest notch that is not above it, so a hand-set
+/// 100000 shows as 64k rather than snapping the person up to something the model cannot hold.
+pub fn hold_index(n: usize) -> usize { HOLDS.iter().rposition(|h| *h <= n).unwrap_or(0) }
+
 /// How much the model can hold at once, as the Model card takes it: a plain number of tokens.
 /// Under 8192 the standing rules alone crowd out the work; over a million is a typo.
 pub fn safe_context(s: &str) -> Option<usize> {
@@ -147,6 +157,16 @@ mod tests {
             Choice { kind: "openai".into(), url: "http://10.0.2.2:1234".into(), model: None },
             Choice { kind: "openai".into(), url: "http://10.0.2.2:1234".into(), model: Some("evil".into()) },
         ], "the injected line is not a line of the finder's, and a name with a space is refused");
+    }
+
+    #[test]
+    fn the_bar_lands_on_a_notch_the_runner_offers() {
+        assert_eq!(HOLDS.map(hold_label), ["8k", "16k", "32k", "64k", "128k", "256k"].map(String::from));
+        assert_eq!(hold_index(32_768), 2);
+        // A size set by hand between notches shows as the notch below, never above it.
+        assert_eq!(hold_index(100_000), 3);
+        assert_eq!(hold_index(1), 0, "below the smallest notch is still the smallest notch");
+        assert!(HOLDS.iter().all(|h| safe_context(&h.to_string()) == Some(*h)), "every notch is a size it takes");
     }
 
     #[test]

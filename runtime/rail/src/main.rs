@@ -295,34 +295,46 @@ fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, t
         });
         b.append(&btn);
     }
-    // How much the model can hold (the owner, 2026-09-21: he will not set it from a command
-    // line). LM Studio and the cloud runners are never told a context size, so the engine only
-    // ever guessed 8192 — and that guess caps `look` at 40 controls however big the model is.
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let ctx = gtk::Entry::new();
-    ctx.set_width_chars(8);
-    ctx.set_placeholder_text(Some("8192"));
-    if let Some(n) = held { ctx.set_text(&n.to_string()); }
+    // How much the model can hold (the owner, 2026-09-21: a bar on the card, not a command).
+    // LM Studio and the cloud runners are never told a context size, so the engine only ever
+    // guessed 8192 -- and that guess is what caps `look` at 40 controls however big the model is.
+    use aios_rail::models::{HOLDS, hold_index, hold_label};
+    let bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (HOLDS.len() - 1) as f64, 1.0);
+    bar.set_round_digits(0);
+    bar.set_draw_value(false);
+    bar.set_hexpand(true);
+    for (i, h) in HOLDS.iter().enumerate() {
+        bar.add_mark(i as f64, gtk::PositionType::Bottom, Some(&hold_label(*h)));
+    }
+    bar.set_value(hold_index(held.unwrap_or(HOLDS[0])) as f64);
+    let chosen = gtk::Label::new(None);
+    chosen.set_width_chars(10);
     let set = gtk::Button::with_label("Set");
+    let show = {
+        let chosen = chosen.clone();
+        move |b: &gtk::Scale| chosen.set_text(&hold_label(HOLDS[b.value() as usize]))
+    };
+    show(&bar);
+    bar.connect_value_changed(show);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.append(&gtk::Label::new(Some("How much it can hold:")));
-    row.append(&ctx);
+    row.append(&bar);
+    row.append(&chosen);
     row.append(&set);
     b.append(&row);
-    let hint = gtk::Label::new(Some("The context length you loaded the model with. LM Studio shows it \
-beside the model; a cloud model holds far more. Leave it at 8192 if you are not sure — too high and the \
-AI reads more of a window than it can hold."));
+    let hint = gtk::Label::new(Some("Move the bar to the context length you loaded the model with, \
+then press Set. LM Studio shows it beside the model; a cloud model holds far more. Leave it at 8k if \
+you are not sure -- set higher than the model really holds and its answers start coming back cut off."));
     hint.set_xalign(0.0); hint.set_wrap(true); hint.add_css_class("dim");
     b.append(&hint);
     let (st, env_now, key_now) = (status.clone(), env.to_string(), key.clone());
     set.connect_clicked(move |_| {
-        let Some(n) = aios_rail::models::safe_context(&ctx.text()) else {
-            st.set_text("That is not a size it can use: a whole number, 8192 or more."); return;
-        };
+        let n = HOLDS[bar.value() as usize];
         let Some((kind, url, model)) = aios_rail::models::current_choice(&env_now) else {
-            st.set_text("Pick a model first, then set how much it can hold."); return;
+            st.set_text("Pick a model first, then say how much it can hold."); return;
         };
         st.set_text(&match apply_model(&kind, &url, &model, key_now.as_deref(), Some(n)) {
-            Ok(()) => format!("It can hold {n} now. The AI restarted with it."),
+            Ok(()) => format!("It can hold {} now. The AI restarted with it.", hold_label(n)),
             Err(e) => format!("Could not set it: {e}"),
         });
     });
