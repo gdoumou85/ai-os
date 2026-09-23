@@ -126,7 +126,7 @@ impl Store {
         Ok(())
     }
 
-    /// A stop starts a clean conversation: the chat so far is not the next prompt's business.
+    /// Clear: a clean conversation. Projects, notebooks and standing instructions stay.
     pub fn forget_chat(&self) -> Result<(), StoreError> {
         self.conn.execute("DELETE FROM messages", ())?;
         Ok(())

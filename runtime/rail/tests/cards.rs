@@ -141,6 +141,16 @@ fn learned_lines_join_the_jobs_done_card_and_pending_ones_offer_keep_and_discard
 }
 
 #[test]
+fn a_stopped_card_offers_clear_and_cleared_empties_the_list() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::Said { text: "hi".into() });
+    cards.apply(&Event::Stopped { job_id: "j".into(), text: "Stopped the job in blender.".into(), files: vec![] });
+    assert!(cards.list.last().unwrap().buttons.iter().any(|b| b.label == "Clear" && b.say == aios_rail::cards::CLEAR));
+    cards.apply(&Event::Cleared {});
+    assert!(cards.list.is_empty());
+}
+
+#[test]
 fn only_the_newest_learned_card_keeps_keep_and_discard() {
     let mut cards = Cards::default();
     let says = |cards: &Cards, i: usize| cards.list[i].buttons.iter().map(|b| b.say.clone()).collect::<Vec<_>>();

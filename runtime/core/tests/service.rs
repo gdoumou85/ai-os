@@ -210,6 +210,11 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
     w.request(&aios_proto::Request::Forget { notebook: "this computer".into(), topic: "open a website".into() }).unwrap();
     let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event after forget") };
     assert!(notebooks.is_empty(), "{notebooks:?}");
+    // Clear works on the same database (here, not its own test: AI_OS_DB is one per process).
+    Store::open(db.to_str().unwrap()).unwrap().push_message("user", "open blender").unwrap();
+    w.request(&aios_proto::Request::Clear {}).unwrap();
+    assert_eq!(r.next_event(), Some(Event::Cleared {}));
+    assert!(Store::open(db.to_str().unwrap()).unwrap().recent_messages(4).unwrap().is_empty());
 }
 
 #[test]

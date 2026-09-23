@@ -275,9 +275,6 @@ impl<M: Model> Engine<M> {
         // conversation history must hold them too — record before propagating.
         let out = std::mem::take(&mut self.out);
         for l in out.iter().flat_map(crate::event::lines) { self.store.push_message("assistant", &l)?; }
-        // After the stop's own lines are recorded, so "Stopped the job in …" goes too: the owner
-        // stopped a Blender job and the next chat picked Blender straight back up.
-        if is_stop(text) { self.store.forget_chat()?; }
         r?;
         Ok(out)
     }
@@ -920,20 +917,6 @@ mod tests {
         assert_eq!(prompts[1].allowed, vec!["start", "housekeep"]);
         assert!(!e.store.recent_messages(4).unwrap().iter().any(|(_, t)| t.contains("I will now proceed")), "the promise was said");
         assert!(e.open_job().unwrap().is_some(), "no job started");
-    }
-
-    /// Stop starts a clean conversation; projects and standing instructions stay.
-    #[test]
-    fn stop_forgets_the_chat_so_the_next_prompt_starts_clean() {
-        let (mut e, _, _) = engine_with(vec![
-            Move::Reply { text: "Zorblax is open.".into(), remember: None },
-            Move::Reply { text: "Hello.".into(), remember: None },
-        ], "stop-forgets");
-        e.handle("open zorblax").unwrap();
-        e.handle("stop").unwrap();
-        assert!(e.store.recent_messages(4).unwrap().is_empty());
-        e.handle("hi").unwrap();
-        assert!(!e.model.prompts.borrow()[1].user.to_lowercase().contains("zorblax"), "the old chat reached the new prompt");
     }
 
     #[test]
