@@ -3,7 +3,7 @@ use crate::job::{Job, State, StepRecord};
 use crate::model::{Model, ModelError};
 use crate::moves::Move;
 use crate::prompt;
-use crate::store::{Store, StoreError};
+use crate::store::{ProjectRow, Store, StoreError};
 use aios_proto::{ChangedFile, Event, FileKind, JobState, StepView, Waiting};
 use executor::action::Action;
 use executor::executor::Executor;
@@ -177,6 +177,28 @@ fn strays(job: &Job, action: &Action) -> bool {
     }
 }
 
+/// A written file where the last thing done was writing that same file: nothing new happened, and
+/// the step it claims is not done. The owner's run, 2026-09-23: "list the folder" and "delete the
+/// folder" were each a `write_file` of the folder's own path, and every one ticked its step.
+fn rewrites_last(job: &Job, action: &Action) -> bool {
+    let Action::WriteFile { path, .. } = action else { return false };
+    matches!(job.steps.iter().rev().find(|s| s.ok).map(|s| &s.action), Some(Action::WriteFile { path: last, .. }) if last == path)
+}
+
+/// Where the user's things are, as the user would know it. Never told, a 9B clearing "all
+/// project work" guessed /home/user/projects and worked on a folder that was not there
+/// (the owner's run, 2026-09-23).
+fn places(home: &str, root: &Path, scratch: &Path, projects: &[ProjectRow]) -> String {
+    let mut s = format!("Where things are: the user's home is {home}; projects live in {} (the projects_root setting)", root.display());
+    if !projects.is_empty() {
+        // ponytail: the 15 most recent; an older one is found with ls, like any folder.
+        let list: Vec<String> = projects.iter().take(15).map(|p| format!("{} ({})", p.name, p.folder)).collect();
+        s.push_str(&format!("; projects so far: {}", list.join(", ")));
+    }
+    s.push_str(&format!("; the scratch folder for housekeeping is {}.", scratch.display()));
+    s
+}
+
 fn not_a_move(allowed: &[&str], error: &str) -> String {
     let moves = if allowed.is_empty() { String::new() } else { format!(", one of: {}", allowed.join(", ")) };
     format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\"{moves}.", error.chars().take(120).collect::<String>())
@@ -206,6 +228,13 @@ impl<M: Model> Engine<M> {
 
     /// What this machine has, ahead of every prompt (machine-map spec §2). Programs and installs
     /// are scanned each time, so something installed shows on the very next turn.
+    fn places(&self) -> Result<String, EngineError> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "unknown".into());
+        // A project whose folder is gone is not somewhere things are.
+        let live: Vec<ProjectRow> = self.store.list_projects()?.into_iter().filter(|p| Path::new(&p.folder).is_dir()).collect();
+        Ok(places(&home, &self.projects_root()?, &self.housekeeping_dir, &live))
+    }
+
     fn machine_block(&self) -> String {
         crate::machine::current_block(self.store.conn(), self.system.get_or_init(crate::machine::system_line))
     }
@@ -699,6 +728,8 @@ impl<M: Model> Engine<M> {
         // it and records it with `log_only`. A failure counts like any other failed step. So does
         // a project job reaching for another home: it never runs.
         let local = match &action {
+            _ if rewrites_last(job, &action) => Some(Outcome::err(
+                "not done: you just wrote this same file, and writing it again does nothing new. write_file only makes a file; to list a folder run_command ls -la <folder>, to delete run_command rm -rf <path>, to make a folder run_command mkdir -p <folder>")),
             _ if !job.housekeeping && strays(job, &action) => Some(Outcome::err(format!(
                 "not done: this project's folder is {} and is already made; write its files there with relative names (BLUEPRINT.md, src/main.py); projects_root is not this job's to change", job.folder))),
             Action::SetSetting { key: name, value } => Some(self.apply_setting(name, value)?),
@@ -789,7 +820,7 @@ impl<M: Model> Engine<M> {
             }
             let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
             let mut p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
-            p.user = format!("{}\n\n{}", self.machine_block(), p.user);
+            p.user = format!("{}\n{}\n\n{}", self.machine_block(), self.places()?, p.user);
             p.image = self.image.take();
             let step = job.steps.last().map(|s| s.plan_step).unwrap_or(1);
             let what = match job.plan.get(step.saturating_sub(1)) {
@@ -865,6 +896,10 @@ impl<M: Model> Engine<M> {
                         None
                     }
                 }
+                // A step the plan does not have ticks nothing on the card while the work goes on
+                // unseen (the owner's run, 2026-09-23: "Step 5 of 5: working out how to do this").
+                (State::Working, Move::Act { step, .. }) if step == 0 || step > job.plan.len() =>
+                    Some(format!("plan step {step} is not in the plan (1-{}): name the step this action serves, or replan to add one", job.plan.len())),
                 (State::Working, Move::Act { step, action }) => {
                     if self.perform(&mut job, step, action, false)? { return Ok(()); }
                     None
@@ -1364,8 +1399,8 @@ mod tests {
             done(run("true")), done(run("true")), act(1, write("BLUEPRINT.md")),
             act(2, write("other.py")),
             done(run("true")), done(run("true")), act(2, write("BLUEPRINT.md")),
-            act(3, write("third.py")),
-            done(run("true")), done(run("true")), act(3, write("BLUEPRINT.md")),
+            act(2, write("third.py")),
+            done(run("true")), done(run("true")), act(2, write("BLUEPRINT.md")),
             done(run("true")),
         ], "gate-resets");
         let out = e.handle("go").unwrap();
@@ -1392,6 +1427,58 @@ mod tests {
         assert_eq!(rec.calls.borrow().iter().filter(|a| **a == write("BLUEPRINT.md")).count(), 1, "{:?}", rec.calls.borrow());
         let prompts = e.model.prompts.borrow();
         assert!(prompts[4].user.contains("just succeeded"), "the model is told why: {}", prompts[4].user);
+    }
+
+    #[test]
+    fn writing_the_same_file_again_does_no_step() {
+        // The owner's run, 2026-09-23: "list the folder" and then "delete the folder" were each a
+        // write_file of the folder's own path, with new contents, and every one ticked its step.
+        let file = |c: &str| Action::WriteFile { path: "projects".into(), contents: c.into() };
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(1, file("a")), act(2, file("b")), act(2, run("true")), done(run("true")),
+        ], "rewrite");
+        let ev = events_of(&mut e, "clear all project work");
+        assert!(ev.iter().any(|v| matches!(v, Event::Step { plan_step: 2, ok: false, .. })), "the second write is a failed step: {ev:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| matches!(a, Action::WriteFile { .. })).count(), 1, "{:?}", rec.calls.borrow());
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[4].user.contains("you just wrote this same file"), "the model is told why: {}", prompts[4].user);
+        assert!(prompts[4].user.contains("run_command rm -rf"), "and what does the job: {}", prompts[4].user);
+    }
+
+    #[test]
+    fn an_act_for_a_step_the_plan_does_not_have_is_rejected() {
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(3, run("true")), act(2, run("true")), done(run("true")),
+        ], "step-range");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(rec.calls.borrow().len(), 2, "only the act in range and the check ran: {:?}", rec.calls.borrow());
+        assert!(e.model.prompts.borrow()[3].user.contains("plan step 3 is not in the plan (1-2)"));
+    }
+
+    #[test]
+    fn a_job_is_told_where_the_projects_are() {
+        // The owner's run, 2026-09-23: never told, the 9B guessed /home/user/projects.
+        let (mut e, _, root) = engine_with(vec![
+            start("kept", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+            housekeep(), plan(), act(1, run("true")), done(run("true")),
+        ], "places");
+        e.handle("make kept").unwrap();
+        e.handle("clear all project work").unwrap();
+        let prompts = e.model.prompts.borrow();
+        let turn = &prompts.iter().rev().find(|p| p.user.contains("Housekeeping on the machine")).unwrap().user;
+        assert!(turn.contains(&format!("projects live in {}", root.display())), "{turn}");
+        assert!(turn.contains(&format!("kept ({})", root.join("kept").display())), "{turn}");
+    }
+
+    #[test]
+    fn places_names_home_root_and_each_project() {
+        let row = |n: &str| ProjectRow { name: n.into(), folder: format!("/data/projects/{n}"), description: String::new(), touched_at: 0 };
+        let s = places("/home/u", Path::new("/data/projects"), Path::new("/data/housekeeping"), &[row("a"), row("b")]);
+        assert!(s.contains("home is /home/u; projects live in /data/projects"), "{s}");
+        assert!(s.contains("projects so far: a (/data/projects/a), b (/data/projects/b)"), "{s}");
+        assert!(s.ends_with("scratch folder for housekeeping is /data/housekeeping."), "{s}");
+        assert!(!places("/home/u", Path::new("/p"), Path::new("/s"), &[]).contains("so far"));
     }
 
     /// 2a §5: a repeated digit or a second Next is normal desktop work — 1d's "that exact action

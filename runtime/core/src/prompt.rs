@@ -131,7 +131,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         job.plan.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
     };
     let (header, bp_block) = if job.housekeeping {
-        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. You can reach and check anything on the machine. Anything that must outlive this job is a setting. If the user's request is about where projects live from now on: 1) run_command mkdir -p the folder, 2) set_setting projects_root=<that absolute path>, 3) done with run_command ls <that folder> as the check, and that job is not done until the setting is set. A window the user named is found with `look` first; nothing inside a window is a file of yours.".to_string(), String::new())
+        ("Housekeeping on the machine itself (scratch folder is the working directory): no project, no blueprint — never write or read a BLUEPRINT.md here. You can reach and check anything on the machine: *Where things are* above says where the user's projects and folders are, so work on those paths straight away — to remove projects, run_command rm -rf their folders. Anything that must outlive this job is a setting. Only if the user asks to move where projects live from now on: 1) run_command mkdir -p the folder, 2) set_setting projects_root=<that absolute path>, 3) done with run_command ls <that folder> as the check, and that job is not done until the setting is set. A window the user named is found with `look` first; nothing inside a window is a file of yours.".to_string(), String::new())
     } else {
         let bp = match blueprint {
             Some(b) => b.chars().take(3000).collect::<String>(),
@@ -147,7 +147,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         State::Asking => "Legal moves now: ask (1-3 questions) or plan (if you have no questions). A question for the user is an ask, never a plan step.",
         State::Planning => "Legal moves now: plan. Give 2-8 short steps in plain words.",
         _ if job.creative => "Legal moves now: act (one action for the plan step it serves), replan, done (with a check action), give_up (say what was missing).",
-        _ => "Legal moves now: act (one action for the plan step it serves), ask (when only the user can answer: the job waits for them; never write questions into a file), replan, done (with a check action), give_up (say what was missing).",
+        _ => "Legal moves now: act (one action for the plan step it serves), ask (only what the user's words and answers above leave open, and only the user can answer: the job waits for them; never write questions into a file), replan, done (with a check action), give_up (say what was missing).",
     };
     let note = job.note_to_model.as_deref().map(|n| format!("\n\nNote from the executor: {n}")).unwrap_or_default();
     // The bounded last-run note (1b spec §6.6): fix first, prove it, then the goal.
@@ -363,7 +363,9 @@ mod tests {
         // The setting recipe is conditional on the user's request being about where projects
         // live — a housekeeping job that installs a tool has no setting to reach — and inside
         // that condition it is ordered, because the 9B needs the order (§11 Results).
-        assert!(p.user.contains("If the user's request is about where projects live from now on"), "{}", p.user);
+        assert!(p.user.contains("Only if the user asks to move where projects live from now on"), "{}", p.user);
+        // Clearing projects is not moving them (the owner's run, 2026-09-23): say how, on the paths given.
+        assert!(p.user.contains("to remove projects, run_command rm -rf their folders"), "{}", p.user);
         assert!(p.user.contains("1) run_command mkdir -p the folder, 2) set_setting projects_root"), "{}", p.user);
         assert!(p.user.contains("that job is not done until the setting is set"), "{}", p.user);
         assert!(!p.user.contains("sandbox"), "{}", p.user);
@@ -459,8 +461,8 @@ mod tests {
         working_not_creative.state = State::Working;
         assert_eq!(job_turn(&[], &working_not_creative, None, None).allowed, vec!["ask", "act", "replan", "done", "give_up"]);
         // The words name what the grammar allows: a working job that may ask is told so.
-        assert!(job_turn(&[], &working_not_creative, None, None).user.contains("ask (when only the user can answer"));
-        assert!(!job_turn(&[], &working_creative, None, None).user.contains("ask (when only the user can answer"));
+        assert!(job_turn(&[], &working_not_creative, None, None).user.contains("ask (only what the user"));
+        assert!(!job_turn(&[], &working_creative, None, None).user.contains("ask (only what the user"));
 
         let p = front_door(&[], &[], &[], &[], "hi");
         assert_eq!(p.allowed, vec!["reply", "start", "housekeep"]);

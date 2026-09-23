@@ -141,8 +141,10 @@ impl Worker for MachineWorker {
                 Ok(t) => Outcome::ok(window(&t, *from_line, *lines)),
                 Err(e) => Outcome::err(e),
             },
+            // What was made, in so many words: "written" let a 9B take a file it wrote where a
+            // folder should be for a listed and emptied folder (the owner's run, 2026-09-23).
             Action::WriteFile { path, contents } => match self.write(&self.path(path), contents) {
-                Ok(()) => Outcome::ok("written"),
+                Ok(()) => Outcome::ok(format!("wrote a file of {} bytes at {}", contents.len(), self.path(path).display())),
                 Err(e) => Outcome::err(e),
             },
             // Rule 9: edit in place — the model never reads a whole file, holds it, and writes
