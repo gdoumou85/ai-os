@@ -491,3 +491,29 @@ Two things the owner hit on his first full-access run.
   The job turn now gives the folder's absolute path and says it is already made; the /opt rule
   says "never a project". And in the engine, a project job's BLUEPRINT.md outside its folder or a
   projects_root change is a failed step naming the folder, never run. (v0.9.2)
+- **2026-09-23** ("clear all local project work"): the housekeeping job was never told where
+  projects live, and its only line about projects was the recipe for *moving* them. So it
+  planned "set projects_root", guessed /home/user/projects, and ticked "list" and "delete" with
+  `write_file` of that path (a plain file, rewritten each step). Every job turn now opens with
+  *Where things are*: the home folder, projects_root (the install's folder or the user's
+  setting), each project folder that exists, and the scratch folder. The housekeeping header says
+  to remove projects with `rm -rf` on those folders, and the moving recipe is only for a move. A
+  `write_file` of the path the last successful step wrote is a failed step, which names `ls`,
+  `rm -rf` and `mkdir -p`. The file hand says "wrote a file of N bytes at <path>", not
+  "written". An `act` for a plan step that does not exist is rejected. A working job asks only
+  what the user's words and answers leave open.
+- **2026-09-23**, the same run and a review of the whole engine for the same kind of fault:
+  - A project the user places ("my site is in ~/work/site") is registered in that folder:
+    `start` takes an optional `folder`. A known project whose folder is gone gets it made again.
+  - `run_command` has no shell, so `rm -rf dir/*` removed nothing and still said ok. A command
+    with `*` (for file commands), `~`, `$`, `|`, `>`, `&&` or `;` is sent back with "use
+    bash -c", and the rules say so.
+  - Cut output says it was cut, and a `read_file` past the end says how long the file is.
+  - A command that works clears earlier command failures, so installing what was missing and
+    running again is a retry, not a refusal.
+  - Failure counts and the card's ticks restart with each plan (`plan_from`).
+  - A write, edit or setting is never a `done` check.
+  - Older step lines say what each step was ("ran ls -la /data/projects"), not just its kind.
+  - A plan step out of range costs a replan, not one of the two fatal rejections.
+  - The ask rules say to ask only what the user's words leave open, both before planning and
+    while working. (v0.9.3)

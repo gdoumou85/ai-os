@@ -3,7 +3,7 @@ use crate::job::{Job, State, StepRecord};
 use crate::model::{Model, ModelError};
 use crate::moves::Move;
 use crate::prompt;
-use crate::store::{Store, StoreError};
+use crate::store::{ProjectRow, Store, StoreError};
 use aios_proto::{ChangedFile, Event, FileKind, JobState, StepView, Waiting};
 use executor::action::Action;
 use executor::executor::Executor;
@@ -177,6 +177,30 @@ fn strays(job: &Job, action: &Action) -> bool {
     }
 }
 
+/// A written file where the last thing done was writing that same file: nothing new happened, and
+/// the step it claims is not done. The owner's run, 2026-09-23: "list the folder" and "delete the
+/// folder" were each a `write_file` of the folder's own path, and every one ticked its step.
+/// A write after something else — a run that failed, say — is the ordinary fix-and-retry loop.
+fn rewrites_last(job: &Job, action: &Action) -> bool {
+    let Action::WriteFile { path, .. } = action else { return false };
+    let same = |a: &Action| matches!(a, Action::WriteFile { path: p, .. } if p == path);
+    job.steps.iter().rev().find(|s| !(same(&s.action) && !s.ok)).is_some_and(|s| s.ok && same(&s.action))
+}
+
+/// Where the user's things are, as the user would know it. Never told, a 9B clearing "all
+/// project work" guessed /home/user/projects and worked on a folder that was not there
+/// (the owner's run, 2026-09-23).
+fn places(home: &str, root: &Path, scratch: &Path, projects: &[ProjectRow]) -> String {
+    let mut s = format!("Where things are: the user's home is {home}; projects live in {} (the projects_root setting)", root.display());
+    if !projects.is_empty() {
+        // ponytail: the 10 most recent; an older one is found with ls, like any folder.
+        let list: Vec<String> = projects.iter().take(10).map(|p| format!("{} ({})", p.name, p.folder)).collect();
+        s.push_str(&format!("; projects so far: {}", list.join(", ")));
+    }
+    s.push_str(&format!("; the scratch folder for housekeeping is {}.", scratch.display()));
+    s
+}
+
 fn not_a_move(allowed: &[&str], error: &str) -> String {
     let moves = if allowed.is_empty() { String::new() } else { format!(", one of: {}", allowed.join(", ")) };
     format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\"{moves}.", error.chars().take(120).collect::<String>())
@@ -206,6 +230,13 @@ impl<M: Model> Engine<M> {
 
     /// What this machine has, ahead of every prompt (machine-map spec §2). Programs and installs
     /// are scanned each time, so something installed shows on the very next turn.
+    fn places(&self) -> Result<String, EngineError> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "unknown".into());
+        // A project whose folder is gone is not somewhere things are.
+        let live: Vec<ProjectRow> = self.store.list_projects()?.into_iter().filter(|p| Path::new(&p.folder).is_dir()).collect();
+        Ok(places(&home, &self.projects_root()?, &self.housekeeping_dir, &live))
+    }
+
     fn machine_block(&self) -> String {
         crate::machine::current_block(self.store.conn(), self.system.get_or_init(crate::machine::system_line))
     }
@@ -247,7 +278,7 @@ impl<M: Model> Engine<M> {
             housekeeping: job.housekeeping,
             understood: job.understood.clone(),
             plan: job.plan.clone(),
-            steps: job.steps.iter().map(|s| StepView { plan_step: s.plan_step, text: crate::event::describe(&s.action), ok: s.ok }).collect(),
+            steps: job.steps[job.plan_from.min(job.steps.len())..].iter().map(|s| StepView { plan_step: s.plan_step, text: crate::event::describe(&s.action), ok: s.ok }).collect(),
             waiting: match job.state {
                 State::WaitingAnswer => Waiting::Answer { questions: job.pending_questions.clone(), options: job.pending_options.clone() },
                 _ => Waiting::None,
@@ -435,26 +466,32 @@ impl<M: Model> Engine<M> {
                 }
                 Ok(())
             }
-            Move::Start { project, new_project: _, description, goal, creative, understood, skills, remember } => {
+            Move::Start { project, new_project: _, description, goal, creative, understood, skills, remember, folder: named } => {
                 let name = sanitize_project_name(&project);
                 let existing = self.store.get_project(&name)?;
                 let is_new = existing.is_none();
+                // A folder the user named ("my site is in ~/work/site") is where the project is,
+                // new to us or moved: it is registered there (the owner, 2026-09-23).
+                let named = named.map(|f| match f.trim().strip_prefix("~/") {
+                    Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
+                    None => f.trim().to_string(),
+                }).filter(|f| Path::new(f).is_absolute());
                 // An existing project keeps the folder it was created in. Recomputing it from the
                 // root re-homed the project on every start, overwriting the stored folder (1b bug).
-                let folder = match &existing {
-                    Some(p) => PathBuf::from(&p.folder),
-                    None => self.projects_root()?.join(&name),
+                let folder = match (&named, &existing) {
+                    (Some(f), _) => PathBuf::from(f),
+                    (None, Some(p)) => PathBuf::from(&p.folder),
+                    (None, None) => self.projects_root()?.join(&name),
                 };
-                // A folder that is already there is not this project's: a new project never
-                // piles its files into someone else's.
-                if is_new {
-                    let made = if folder.exists() {
-                        Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("a folder already exists at {}; choose another project name", folder.display())))
-                    } else { std::fs::create_dir_all(&folder) };
-                    if let Err(e) = made {
-                        self.emit(Event::Said { text: format!("I could not start *{name}*: {e}") });
-                        return Ok(());
-                    }
+                // A folder that is already there is not this project's unless the user named it:
+                // a new project never piles its files into someone else's. A known project's
+                // folder that has gone is made again — every command would fail in it otherwise.
+                let made = if is_new && named.is_none() && folder.exists() {
+                    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("a folder already exists at {}; choose another project name", folder.display())))
+                } else { std::fs::create_dir_all(&folder) };
+                if let Err(e) = made {
+                    self.emit(Event::Said { text: format!("I could not start *{name}*: {e}") });
+                    return Ok(());
                 }
                 let desc = existing.map(|p| p.description).unwrap_or(description);
                 let folder = folder.display().to_string();
@@ -629,6 +666,9 @@ impl<M: Model> Engine<M> {
     /// A `read` changes nothing and clears nothing.
     fn cleared_by(succeeded: &Action, failed: &str) -> bool {
         if Self::is_blueprint(succeeded).is_some() { return true; }
+        // A command that worked changed the machine (an install, a mkdir): a command that failed
+        // before may work now, as it would for anyone retrying after fixing the cause.
+        if let Action::RunCommand { .. } = succeeded { return serde_json::from_str::<Action>(failed).is_ok_and(|f| !on_the_desktop(&f)); }
         if matches!(succeeded, Action::Read { .. }) || !on_the_desktop(succeeded) { return false; }
         serde_json::from_str::<Action>(failed).is_ok_and(|f| on_the_desktop(&f))
     }
@@ -699,6 +739,8 @@ impl<M: Model> Engine<M> {
         // it and records it with `log_only`. A failure counts like any other failed step. So does
         // a project job reaching for another home: it never runs.
         let local = match &action {
+            _ if rewrites_last(job, &action) => Some(Outcome::err(
+                "not done: you just wrote this same file, and writing it again does nothing new. write_file only makes a file; to list a folder run_command ls -la <folder>, to delete run_command rm -rf <path>, to make a folder run_command mkdir -p <folder>")),
             _ if !job.housekeeping && strays(job, &action) => Some(Outcome::err(format!(
                 "not done: this project's folder is {} and is already made; write its files there with relative names (BLUEPRINT.md, src/main.py); projects_root is not this job's to change", job.folder))),
             Action::SetSetting { key: name, value } => Some(self.apply_setting(name, value)?),
@@ -718,7 +760,7 @@ impl<M: Model> Engine<M> {
             self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
             if !outcome.ok {
                 job.failed_actions.push(key);
-                let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
+                let fails = job.steps[job.plan_from.min(job.steps.len())..].iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
                 if fails >= Self::MAX_FAILS_PER_STEP {
                     let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", display_name(job), outcome.detail);
                     self.finish(job.clone(), State::Failed, text)?;
@@ -765,7 +807,7 @@ impl<M: Model> Engine<M> {
             // check-exempt): a later `act` proposing this same action must still see why
             // it already failed.
             job.failed_actions.push(key);
-            let fails = job.steps.iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
+            let fails = job.steps[job.plan_from.min(job.steps.len())..].iter().filter(|s| s.plan_step == plan_step && !s.ok).count();
             if fails >= Self::MAX_FAILS_PER_STEP {
                 let text = format!("I gave up on {}: plan step {plan_step} failed {fails} different ways. Last reason: {}", display_name(job), outcome.detail);
                 self.finish(job.clone(), State::Failed, text)?;
@@ -789,7 +831,7 @@ impl<M: Model> Engine<M> {
             }
             let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
             let mut p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
-            p.user = format!("{}\n\n{}", self.machine_block(), p.user);
+            p.user = format!("{}\n{}\n\n{}", self.machine_block(), self.places()?, p.user);
             p.image = self.image.take();
             let step = job.steps.last().map(|s| s.plan_step).unwrap_or(1);
             let what = match job.plan.get(step.saturating_sub(1)) {
@@ -829,7 +871,7 @@ impl<M: Model> Engine<M> {
                     if steps.is_empty() {
                         Some("plan needs at least one step".to_string())
                     } else {
-                        job.plan = steps; job.state = State::Working; job.rejections = 0; job.note_to_model = None;
+                        job.plan = steps; job.state = State::Working; job.rejections = 0; job.note_to_model = None; job.plan_from = job.steps.len();
                         self.store.save_job(&job)?;
                         self.emit(Event::Plan { job_id: job.id.clone(), steps: job.plan.clone() });
                         None
@@ -858,12 +900,26 @@ impl<M: Model> Engine<M> {
                         self.store.save_job(&job)?;
                         None
                     } else {
-                        job.plan = steps; job.rejections = 0;
+                        job.plan = steps; job.rejections = 0; job.plan_from = job.steps.len();
                         job.note_to_model = Some(format!("plan revised because: {why}"));
                         self.store.save_job(&job)?;
                         self.emit(Event::Plan { job_id: job.id.clone(), steps: job.plan.clone() });
                         None
                     }
+                }
+                // A step the plan does not have ticks nothing on the card while the work goes on
+                // unseen (the owner's run, 2026-09-23: "Step 5 of 5: working out how to do this").
+                // Not a rejection (two are fatal): a 9B still counting from the old plan after a
+                // replan is one nudge away. Bounded like a replan, which is what it costs.
+                (State::Working, Move::Act { step, .. }) if step == 0 || step > job.plan.len() => {
+                    job.replans += 1;
+                    if job.replans > Self::MAX_REPLANS {
+                        let text = format!("I gave up on {}: the plan kept changing ({} replans) without progress.", display_name(&job), job.replans);
+                        return self.finish(job, State::Failed, text);
+                    }
+                    job.note_to_model = Some(format!("plan step {step} is not in the plan (1-{}): name the step this action serves, or replan to add one", job.plan.len()));
+                    self.store.save_job(&job)?;
+                    None
                 }
                 (State::Working, Move::Act { step, action }) => {
                     if self.perform(&mut job, step, action, false)? { return Ok(()); }
@@ -872,8 +928,8 @@ impl<M: Model> Engine<M> {
                 // A check proves the work, it does not do it: the owner's run said done with a
                 // click on the Firefox icon as its check, "I will now click it", and the job ended
                 // with the browser never opened.
-                (State::Working, Move::Done { check: Action::Press { .. } | Action::Type { .. } | Action::OpenApp { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. }, .. }) =>
-                    Some("a check proves the work is done, it does not do the work: do that with act first, then say done with a check that only looks (screen_look, look, read)".to_string()),
+                (State::Working, Move::Done { check: Action::Press { .. } | Action::Type { .. } | Action::OpenApp { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. } | Action::WriteFile { .. } | Action::EditFile { .. } | Action::SetSetting { .. }, .. }) =>
+                    Some("a check proves the work is done, it does not do the work: do that with act first, then say done with a check that only looks (run_command, read_file, screen_look, look, read)".to_string()),
                 (State::Working, Move::Done { summary, check }) => {
                     // The absolute gate: a new project must leave a real BLUEPRINT.md behind,
                     // whether or not this job happened to change code — the counters only
@@ -941,7 +997,7 @@ mod tests {
     use crate::testing::engine_with;
 
     fn start(project: &str, creative: bool) -> Move {
-        Move::Start { project: project.into(), new_project: true, description: "prime printer".into(), goal: "print ten primes".into(), creative, understood: format!("Starting a new project {project}"), skills: vec![], remember: None }
+        Move::Start { project: project.into(), new_project: true, description: "prime printer".into(), goal: "print ten primes".into(), creative, understood: format!("Starting a new project {project}"), skills: vec![], remember: None, folder: None }
     }
 
     #[test]
@@ -1115,7 +1171,7 @@ mod tests {
 
     #[test]
     fn existing_project_is_reused_not_recreated() {
-        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add menu".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None };
+        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add menu".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None, folder: None };
         let (mut e, _, _) = engine_with(vec![
             start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
             again, plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
@@ -1364,8 +1420,8 @@ mod tests {
             done(run("true")), done(run("true")), act(1, write("BLUEPRINT.md")),
             act(2, write("other.py")),
             done(run("true")), done(run("true")), act(2, write("BLUEPRINT.md")),
-            act(3, write("third.py")),
-            done(run("true")), done(run("true")), act(3, write("BLUEPRINT.md")),
+            act(2, write("third.py")),
+            done(run("true")), done(run("true")), act(2, write("BLUEPRINT.md")),
             done(run("true")),
         ], "gate-resets");
         let out = e.handle("go").unwrap();
@@ -1392,6 +1448,100 @@ mod tests {
         assert_eq!(rec.calls.borrow().iter().filter(|a| **a == write("BLUEPRINT.md")).count(), 1, "{:?}", rec.calls.borrow());
         let prompts = e.model.prompts.borrow();
         assert!(prompts[4].user.contains("just succeeded"), "the model is told why: {}", prompts[4].user);
+    }
+
+    #[test]
+    fn writing_the_same_file_again_does_no_step() {
+        // The owner's run, 2026-09-23: "list the folder" and then "delete the folder" were each a
+        // write_file of the folder's own path, with new contents, and every one ticked its step.
+        let file = |c: &str| Action::WriteFile { path: "projects".into(), contents: c.into() };
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(1, file("a")), act(2, file("b")), act(2, run("true")), done(run("true")),
+        ], "rewrite");
+        let ev = events_of(&mut e, "clear all project work");
+        assert!(ev.iter().any(|v| matches!(v, Event::Step { plan_step: 2, ok: false, .. })), "the second write is a failed step: {ev:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| matches!(a, Action::WriteFile { .. })).count(), 1, "{:?}", rec.calls.borrow());
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[4].user.contains("you just wrote this same file"), "the model is told why: {}", prompts[4].user);
+        assert!(prompts[4].user.contains("run_command rm -rf"), "and what does the job: {}", prompts[4].user);
+    }
+
+    #[test]
+    fn an_act_for_a_step_the_plan_does_not_have_is_rejected() {
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(3, run("true")), act(2, run("true")), done(run("true")),
+        ], "step-range");
+        let out = e.handle("go").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(rec.calls.borrow().len(), 2, "only the act in range and the check ran: {:?}", rec.calls.borrow());
+        assert!(e.model.prompts.borrow()[3].user.contains("plan step 3 is not in the plan (1-2)"));
+    }
+
+    #[test]
+    fn a_job_is_told_where_the_projects_are() {
+        // The owner's run, 2026-09-23: never told, the 9B guessed /home/user/projects.
+        let (mut e, _, root) = engine_with(vec![
+            start("kept", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
+            housekeep(), plan(), act(1, run("true")), done(run("true")),
+        ], "places");
+        e.handle("make kept").unwrap();
+        e.handle("clear all project work").unwrap();
+        let prompts = e.model.prompts.borrow();
+        let turn = &prompts.iter().rev().find(|p| p.user.contains("Housekeeping on the machine")).unwrap().user;
+        assert!(turn.contains(&format!("projects live in {}", root.display())), "{turn}");
+        assert!(turn.contains(&format!("kept ({})", root.join("kept").display())), "{turn}");
+    }
+
+    #[test]
+    fn a_project_the_user_says_is_in_a_folder_is_registered_there() {
+        // The owner, 2026-09-23: "if I tell it I have this project at that folder, it should
+        // register it as a working project too". The folder may already hold the user's files.
+        let root = crate::testing::temp_root("named-folder-where");
+        let theirs = root.join("work").join("site");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("index.html"), "hi").unwrap();
+        let mv = Move::Start { project: "site".into(), new_project: true, description: "their site".into(), goal: "g".into(),
+            creative: true, understood: "Working on site".into(), skills: vec![], remember: None, folder: Some(theirs.display().to_string()) };
+        let (mut e, _, _) = engine_with(vec![mv, plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "named-folder");
+        let out = e.handle("my site is in the work folder, fix its title").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(e.store.get_project("site").unwrap().unwrap().folder, theirs.display().to_string());
+        assert!(theirs.join("BLUEPRINT.md").exists() && theirs.join("index.html").exists());
+    }
+
+    #[test]
+    fn a_command_that_worked_lets_a_failed_one_run_again() {
+        // A normal user's retry: python fails for want of a module, pip installs it, python again.
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(1, run("app")), act(1, run("pip")), act(1, run("app")), done(run("true")),
+        ], "retry-after-fix");
+        rec.outcomes.borrow_mut().extend([Outcome::err("ModuleNotFoundError"), Outcome::ok("installed"), Outcome::ok("running"), Outcome::ok("ok")]);
+        let out = e.handle("run my app").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == run("app")).count(), 2, "{:?}", rec.calls.borrow());
+    }
+
+    #[test]
+    fn a_new_plan_counts_its_own_failures() {
+        // Old step 2 failed twice; the new plan's step 2 is another step, and one failure there
+        // is not the third.
+        let (mut e, _, _) = engine_with(vec![
+            housekeep(), plan(), act(2, run("x1")), act(2, run("x2")),
+            Move::Replan { steps: vec!["another way".into(), "check it".into()], why: "that did not work".into() },
+            act(2, run("x3")), act(2, run("x4")), done(run("true")),
+        ], "plan-from");
+        let ev = events_of(&mut e, "do it");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { .. }), "{ev:?}");
+    }
+
+    #[test]
+    fn places_names_home_root_and_each_project() {
+        let row = |n: &str| ProjectRow { name: n.into(), folder: format!("/data/projects/{n}"), description: String::new(), touched_at: 0 };
+        let s = places("/home/u", Path::new("/data/projects"), Path::new("/data/housekeeping"), &[row("a"), row("b")]);
+        assert!(s.contains("home is /home/u; projects live in /data/projects"), "{s}");
+        assert!(s.contains("projects so far: a (/data/projects/a), b (/data/projects/b)"), "{s}");
+        assert!(s.ends_with("scratch folder for housekeeping is /data/housekeeping."), "{s}");
+        assert!(!places("/home/u", Path::new("/p"), Path::new("/s"), &[]).contains("so far"));
     }
 
     /// 2a §5: a repeated digit or a second Next is normal desktop work — 1d's "that exact action
@@ -1428,7 +1578,7 @@ mod tests {
             start("p", true), plan(), act(1, run("python3")),
             Move::GiveUp { reason: "the script crashes".into(), missing: "a working loop".into() },
             // next job in the same project
-            Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "make it work".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None },
+            Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "make it work".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None, folder: None },
             plan(), act(1, write("BLUEPRINT.md")), done(run("python3")),
         ], "lastrun");
         rec.outcomes.borrow_mut().push_back(Outcome::err("exit 1; stderr: NameError: prmes"));
@@ -1678,10 +1828,13 @@ mod tests {
         for s in [write("BLUEPRINT.md"), Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() }] {
             for f in desktop.iter().chain(elsewhere.iter()) { assert!(cleared(&s, f), "{s:?} should clear {f:?}"); }
         }
-        // A `read` and a plain command change nothing anyone can see: they clear nothing.
-        for s in [Action::Read { control: 1, from_line: None, lines: None }, run("ls")] {
-            for f in desktop.iter().chain(elsewhere.iter()) { assert!(!cleared(&s, f), "{s:?} must not clear {f:?}"); }
-        }
+        // A `read` changes nothing anyone can see: it clears nothing.
+        let read = Action::Read { control: 1, from_line: None, lines: None };
+        for f in desktop.iter().chain(elsewhere.iter()) { assert!(!cleared(&read, f), "{f:?}"); }
+        // A command that worked changed the machine: the commands may run again, the windows' own
+        // failures stay theirs.
+        for f in &elsewhere { assert!(cleared(&run("ls"), f), "{f:?}"); }
+        for f in &desktop { assert!(!cleared(&run("ls"), f), "{f:?}"); }
     }
 
     #[test]
@@ -1720,7 +1873,7 @@ mod tests {
         // `Start` arm saved it silently. Same line must appear here too.
         let mv = Move::Start {
             project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(),
-            creative: true, understood: "Starting p".into(), skills: vec![], remember: Some("always use python3".into()),
+            creative: true, understood: "Starting p".into(), skills: vec![], remember: Some("always use python3".into()), folder: None,
         };
         let (mut e, _, _) = engine_with(vec![mv, plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "start-remember");
         let out = e.handle("go, and always use python3").unwrap();
@@ -2013,7 +2166,7 @@ mod tests {
     fn done_lists_the_files_the_job_changed() {
         // A new project refuses a folder that already exists, so the old files are planted
         // AFTER a first job created the folder, and the second job is the one measured.
-        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add more".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None };
+        let again = Move::Start { project: "p".into(), new_project: false, description: "x".into(), goal: "add more".into(), creative: true, understood: "Continuing p".into(), skills: vec![], remember: None, folder: None };
         let (mut e, _, root) = engine_with(vec![
             start("p", true), plan(), act(1, write("BLUEPRINT.md")), done(run("true")),
             again, plan(), act(1, write("BLUEPRINT.md")), act(1, write("primes.py")), act(1, write("BLUEPRINT.md")), done(run("python3")),
@@ -2281,7 +2434,7 @@ mod tests {
 
     #[test]
     fn start_records_its_skills_and_the_skill_tips() {
-        let ball = Move::Start { project: "ball".into(), new_project: true, description: "d".into(), goal: "a ball".into(), creative: false, understood: "Making a ball".into(), skills: vec!["Blender".into(), " blender ".into(), "this computer".into()], remember: None };
+        let ball = Move::Start { project: "ball".into(), new_project: true, description: "d".into(), goal: "a ball".into(), creative: false, understood: "Making a ball".into(), skills: vec!["Blender".into(), " blender ".into(), "this computer".into()], remember: None, folder: None };
         let (mut e, _, _) = engine_with(vec![ball, Move::Ask { questions: vec!["?".into()], options: vec![] }], "learn-skills");
         crate::notes::put(e.store.conn(), &crate::notes::Note { notebook: "blender".into(), topic: "make a round object".into(), kind: "technique".into(), text: "add a uv sphere".into(), ..Default::default() }, None).unwrap();
         e.handle("make a ball in blender").unwrap();
