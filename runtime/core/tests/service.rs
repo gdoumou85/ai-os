@@ -113,7 +113,9 @@ fn hello_answers_state_and_busy_is_answered_during_a_job() {
     // The engine is now blocked inside the job (waiting for the gate before Act).
     let mut b = Client::connect(&sock).unwrap();
     b.hello().unwrap();
-    let Some(Event::State { job: Some(st) }) = b.next_event() else { panic!() };
+    // b is registered on connect, so the engine's status line (a busy tick) can beat the state.
+    let got = until(&mut b, |e| matches!(e, Event::State { .. }));
+    let Some(Event::State { job: Some(st) }) = got.last().cloned() else { panic!("{got:?}") };
     assert_eq!((st.name.as_str(), st.plan.len(), st.waiting), ("p", 1, Waiting::None));
     b.say("use python").unwrap();
     until(&mut b, |e| matches!(e, Event::You { .. }));

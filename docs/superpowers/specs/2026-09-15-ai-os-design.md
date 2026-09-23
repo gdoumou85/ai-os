@@ -484,3 +484,10 @@ Two things the owner hit on his first full-access run.
   the projects the message names (the name, or a 4+ letter word of it). And Clear left a job
   waiting on a question, so the next message went to it as the answer: Clear now stops an open
   job, the way "stop" does. (v0.9.1)
+- **2026-09-23** ("it doesn't have permission to create files… stuck on create the project
+  folder"): it had them — it wrote /opt/flappy_bird/BLUEPRINT.md. The job turn said only "its
+  folder is the working directory", so the 9B planned "create the project folder and set
+  projects_root" and took the v0.9.0 /opt rule (meant for loose program downloads) as the place.
+  The job turn now gives the folder's absolute path and says it is already made; the /opt rule
+  says "never a project". And in the engine, a project job's BLUEPRINT.md outside its folder or a
+  projects_root change is a failed step naming the folder, never run. (v0.9.2)
