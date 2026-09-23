@@ -126,9 +126,12 @@ impl Store {
         Ok(())
     }
 
-    /// Clear: a clean conversation. Projects, notebooks and standing instructions stay.
+    /// Clear: a clean start. The chat and the standing instructions go (the owner, 2026-09-23: a
+    /// Clear that kept "(Noted for the future: …Blender…)" answered his next "Hello" with Blender,
+    /// and nothing else could forget them). Projects and notebooks stay.
     pub fn forget_chat(&self) -> Result<(), StoreError> {
         self.conn.execute("DELETE FROM messages", ())?;
+        self.conn.execute("DELETE FROM instructions", ())?;
         Ok(())
     }
 

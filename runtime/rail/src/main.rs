@@ -258,14 +258,29 @@ fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, t
     let text = if choices.is_empty() { format!("{now} No models answered on your network.") } else { format!("{now} Pick one to switch; the AI restarts with it.") };
     let b = plain_card("Choose a model", &text);
     let w: gtk::Widget = b.clone().upcast();
+    // How much the model can hold (the owner, 2026-09-21: a bar on the card, not a command).
+    // LM Studio and the cloud runners are never told a context size, so the engine only ever
+    // guessed 8192 -- and that guess is what caps `look` at 40 controls however big the model is.
+    use aios_rail::models::{HOLDS, hold_index, hold_label};
+    let bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (HOLDS.len() - 1) as f64, 1.0);
+    bar.set_round_digits(0);
+    bar.set_draw_value(false);
+    bar.set_hexpand(true);
+    for (i, h) in HOLDS.iter().enumerate() {
+        bar.add_mark(i as f64, gtk::PositionType::Bottom, Some(&hold_label(*h)));
+    }
+    bar.set_value(hold_index(held.unwrap_or(HOLDS[0])) as f64);
     for c in choices {
         let btn = gtk::Button::with_label(&aios_rail::models::label(&c));
         btn.set_halign(gtk::Align::Start);
-        let (col, me, tx, st, key, held) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), key.clone(), held);
+        let (col, me, tx, st, key, bar) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), key.clone(), bar.clone());
         btn.connect_clicked(move |_| {
             col.remove(&me);
+            // The bar as it stands now: the owner moved it, then picked the model, and the
+            // size he had set before came back instead (2026-09-23).
+            let hold = Some(HOLDS[bar.value() as usize]);
             match &c.model {
-                Some(m) => st.set_text(&match apply_model(&c.kind, &c.url, m, key.as_deref(), held) {
+                Some(m) => st.set_text(&match apply_model(&c.kind, &c.url, m, key.as_deref(), hold) {
                     Ok(()) => format!("Switched to {m}."),
                     Err(e) => format!("Could not switch: {e}"),
                 }),
@@ -295,18 +310,6 @@ fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, t
         });
         b.append(&btn);
     }
-    // How much the model can hold (the owner, 2026-09-21: a bar on the card, not a command).
-    // LM Studio and the cloud runners are never told a context size, so the engine only ever
-    // guessed 8192 -- and that guess is what caps `look` at 40 controls however big the model is.
-    use aios_rail::models::{HOLDS, hold_index, hold_label};
-    let bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (HOLDS.len() - 1) as f64, 1.0);
-    bar.set_round_digits(0);
-    bar.set_draw_value(false);
-    bar.set_hexpand(true);
-    for (i, h) in HOLDS.iter().enumerate() {
-        bar.add_mark(i as f64, gtk::PositionType::Bottom, Some(&hold_label(*h)));
-    }
-    bar.set_value(hold_index(held.unwrap_or(HOLDS[0])) as f64);
     let chosen = gtk::Label::new(None);
     chosen.set_width_chars(10);
     let set = gtk::Button::with_label("Set");
@@ -513,7 +516,7 @@ fn main() {
         // newest card, its Yes button, the entry — below the edge. The cards scroll inside it.
         let header = gtk::HeaderBar::new();
         let clear = gtk::Button::with_label("Clear");
-        clear.set_tooltip_text(Some("Clear the chat: the AI forgets it too (a task still running stays)"));
+        clear.set_tooltip_text(Some("A clean start: the AI forgets the chat and what it was told to keep (projects, skills and a task still running stay)"));
         header.pack_start(&clear);
         let model_btn = gtk::Button::with_label("Model");
         model_btn.set_tooltip_text(Some("Switch the AI's model"));

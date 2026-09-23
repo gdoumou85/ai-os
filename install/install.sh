@@ -5,7 +5,7 @@
 # Run it as yourself, not as root: it asks sudo for the root steps. Safe to run again.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-model=""; model_url=""; model_key=""; update=0
+model=""; model_url=""; model_key=""; context=""; update=0
 while [ $# -gt 0 ]; do case "$1" in
   --model-url) model_url=${2:?--model-url needs a value}; shift 2 ;;
   --model)     model=${2:?--model needs a value}; shift 2 ;;
@@ -105,6 +105,8 @@ if [ "$update" = 1 ]; then
   # `sed -n 1p`, not `head -1`: head leaves early, and under pipefail the SIGPIPE it hands the
   # writers would stop the whole installer here.
   model=${model:-$(saved AI_OS_MODEL)}; model_url=${model_url:-$(saved AI_OS_MODEL_URL)}; saved_kind=$(saved AI_OS_MODEL_KIND)
+  # How much it can hold (the Model card's bar): lost here, every update reset it to 8k (the owner, 2026-09-23).
+  context=$(saved AI_OS_CONTEXT)
   model_key=${model_key:-$(sed -n 's/^AI_OS_MODEL_KEY=//p' "$HOME/.config/ai-os/model.env" 2>/dev/null || true)}
   [ -n "$model_url" ] || native_update=1
   echo "keeping ${model:-the model} ${model_url:+at $model_url}"
@@ -197,6 +199,8 @@ else
   command -v nvidia-smi >/dev/null || grep -qiE 'vga.*(amd|radeon)' <<<"$gpu" || echo "note: no NVIDIA or AMD graphics driver found — the model will run on the processor, slowly. On NVIDIA: sudo ubuntu-drivers install, then restart." >&2
   url_line=""
 fi
+# A number or nothing: it goes into the unit file too.
+[[ $context =~ ^[0-9]+$ ]] && url_line+=$'\n'"Environment=AI_OS_CONTEXT=$context"
 
 echo "== the engine, as your service"
 install -d "$HOME/.config/systemd/user"
