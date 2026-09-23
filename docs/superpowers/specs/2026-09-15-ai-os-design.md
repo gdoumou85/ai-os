@@ -439,3 +439,14 @@ Two things the owner hit on his first full-access run.
   same systemd drop-in the model choice already uses, and switching model keeps it. The step
   summary's own limits (last 6 steps in full, 36 in the list, 3000 characters of blueprint) are
   still fixed numbers and do not widen with it.
+- **2026-09-23** ("It Aknowledges the task, but It doesnt perform the task given"): three times
+  running — "sounds good. do it", "proceed" — the local model answered the front door with a
+  `reply` that said "I will register Blender… let me proceed", and a reply runs nothing. A reply
+  that promises work ("I will", "I'll", "let me", "I'm going to", "proceeding") is now asked once
+  more with only `start` and `housekeep` in the grammar; the front door also says a reply runs
+  nothing. Second finding, same run: after a stop, the next chat picked Blender straight back up —
+  the front door's last four messages were never dropped, by Stop, Clear or a restart. The owner's
+  call: Stop only stops (the chat stays, to say it again differently); Clear — the title bar's,
+  and a new one on the Stopped card — sends `clear`, the service deletes the messages and
+  broadcasts `cleared`, and every rail empties its screen on it. Projects, notebooks and standing
+  instructions stay. (v0.8.6)
