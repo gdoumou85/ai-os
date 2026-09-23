@@ -462,3 +462,12 @@ Two things the owner hit on his first full-access run.
   moved. And Ollama was sent a fixed `num_ctx: 8192` on every request, which reloads the model at
   8k whatever was set. The update keeps the size, the buttons read the bar, and Ollama is asked for
   `AI_OS_CONTEXT`. (v0.8.7)
+- **2026-09-23** ("it still appears to be hogging old projects"): on v0.8.7, "Hi" was answered
+  with the car-rental project. The front door lists every project, and the local model offered
+  the only one. It then noted that project's description as a standing instruction on a job about
+  the skill book. The front door now says never to bring a project up unprompted. The engine keeps
+  a `remember` only when the user's own words ask for it ("always", "never", "from now on",
+  "remember"…); a note the model makes up is dropped. Same run: a working job's plan had "ask the
+  user whether…" steps. `ask` was in the grammar while working but not in the words ("Legal moves
+  now: act, replan, done, give_up"), so the model wrote its questions into `ask_questions.json`,
+  wrote it again, and the repeat guard gave up the job. The working hint now names `ask`. (v0.8.8)

@@ -150,6 +150,16 @@ fn promises_work(text: &str) -> bool {
     ["i will ", "i'll ", "let me ", "i am going to ", "i'm going to ", "proceeding"].iter().any(|w| t.contains(w))
 }
 
+/// Whether the user's own words ask for something to hold from now on. The model filled
+/// `remember` on its own — a project's description, "Blender is installed" — and every one of
+/// those notes pulled the next chat back to the old work (the owner, 2026-09-23).
+/// ponytail: a word list; a note the user wanted in other words is lost, and they say it again.
+fn asks_to_keep(text: &str) -> bool {
+    let t = text.to_lowercase();
+    ["always", "never", "from now on", "remember", "keep in mind", "every time", "whenever",
+     "in future", "in the future", "going forward", "by default"].iter().any(|w| t.contains(w))
+}
+
 fn not_a_move(allowed: &[&str], error: &str) -> String {
     let moves = if allowed.is_empty() { String::new() } else { format!(", one of: {}", allowed.join(", ")) };
     format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\"{moves}.", error.chars().take(120).collect::<String>())
@@ -390,8 +400,10 @@ impl<M: Model> Engine<M> {
             }
             mv => mv,
         };
+        let keep = asks_to_keep(text);
         match mv {
             Move::Reply { text, remember } => {
+                let remember = remember.filter(|_| keep);
                 self.emit(Event::Said { text });
                 if let Some(r) = remember {
                     self.store.add_instruction(&r)?;
@@ -426,6 +438,7 @@ impl<M: Model> Engine<M> {
                 // I6: `remember` on a `start` move was saved silently — only the `Reply` arm told
                 // the user. Same "(Noted for the future: …)" line here, computed before the value
                 // moves into `add_instruction`.
+                let remember = remember.filter(|_| keep);
                 let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
                 if let Some(r) = remember { self.store.add_instruction(&r)?; }
                 let mut job = Job::new(&name, &folder, &goal, creative, &understood);
@@ -441,6 +454,7 @@ impl<M: Model> Engine<M> {
             }
             // The machine itself: no project row, no blueprint, one shared scratch folder.
             Move::Housekeep { goal, understood, remember } => {
+                let remember = remember.filter(|_| keep);
                 let note = remember.as_ref().map(|r| format!("(Noted for the future: {r})"));
                 if let Some(r) = remember { self.store.add_instruction(&r)?; }
                 std::fs::create_dir_all(&self.housekeeping_dir)?;
@@ -1674,7 +1688,7 @@ mod tests {
             creative: true, understood: "Starting p".into(), skills: vec![], remember: Some("always use python3".into()),
         };
         let (mut e, _, _) = engine_with(vec![mv, plan(), act(1, write("BLUEPRINT.md")), done(run("true"))], "start-remember");
-        let out = e.handle("go").unwrap();
+        let out = e.handle("go, and always use python3").unwrap();
         assert!(out.iter().any(|l| l.contains("Noted for the future: always use python3")), "{out:?}");
         assert!(e.store.instructions().unwrap().contains(&"always use python3".to_string()));
     }
@@ -1851,9 +1865,19 @@ mod tests {
     use crate::testing::events_of;
 
     #[test]
+    fn a_note_the_user_did_not_ask_for_is_not_kept() {
+        // The owner's run, 2026-09-23: "Hi" was answered with the car-rental project, noted as a
+        // standing instruction by a job that was about the skill book.
+        let (mut e, _, _) = engine_with(vec![Move::Reply { text: "Hello!".into(), remember: Some("car-rental-broker: a website".into()) }], "no-note");
+        let ev = events_of(&mut e, "Hi");
+        assert_eq!(ev, vec![Event::Said { text: "Hello!".into() }]);
+        assert!(e.store.instructions().unwrap().is_empty());
+    }
+
+    #[test]
     fn chat_emits_said() {
         let (mut e, _, _) = engine_with(vec![Move::Reply { text: "A prime is…".into(), remember: Some("use python3".into()) }], "ev-said");
-        let ev = events_of(&mut e, "what's a prime?");
+        let ev = events_of(&mut e, "what's a prime? and always use python3");
         assert_eq!(ev, vec![Event::Said { text: "A prime is…".into() }, Event::Said { text: "(Noted for the future: use python3)".into() }]);
     }
 

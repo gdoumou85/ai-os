@@ -14,7 +14,7 @@ Rules:
 - Edit code in place with edit_file (quote the exact passage). Use write_file only for new files. Use read_file with from_line/lines to read the part you need.
 - A step that failed once will fail again. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
-- If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction). You will not see this conversation again.
+- If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction — only what the user said is to hold from now on). You will not see this conversation again.
 - Never install what is already there: this machine has had programs installed on it before, some by you. `run_command <program> --help` answers in a second; an install takes minutes.
 - Install, remove and set up software with run_command: `sudo apt-get install -y …`, `sudo apt-get remove -y …`, `sudo systemctl …`; language packages with pip (into the working directory's .venv), npm or cargo. Make folders with `run_command mkdir -p`.
 - The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`). read_file, write_file and edit_file take any absolute path too; a file only root may write is written for you. Where projects live is changed with `set_setting`.
@@ -36,7 +36,7 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], notebooks: &
     let user = format!(
         "Standing instructions:\n{}\n\nProjects:\n{}\n\nSkill notebooks: {}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk: it runs nothing, so when the user wants something done — 'do it', 'proceed' — start or housekeep instead), start (something to build and keep as files — code, documents, a site: give project, new_project, description, goal, creative, understood, and skills (0-3 craft areas the job belongs to — coding, web design, a program like blender — named from the notebooks listed or a new short name; [] for a plain errand)), or \
          housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked, a browser and the websites in it included; give goal, understood). \
-         Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself. \
+         Pick an existing project name when the user means one; never bring a project up yourself, the list is only for when the user names one. Set creative=true only if the user said to decide yourself. \
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim. \
          Asked to forget, or to wipe what you remember, reply that the Clear button at the top does it: you cannot, and it is no job.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, notebooks_txt, recent_txt, message
@@ -129,10 +129,13 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         };
         (format!("Project: {} (its folder is the working directory)", job.project), format!("\n\nBLUEPRINT.md:\n{bp}"))
     };
+    // `ask` was in the grammar while working but not in these words, so a plan step "ask the user
+    // whether…" became a file of questions written twice, and the job gave up (the owner, 2026-09-23).
     let hint = match job.state {
-        State::Asking => "Legal moves now: ask (1-3 questions) or plan (if you have no questions).",
+        State::Asking => "Legal moves now: ask (1-3 questions) or plan (if you have no questions). A question for the user is an ask, never a plan step.",
         State::Planning => "Legal moves now: plan. Give 2-8 short steps in plain words.",
-        _ => "Legal moves now: act (one action for the plan step it serves), replan, done (with a check action), give_up (say what was missing).",
+        _ if job.creative => "Legal moves now: act (one action for the plan step it serves), replan, done (with a check action), give_up (say what was missing).",
+        _ => "Legal moves now: act (one action for the plan step it serves), ask (when only the user can answer: the job waits for them; never write questions into a file), replan, done (with a check action), give_up (say what was missing).",
     };
     let note = job.note_to_model.as_deref().map(|n| format!("\n\nNote from the executor: {n}")).unwrap_or_default();
     // The bounded last-run note (1b spec §6.6): fix first, prove it, then the goal.
@@ -429,6 +432,9 @@ mod tests {
         let mut working_not_creative = Job::new("p", "/data/projects/p", "g", false, "u");
         working_not_creative.state = State::Working;
         assert_eq!(job_turn(&[], &working_not_creative, None, None).allowed, vec!["ask", "act", "replan", "done", "give_up"]);
+        // The words name what the grammar allows: a working job that may ask is told so.
+        assert!(job_turn(&[], &working_not_creative, None, None).user.contains("ask (when only the user can answer"));
+        assert!(!job_turn(&[], &working_creative, None, None).user.contains("ask (when only the user can answer"));
 
         let p = front_door(&[], &[], &[], &[], "hi");
         assert_eq!(p.allowed, vec!["reply", "start", "housekeep"]);
