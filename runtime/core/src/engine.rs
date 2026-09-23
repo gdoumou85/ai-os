@@ -145,11 +145,15 @@ pub fn is_discard_learned(text: &str) -> bool { normalize(text) == "discard what
 /// `job.project` is the empty string — "Stopped the job in ." is not a sentence.
 /// What the model is told when its answer was not a move (the owner's LM Studio run, 2026-09-19:
 /// a thinking Qwen wrote `{"understood":…,"act":{…}}`, which the runner did not stop).
-/// A reply that says it is about to act. A question back ("I need to know…") is not one.
-// ponytail: phrase list, a small model's promises in English; widen it when a live one slips past.
+/// A reply that says it is about to act, or that it cannot: either way what was asked is not
+/// done. The owner, 2026-09-23: "delete it" (a project) got "I cannot delete the project … outside
+/// what I can do", on a machine it has root on. A question back ("I need to know…") is neither;
+/// nor is the one thing it truly cannot do, forgetting, which the Clear button does.
+// ponytail: phrase list, a small model's words in English; widen it when a live one slips past.
 fn promises_work(text: &str) -> bool {
     let t = text.to_lowercase().replace('’', "'");
     ["i will ", "i'll ", "let me ", "i am going to ", "i'm going to ", "proceeding"].iter().any(|w| t.contains(w))
+        || (["i cannot ", "i can't ", "i am unable", "i'm unable", "outside what i can"].iter().any(|w| t.contains(w)) && !t.contains("clear"))
 }
 
 /// Whether the user's own words ask for something to hold from now on. The model filled
@@ -181,8 +185,13 @@ fn strays(job: &Job, action: &Action) -> bool {
 /// the step it claims is not done. The owner's run, 2026-09-23: "list the folder" and "delete the
 /// folder" were each a `write_file` of the folder's own path, and every one ticked its step.
 /// A write after something else — a run that failed, say — is the ordinary fix-and-retry loop.
+/// So is game.js written whole again with the user's answers in it: the same chat's Flappy job
+/// died on that. Only a name with no extension — a folder's name, written as a file — is held.
+// ponytail: extension heuristic; a Makefile rewritten twice in a row is held too, and edit_file
+// is the way round it.
 fn rewrites_last(job: &Job, action: &Action) -> bool {
     let Action::WriteFile { path, .. } = action else { return false };
+    if Path::new(path).extension().is_some() { return false }
     let same = |a: &Action| matches!(a, Action::WriteFile { path: p, .. } if p == path);
     job.steps.iter().rev().find(|s| !(same(&s.action) && !s.ok)).is_some_and(|s| s.ok && same(&s.action))
 }
@@ -425,7 +434,8 @@ impl<M: Model> Engine<M> {
         // Names to pick skills from, a help like the tips: unreadable means none listed, not no answer.
         let notebooks = crate::notes::notebooks(self.store.conn()).unwrap_or_else(|e| { eprintln!("engine: no notebooks for the front door ({e})"); vec![] });
         let mut p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &notebooks, &self.store.recent_messages(4)?, text);
-        p.user = format!("{}\n\n{}", self.machine_block(), p.user);
+        // Where things are, as a job is told: "where is it" got a made-up /home/new-project.
+        p.user = format!("{}\n{}\n\n{}", self.machine_block(), self.places()?, p.user);
         self.tick("", "Working out what you are asking for…".into());
         // An answer that is not a move gets one more try with the reason; a second one is said in
         // plain words, never as "something went wrong".
@@ -443,10 +453,11 @@ impl<M: Model> Engine<M> {
             r => r?,
         };
         // A reply runs nothing. One that promises work ("I will…", "Let me proceed") left the
-        // owner waiting on nothing three times over; ask once more with only the working moves.
+        // owner waiting on nothing three times over, one that refuses left a project undeleted;
+        // ask once more with only the working moves.
         let mv = match mv {
             Move::Reply { ref text, .. } if promises_work(text) => {
-                p.user.push_str("\n\nYour reply said you would do something, but a reply runs nothing. Do it now: start or housekeep.");
+                p.user.push_str("\n\nYour reply did not do what was asked, and a reply runs nothing. You have full access to this machine. Do it now: start or housekeep.");
                 p.allowed = vec!["start", "housekeep"];
                 match self.model.next_move(&p) {
                     Err(ModelError::BadJson(_)) => mv,
@@ -643,6 +654,22 @@ impl<M: Model> Engine<M> {
         Ok(false)
     }
 
+    /// A move that repeats what is already done: not illegal, so not a rejection (two are fatal).
+    /// It costs a replan, a budget of five that any step that works refills. The owner's run,
+    /// 2026-09-23: mkdir -p of the new folder, then the same twice more, and the job was dead.
+    /// `true` means the job stopped here and the caller must return.
+    fn nudge(&mut self, job: &mut Job, why: &str) -> Result<bool, EngineError> {
+        job.replans += 1;
+        job.note_to_model = Some(format!("your last move was not run: {why}"));
+        if job.replans > Self::MAX_REPLANS {
+            let text = format!("I gave up on {}: I kept repeating what was already done ({why}).", display_name(job));
+            self.finish(job.clone(), State::Failed, text)?;
+            return Ok(true);
+        }
+        self.store.save_job(job)?;
+        Ok(false)
+    }
+
     /// I5: matching by file name alone let `docs/BLUEPRINT.md` satisfy the gate, even though
     /// `read_blueprint` only ever reads the root file — so `done` could unblock on a blueprint
     /// the model never actually consulted. Exact path match instead (after trimming one leading
@@ -712,7 +739,7 @@ impl<M: Model> Engine<M> {
         if !is_check && !repeatable && trailing >= 1 {
             // Pointed at the eye that can see what the action did: `look` sees no web page, so
             // "look at the window" after a screen click sent the owner's run round in circles.
-            return self.reject(job, if matches!(action, Action::ScreenLook { .. }) {
+            return self.nudge(job, if matches!(action, Action::ScreenLook { .. }) {
                 "you have looked at the screen twice and it is the same: act on what it shows (enlarge a square, click a spot) or replan"
             } else if matches!(action, Action::Look { .. }) {
                 "you have looked at this window twice and it is the same: act on what it shows (press, type, read), look at the screen if the page is missing, or replan"
@@ -1022,6 +1049,22 @@ mod tests {
         assert_eq!(prompts[1].allowed, vec!["start", "housekeep"]);
         assert!(!e.store.recent_messages(4).unwrap().iter().any(|(_, t)| t.contains("I will now proceed")), "the promise was said");
         assert!(e.open_job().unwrap().is_some(), "no job started");
+    }
+
+    #[test]
+    fn a_reply_that_refuses_work_is_asked_again_and_knows_where_things_are() {
+        // The owner, 2026-09-23: "delete it" (new-project) got "I cannot delete…", and "where is
+        // it" a made-up /home/new-project.
+        let (mut e, _, _) = engine_with(vec![
+            Move::Reply { text: "I cannot delete the project 'new-project' because deletion is not a housekeeping task.".into(), remember: None },
+            Move::Housekeep { goal: "delete new-project".into(), understood: "Deleting new-project".into(), remember: None },
+        ], "refuse-reply");
+        let _ = e.handle("delete it");
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[0].user.contains("Where things are:"), "{}", prompts[0].user);
+        assert_eq!(prompts[1].allowed, vec!["start", "housekeep"]);
+        assert!(e.open_job().unwrap().is_some(), "no job started");
+        assert!(!promises_work("The Clear button at the top does it: I cannot forget."));
     }
 
     #[test]
@@ -1451,6 +1494,20 @@ mod tests {
     }
 
     #[test]
+    fn repeating_a_step_that_worked_is_not_fatal() {
+        // The owner's run, 2026-09-23: mkdir -p twice more after it worked, and "I gave up on
+        // housekeeping: I kept answering in a way the system could not accept".
+        let mk = run("mkdir -p /x");
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(1, mk.clone()), act(1, mk.clone()), act(2, mk.clone()), act(2, mk.clone()),
+            act(2, run("ls /x")), done(run("true")),
+        ], "repeat-nudge");
+        let out = e.handle("make /x").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == mk).count(), 1, "{:?}", rec.calls.borrow());
+    }
+
+    #[test]
     fn writing_the_same_file_again_does_no_step() {
         // The owner's run, 2026-09-23: "list the folder" and then "delete the folder" were each a
         // write_file of the folder's own path, with new contents, and every one ticked its step.
@@ -1464,6 +1521,13 @@ mod tests {
         let prompts = e.model.prompts.borrow();
         assert!(prompts[4].user.contains("you just wrote this same file"), "the model is told why: {}", prompts[4].user);
         assert!(prompts[4].user.contains("run_command rm -rf"), "and what does the job: {}", prompts[4].user);
+        // game.js written whole again, with the user's answers in it, is work.
+        let js = |c: &str| Action::WriteFile { path: "game.js".into(), contents: c.into() };
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(1, js("a")), act(2, js("b")), done(run("true")),
+        ], "rewrite-js");
+        assert!(e.handle("make the game").unwrap().last().unwrap().contains("finished"));
+        assert_eq!(rec.calls.borrow().iter().filter(|a| matches!(a, Action::WriteFile { .. })).count(), 2);
     }
 
     #[test]

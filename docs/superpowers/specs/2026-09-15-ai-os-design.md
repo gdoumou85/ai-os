@@ -517,3 +517,22 @@ Two things the owner hit on his first full-access run.
   - A plan step out of range costs a replan, not one of the two fatal rejections.
   - The ask rules say to ask only what the user's words leave open, both before planning and
     while working. (v0.9.3)
+- **2026-09-23**, the owner's chat after v0.9.3: "delete it" (new-project) got "I cannot delete
+  the project … deletion is not a housekeeping task", and "where is it" a made-up
+  /home/new-project. Only jobs were told *Where things are*; the front door never was, and its
+  housekeep said "folders, settings, tools". The front door now opens with *Where things are*
+  too, its housekeep names listing, moving and deleting files, folders and projects, and it says
+  the AI has full access. A reply that says it cannot ("I cannot", "I'm unable") is asked again
+  with only start and housekeep, as a reply that promises work already was; the Clear-button
+  answer to "forget" is left alone.
+- **2026-09-23**, the same chat: "create a new project folder… name it Project Flappy" and then
+  the game's description were each taken as housekeeping (the front door said housekeep was for
+  "folders"). That job asked where to put the folder, then ran mkdir -p three times, and the two
+  repeats were two rejections, which is fatal. The front door now says a new project, or a folder
+  for one, is always start (the engine makes its folder), and housekeep never makes a project.
+  Repeating an action that just worked is not run and costs a replan (five, refilled by any step
+  that works), not a rejection.
+- **2026-09-23**, the same chat: the Flappy job wrote game.js, asked its questions, and wrote
+  game.js again with the answers in it. v0.9.3's "you just wrote this same file" refused that,
+  and the retry was refused as already failed: dead. That rule now holds only names with no
+  extension (a folder's name written as a file, the fake ticks it was made for). (v0.9.4)
