@@ -162,6 +162,21 @@ fn asks_to_keep(text: &str) -> bool {
      "in future", "in the future", "going forward", "by default"].iter().any(|w| t.contains(w))
 }
 
+/// A project job making itself another home: a BLUEPRINT.md outside its folder, or a new
+/// projects_root. The owner's run, 2026-09-23: Flappy Bird planned "create the project folder
+/// and set projects_root", wrote its blueprint to /opt/flappy_bird, and circled on step 1.
+/// ponytail: only the blueprint is watched; the rest of a stray project follows it back.
+fn strays(job: &Job, action: &Action) -> bool {
+    match action {
+        Action::SetSetting { key, .. } => key == "projects_root",
+        Action::WriteFile { path, .. } | Action::EditFile { path, .. } => {
+            let p = Path::new(path);
+            p.is_absolute() && p.file_name().is_some_and(|f| f == "BLUEPRINT.md") && p.parent() != Some(Path::new(&job.folder))
+        }
+        _ => false,
+    }
+}
+
 fn not_a_move(allowed: &[&str], error: &str) -> String {
     let moves = if allowed.is_empty() { String::new() } else { format!(", one of: {}", allowed.join(", ")) };
     format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\"{moves}.", error.chars().take(120).collect::<String>())
@@ -681,9 +696,15 @@ impl<M: Model> Engine<M> {
         }
         let exec = self.executor_for(job)?;
         // `SetSetting` never reaches a worker (executor::lane -> Lane::Engine): the engine applies
-        // it and records it with `log_only`. A failure counts like any other failed step.
-        if let Action::SetSetting { key: name, value } = &action {
-            let outcome = self.apply_setting(name, value)?;
+        // it and records it with `log_only`. A failure counts like any other failed step. So does
+        // a project job reaching for another home: it never runs.
+        let local = match &action {
+            _ if !job.housekeeping && strays(job, &action) => Some(Outcome::err(format!(
+                "not done: this project's folder is {} and is already made; write its files there with relative names (BLUEPRINT.md, src/main.py); projects_root is not this job's to change", job.folder))),
+            Action::SetSetting { key: name, value } => Some(self.apply_setting(name, value)?),
+            _ => None,
+        };
+        if let Some(outcome) = local {
             // Same invariant as `Executor::execute`: the setting is already written, so a logging
             // failure must not abort the turn and lose the step.
             if let Err(e) = exec.log_only(&job.id, &action, &format!("{}: {}", if outcome.ok { "ok" } else { "error" }, outcome.detail)) {
@@ -1734,6 +1755,19 @@ mod tests {
             understood: "Housekeeping: I'll create the folder and make it the projects root".into(),
             remember: None,
         }
+    }
+
+    #[test]
+    fn a_project_writing_its_blueprint_elsewhere_is_sent_back_to_its_folder() {
+        let stray = write("/opt/p/BLUEPRINT.md");
+        let root_move = Action::SetSetting { key: "projects_root".into(), value: "/opt".into() };
+        let (mut e, rec, _) = engine_with(vec![
+            start("p", true), plan(), act(1, root_move), act(1, stray.clone()), act(1, write("BLUEPRINT.md")), done(run("true")),
+        ], "stray");
+        let out = e.handle("make p").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert!(!rec.calls.borrow().contains(&stray), "the stray write never ran");
+        assert!(e.store.get_setting("projects_root").unwrap().is_none(), "a project job does not move where projects live");
     }
 
     #[test]
