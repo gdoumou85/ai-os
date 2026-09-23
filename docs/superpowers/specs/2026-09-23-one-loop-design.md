@@ -4,7 +4,7 @@ The owner, 2026-09-23, after a day of fixes: *"It looks for a blueprint when a t
 blueprint related, it assumes every prompt is about a project. This is not true AI that
 understands the user, just some failed predefined behaviours. This calls for a big restructure."*
 
-He is right about the cause. Every message is first sorted into chat, project or housekeeping,
+The owner is right about the cause. Every message is first sorted into chat, project or housekeeping,
 and each kind runs a fixed script: ask, then plan, then act; a project must write BLUEPRINT.md;
 done must carry a check; two rejected answers kill the job. Each live failure added a rule, and
 the model spends its effort obeying rules instead of understanding the user. This design replaces
