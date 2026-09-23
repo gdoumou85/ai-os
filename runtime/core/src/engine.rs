@@ -926,14 +926,14 @@ mod tests {
     #[test]
     fn stop_forgets_the_chat_so_the_next_prompt_starts_clean() {
         let (mut e, _, _) = engine_with(vec![
-            Move::Reply { text: "Blender is open.".into(), remember: None },
+            Move::Reply { text: "Zorblax is open.".into(), remember: None },
             Move::Reply { text: "Hello.".into(), remember: None },
         ], "stop-forgets");
-        e.handle("open blender").unwrap();
+        e.handle("open zorblax").unwrap();
         e.handle("stop").unwrap();
         assert!(e.store.recent_messages(4).unwrap().is_empty());
         e.handle("hi").unwrap();
-        assert!(!e.model.prompts.borrow()[1].user.contains("lender"), "the old chat reached the new prompt");
+        assert!(!e.model.prompts.borrow()[1].user.to_lowercase().contains("zorblax"), "the old chat reached the new prompt");
     }
 
     #[test]
