@@ -185,8 +185,13 @@ fn strays(job: &Job, action: &Action) -> bool {
 /// the step it claims is not done. The owner's run, 2026-09-23: "list the folder" and "delete the
 /// folder" were each a `write_file` of the folder's own path, and every one ticked its step.
 /// A write after something else — a run that failed, say — is the ordinary fix-and-retry loop.
+/// So is game.js written whole again with the user's answers in it: the same chat's Flappy job
+/// died on that. Only a name with no extension — a folder's name, written as a file — is held.
+// ponytail: extension heuristic; a Makefile rewritten twice in a row is held too, and edit_file
+// is the way round it.
 fn rewrites_last(job: &Job, action: &Action) -> bool {
     let Action::WriteFile { path, .. } = action else { return false };
+    if Path::new(path).extension().is_some() { return false }
     let same = |a: &Action| matches!(a, Action::WriteFile { path: p, .. } if p == path);
     job.steps.iter().rev().find(|s| !(same(&s.action) && !s.ok)).is_some_and(|s| s.ok && same(&s.action))
 }
@@ -1516,6 +1521,13 @@ mod tests {
         let prompts = e.model.prompts.borrow();
         assert!(prompts[4].user.contains("you just wrote this same file"), "the model is told why: {}", prompts[4].user);
         assert!(prompts[4].user.contains("run_command rm -rf"), "and what does the job: {}", prompts[4].user);
+        // game.js written whole again, with the user's answers in it, is work.
+        let js = |c: &str| Action::WriteFile { path: "game.js".into(), contents: c.into() };
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(1, js("a")), act(2, js("b")), done(run("true")),
+        ], "rewrite-js");
+        assert!(e.handle("make the game").unwrap().last().unwrap().contains("finished"));
+        assert_eq!(rec.calls.borrow().iter().filter(|a| matches!(a, Action::WriteFile { .. })).count(), 2);
     }
 
     #[test]

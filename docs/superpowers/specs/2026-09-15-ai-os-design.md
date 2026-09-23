@@ -531,4 +531,8 @@ Two things the owner hit on his first full-access run.
   repeats were two rejections, which is fatal. The front door now says a new project, or a folder
   for one, is always start (the engine makes its folder), and housekeep never makes a project.
   Repeating an action that just worked is not run and costs a replan (five, refilled by any step
-  that works), not a rejection. (v0.9.4)
+  that works), not a rejection.
+- **2026-09-23**, the same chat: the Flappy job wrote game.js, asked its questions, and wrote
+  game.js again with the answers in it. v0.9.3's "you just wrote this same file" refused that,
+  and the retry was refused as already failed: dead. That rule now holds only names with no
+  extension (a folder's name written as a file, the fake ticks it was made for). (v0.9.4)
