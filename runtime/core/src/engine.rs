@@ -210,6 +210,51 @@ fn places(home: &str, root: &Path, scratch: &Path, projects: &[ProjectRow]) -> S
     s
 }
 
+/// What a finished job did, as one line of the journal: every message starts clean, so what a
+/// job leaves behind must be written down where the next chat can find it (the owner, 2026-09-23:
+/// Flappy's files, made by a housekeeping job, were nowhere on record after Clear, and "delete
+/// any flappy bird plans" searched the project folders and gave up). A project also has its
+/// BLUEPRINT.md; a housekeeping job has only this.
+fn journal_line(job: &Job, state: State, text: &str) -> String {
+    let what = if job.housekeeping { "housekeeping".to_string() } else { format!("project {} ({})", job.project, job.folder) };
+    let how = match state { State::Done => "done", State::Cancelled => "stopped", _ => "not finished" };
+    // The paths it touched: files it wrote, and absolute paths in the commands that worked.
+    let mut paths: Vec<String> = vec![];
+    for s in job.steps.iter().filter(|s| s.ok) {
+        let found: Vec<String> = match &s.action {
+            Action::WriteFile { path, .. } | Action::EditFile { path, .. } => vec![Path::new(&job.folder).join(path).display().to_string()],
+            Action::RunCommand { argv } => argv.iter().flat_map(|a| a.split_whitespace())
+                .map(|w| w.trim_matches(|c: char| "'\";&|".contains(c)).to_string())
+                .filter(|w| w.len() > 1 && w.starts_with('/') && !["/usr/", "/bin/", "/dev/", "/proc/", "/tmp/"].iter().any(|p| w.starts_with(p)))
+                .collect(),
+            _ => vec![],
+        };
+        for p in found { if !paths.contains(&p) { paths.push(p) } }
+    }
+    let flat = |s: &str, n: usize| s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(n).collect::<String>();
+    let mut line = format!("- {what}, {how}: asked \"{}\" → {}", flat(&job.request, 150), flat(text, 200));
+    // ponytail: the first eight; a job that touched more is summed up by its own words.
+    if !paths.is_empty() { line.push_str(&format!(" Paths: {}.", paths.iter().take(8).cloned().collect::<Vec<_>>().join(", "))); }
+    line
+}
+
+/// The journal lines that share a telling word with what the user just said, newest last. A word
+/// every request has ("delete", "project") tells nothing and would bring back old work unasked —
+/// the Blender chat that would not go away (2026-09-23).
+// ponytail: word overlap with a stop list; a project called by another name is missed, and the
+// user names it again.
+fn journal_for(journal: &str, words: &str) -> String {
+    const PLAIN: &[&str] = &["project", "projects", "delete", "remove", "create", "make", "start", "files", "file",
+        "folder", "folders", "please", "want", "this", "that", "with", "from", "into", "what", "your", "have", "them",
+        "then", "there", "these", "those", "will", "would", "should", "could", "just", "also", "like", "some", "lets",
+        "about", "work", "build", "done", "asked", "housekeeping", "paths", "home", "data", "user", "again", "anything", "everything"];
+    let split = |s: &str| s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 4 && !PLAIN.contains(w)).map(String::from).collect::<Vec<_>>();
+    let wanted = split(words);
+    let lines: Vec<&str> = journal.lines().filter(|l| l.starts_with("- ") && split(l).iter().any(|w| wanted.contains(w))).collect();
+    if lines.is_empty() { return String::new() }
+    format!("What earlier jobs did (the journal, lines about this request only):\n{}\n", lines[lines.len().saturating_sub(5)..].join("\n"))
+}
+
 fn not_a_move(allowed: &[&str], error: &str) -> String {
     let moves = if allowed.is_empty() { String::new() } else { format!(", one of: {}", allowed.join(", ")) };
     format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\"{moves}.", error.chars().take(120).collect::<String>())
@@ -244,6 +289,13 @@ impl<M: Model> Engine<M> {
         // A project whose folder is gone is not somewhere things are.
         let live: Vec<ProjectRow> = self.store.list_projects()?.into_iter().filter(|p| Path::new(&p.folder).is_dir()).collect();
         Ok(places(&home, &self.projects_root()?, &self.housekeeping_dir, &live))
+    }
+
+    fn journal_path(&self) -> PathBuf { self.housekeeping_dir.join("JOURNAL.md") }
+
+    /// The journal lines about `words`, for a prompt ("" when none are).
+    fn journal(&self, words: &str) -> String {
+        journal_for(&std::fs::read_to_string(self.journal_path()).unwrap_or_default(), words)
     }
 
     fn machine_block(&self) -> String {
@@ -435,7 +487,7 @@ impl<M: Model> Engine<M> {
         let notebooks = crate::notes::notebooks(self.store.conn()).unwrap_or_else(|e| { eprintln!("engine: no notebooks for the front door ({e})"); vec![] });
         let mut p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &notebooks, &self.store.recent_messages(4)?, text);
         // Where things are, as a job is told: "where is it" got a made-up /home/new-project.
-        p.user = format!("{}\n{}\n\n{}", self.machine_block(), self.places()?, p.user);
+        p.user = format!("{}\n{}\n{}\n{}", self.machine_block(), self.places()?, self.journal(text), p.user);
         self.tick("", "Working out what you are asking for…".into());
         // An answer that is not a move gets one more try with the reason; a second one is said in
         // plain words, never as "something went wrong".
@@ -563,6 +615,10 @@ impl<M: Model> Engine<M> {
         // Failed/Cancelled, and the engine's own note is not a file the job changed.
         let files = changed_files(&self.workspace(&job), job.started_at);
         self.write_or_wipe_last_run(&job);
+        let line = journal_line(&job, state, &text);
+        let wrote = std::fs::OpenOptions::new().create(true).append(true).open(self.journal_path())
+            .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
+        if let Err(e) = wrote { eprintln!("engine: the journal was not written ({e})"); }
         let job_id = job.id.clone();
         let ev = match state {
             State::Done => {
@@ -858,7 +914,9 @@ impl<M: Model> Engine<M> {
             }
             let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
             let mut p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
-            p.user = format!("{}\n{}\n\n{}", self.machine_block(), self.places()?, p.user);
+            // A project has its blueprint; housekeeping has the journal's lines about its request.
+            let journal = if job.housekeeping { self.journal(&job.request) } else { String::new() };
+            p.user = format!("{}\n{}\n{journal}\n{}", self.machine_block(), self.places()?, p.user);
             p.image = self.image.take();
             let step = job.steps.last().map(|s| s.plan_step).unwrap_or(1);
             let what = match job.plan.get(step.saturating_sub(1)) {
@@ -1491,6 +1549,36 @@ mod tests {
         assert_eq!(rec.calls.borrow().iter().filter(|a| **a == write("BLUEPRINT.md")).count(), 1, "{:?}", rec.calls.borrow());
         let prompts = e.model.prompts.borrow();
         assert!(prompts[4].user.contains("just succeeded"), "the model is told why: {}", prompts[4].user);
+    }
+
+    #[test]
+    fn a_job_leaves_a_journal_line_the_next_chat_about_it_reads() {
+        // The owner, 2026-09-23: Flappy's files, made by a housekeeping job, were on record
+        // nowhere, and after Clear "delete any flappy bird plans" could not find them.
+        let (mut e, _, _) = engine_with(vec![
+            housekeep(), plan(), act(1, Action::WriteFile { path: "/home/g/Projects/game.js".into(), contents: "x".into() }),
+            act(2, run("mkdir -p '/home/g/Projects/Project Flappy'")), done(run("true")),
+            Move::Reply { text: "(learning turn)".into(), remember: None },
+            Move::Reply { text: "ok".into(), remember: None },
+            Move::Reply { text: "hello".into(), remember: None },
+        ], "journal");
+        e.handle("make a flappy bird game in /home/g/Projects").unwrap();
+        let journal = std::fs::read_to_string(e.journal_path()).unwrap();
+        assert!(journal.contains("housekeeping, done: asked \"make a flappy bird game") && journal.contains("/home/g/Projects/game.js"), "{journal}");
+        e.handle("delete any flappy bird plans").unwrap();
+        e.handle("hi, what is new").unwrap();
+        let prompts = e.model.prompts.borrow();
+        let n = prompts.len();
+        assert!(prompts[n - 2].user.contains("What earlier jobs did") && prompts[n - 2].user.contains("game.js"), "{}", prompts[n - 2].user);
+        assert!(!prompts[n - 1].user.contains("What earlier jobs did"), "a greeting brings back no old work");
+    }
+
+    #[test]
+    fn journal_lines_are_found_by_telling_words_only() {
+        let j = "- housekeeping, done: asked \"make a flappy bird game\" → made it. Paths: /home/g/Projects/game.js.\n- project car-rental (/data/projects/car-rental), done: asked \"a car rental site\" → built.\n";
+        assert!(journal_for(j, "delete the flappy files").contains("flappy bird game"));
+        assert!(!journal_for(j, "delete the flappy files").contains("car rental"));
+        assert_eq!(journal_for(j, "delete any project files"), "", "words every request has tell nothing");
     }
 
     #[test]

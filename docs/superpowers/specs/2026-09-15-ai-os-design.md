@@ -536,3 +536,14 @@ Two things the owner hit on his first full-access run.
   game.js again with the answers in it. v0.9.3's "you just wrote this same file" refused that,
   and the retry was refused as already failed: dead. That rule now holds only names with no
   extension (a folder's name written as a file, the fake ticks it was made for). (v0.9.4)
+- **2026-09-23**, the owner after Clear: "delete any flappy bird plans. we start a new project"
+  searched the project folders, asked where, and gave up after six replans. Flappy's files were
+  made by a housekeeping job (before v0.9.4 sent new projects to start), and a housekeeping job
+  wrote nothing down. The owner's rule: each message starts clean, and every task updates the
+  documentation the next chat reads. Every finished job now appends one line to
+  `<scratch>/JOURNAL.md` (engine-written, no model turn): project or housekeeping, how it
+  ended, the request, the closing words, and the paths it touched (files written, absolute paths
+  in commands that worked). The front door and each housekeeping turn get only the lines that
+  share a telling word with the request (a stop list drops "delete", "project" and the like), at
+  most five; a project job has its blueprint instead. Clear leaves the journal. A housekeeping
+  job asked for a project too does the rest and says the project is to be asked for. (v0.9.5)
