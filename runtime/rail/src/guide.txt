@@ -11,9 +11,9 @@ The AI OS is an assistant that does jobs on this computer for you. You tell it w
 • <b>Ask for a job</b> ("make me a script that renames my photos by date") and it starts a project. It may ask you one to three questions first, then says what it understood and gets to work.
 • <b>Say "you decide"</b> when you don't want questions: it makes the choices itself.
 • <b>Tell it something to keep</b> ("always use Python 3", "my projects go under Work") and it remembers it for every job after.
-• <b>"stop"</b> stops the job it is working on. So does the red <b>Stop</b> button at the top.
+• <b>"stop"</b> stops the job it is working on. So does the red <b>Stop</b> button at the top. A stop also starts a clean conversation: the AI forgets the chat so far. Your projects, skills and the things you told it to keep stay, so name a project to go back to it.
 
-The AI does not remember the chat itself. What is worth keeping it writes down: in each project's notes, and in the things you told it to keep.
+The AI remembers only the last few messages of the chat, and forgets them when you stop. What is worth keeping it writes down: in each project's notes, and in the things you told it to keep.
 
 
 <big><b>The cards</b></big>

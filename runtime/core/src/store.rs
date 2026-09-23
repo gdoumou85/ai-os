@@ -126,6 +126,12 @@ impl Store {
         Ok(())
     }
 
+    /// A stop starts a clean conversation: the chat so far is not the next prompt's business.
+    pub fn forget_chat(&self) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM messages", ())?;
+        Ok(())
+    }
+
     pub fn recent_messages(&self, n: usize) -> Result<Vec<(String, String)>, StoreError> {
         let mut st = self.conn.prepare("SELECT role, text FROM messages ORDER BY id DESC LIMIT ?1")?;
         let rows = st.query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
