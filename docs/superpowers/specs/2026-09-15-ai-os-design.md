@@ -524,4 +524,11 @@ Two things the owner hit on his first full-access run.
   too, its housekeep names listing, moving and deleting files, folders and projects, and it says
   the AI has full access. A reply that says it cannot ("I cannot", "I'm unable") is asked again
   with only start and housekeep, as a reply that promises work already was; the Clear-button
-  answer to "forget" is left alone. (v0.9.4)
+  answer to "forget" is left alone.
+- **2026-09-23**, the same chat: "create a new project folder… name it Project Flappy" and then
+  the game's description were each taken as housekeeping (the front door said housekeep was for
+  "folders"). That job asked where to put the folder, then ran mkdir -p three times, and the two
+  repeats were two rejections, which is fatal. The front door now says a new project, or a folder
+  for one, is always start (the engine makes its folder), and housekeep never makes a project.
+  Repeating an action that just worked is not run and costs a replan (five, refilled by any step
+  that works), not a rejection. (v0.9.4)

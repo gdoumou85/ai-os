@@ -649,6 +649,22 @@ impl<M: Model> Engine<M> {
         Ok(false)
     }
 
+    /// A move that repeats what is already done: not illegal, so not a rejection (two are fatal).
+    /// It costs a replan, a budget of five that any step that works refills. The owner's run,
+    /// 2026-09-23: mkdir -p of the new folder, then the same twice more, and the job was dead.
+    /// `true` means the job stopped here and the caller must return.
+    fn nudge(&mut self, job: &mut Job, why: &str) -> Result<bool, EngineError> {
+        job.replans += 1;
+        job.note_to_model = Some(format!("your last move was not run: {why}"));
+        if job.replans > Self::MAX_REPLANS {
+            let text = format!("I gave up on {}: I kept repeating what was already done ({why}).", display_name(job));
+            self.finish(job.clone(), State::Failed, text)?;
+            return Ok(true);
+        }
+        self.store.save_job(job)?;
+        Ok(false)
+    }
+
     /// I5: matching by file name alone let `docs/BLUEPRINT.md` satisfy the gate, even though
     /// `read_blueprint` only ever reads the root file — so `done` could unblock on a blueprint
     /// the model never actually consulted. Exact path match instead (after trimming one leading
@@ -718,7 +734,7 @@ impl<M: Model> Engine<M> {
         if !is_check && !repeatable && trailing >= 1 {
             // Pointed at the eye that can see what the action did: `look` sees no web page, so
             // "look at the window" after a screen click sent the owner's run round in circles.
-            return self.reject(job, if matches!(action, Action::ScreenLook { .. }) {
+            return self.nudge(job, if matches!(action, Action::ScreenLook { .. }) {
                 "you have looked at the screen twice and it is the same: act on what it shows (enlarge a square, click a spot) or replan"
             } else if matches!(action, Action::Look { .. }) {
                 "you have looked at this window twice and it is the same: act on what it shows (press, type, read), look at the screen if the page is missing, or replan"
@@ -1470,6 +1486,20 @@ mod tests {
         assert_eq!(rec.calls.borrow().iter().filter(|a| **a == write("BLUEPRINT.md")).count(), 1, "{:?}", rec.calls.borrow());
         let prompts = e.model.prompts.borrow();
         assert!(prompts[4].user.contains("just succeeded"), "the model is told why: {}", prompts[4].user);
+    }
+
+    #[test]
+    fn repeating_a_step_that_worked_is_not_fatal() {
+        // The owner's run, 2026-09-23: mkdir -p twice more after it worked, and "I gave up on
+        // housekeeping: I kept answering in a way the system could not accept".
+        let mk = run("mkdir -p /x");
+        let (mut e, rec, _) = engine_with(vec![
+            housekeep(), plan(), act(1, mk.clone()), act(1, mk.clone()), act(2, mk.clone()), act(2, mk.clone()),
+            act(2, run("ls /x")), done(run("true")),
+        ], "repeat-nudge");
+        let out = e.handle("make /x").unwrap();
+        assert!(out.last().unwrap().contains("finished"), "{out:?}");
+        assert_eq!(rec.calls.borrow().iter().filter(|a| **a == mk).count(), 1, "{:?}", rec.calls.borrow());
     }
 
     #[test]
