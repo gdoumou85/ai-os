@@ -45,7 +45,8 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], notebooks: &
     let recent_txt = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
     let user = format!(
         "Standing instructions:\n{}\n\nProjects the user named:\n{}\n\nSkill notebooks: {}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk: it runs nothing, so when the user wants something done — 'do it', 'proceed' — start or housekeep instead), start (something to build and keep as files — code, documents, a site: give project, new_project, description, goal, creative, understood, and skills (0-3 craft areas the job belongs to — coding, web design, a program like blender — named from the notebooks listed or a new short name; [] for a plain errand)), or \
-         housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked, a browser and the websites in it included; give goal, understood). \
+         housekeep (the machine itself: its files, folders and projects — listing, moving or deleting one included — settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked, a browser and the websites in it included; give goal, understood). \
+         You have full access to this machine: never reply that you cannot do something on it; housekeep it. *Where things are* above says where the projects are. \
          Pick a project listed there when the user means it; when the user says where a project is, give that absolute path as folder. Set creative=true only if the user said to decide yourself. \
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim. \
          Asked to forget, or to wipe what you remember, reply that the Clear button at the top does it: you cannot, and it is no job.\n\nUser says: {}",
