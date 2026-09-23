@@ -467,7 +467,8 @@ fn show_guide(parent: &gtk::ApplicationWindow) {
 fn show_skills(parent: &gtk::ApplicationWindow, slot: &Rc<RefCell<Option<gtk::Window>>>, notebooks: &[Notebook], say: &Sender<Request>) {
     let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
     column.set_margin_start(12); column.set_margin_end(12); column.set_margin_top(12); column.set_margin_bottom(12);
-    if notebooks.is_empty() {
+    // The first notebook is what is installed (machine-map spec §4), there even before any lesson.
+    if notebooks.iter().all(|nb| nb.name == "installed on this computer") {
         let l = gtk::Label::new(Some("Nothing learned yet. After a job that worked, what the AI learned shows here."));
         l.set_wrap(true); l.set_xalign(0.0); column.append(&l);
     }
@@ -475,6 +476,14 @@ fn show_skills(parent: &gtk::ApplicationWindow, slot: &Rc<RefCell<Option<gtk::Wi
         let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
         for n in &nb.entries {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            // A program is what is on disk: nothing to forget, nothing used.
+            if n.kind == "program" {
+                let l = gtk::Label::new(Some(&format!("{}: {}", n.topic, n.text)));
+                l.set_wrap(true); l.set_xalign(0.0); l.set_hexpand(true); l.set_selectable(true);
+                row.append(&l);
+                list.append(&row);
+                continue;
+            }
             let mark = if n.failed { " — did not work last time" } else if n.needs_check { " — needs checking" } else { "" };
             let l = gtk::Label::new(Some(&format!("{}: {}\nused {} time{}{mark}", n.topic, n.text, n.uses, if n.uses == 1 { "" } else { "s" })));
             l.set_wrap(true); l.set_xalign(0.0); l.set_hexpand(true); l.set_selectable(true);
@@ -486,7 +495,7 @@ fn show_skills(parent: &gtk::ApplicationWindow, slot: &Rc<RefCell<Option<gtk::Wi
             row.append(&x);
             list.append(&row);
         }
-        let title = if nb.name == "this computer" { "This computer".to_string() } else { nb.name.clone() };
+        let title = match nb.name.as_str() { "this computer" => "This computer".to_string(), "installed on this computer" => "Installed on this computer".to_string(), n => n.to_string() };
         let ex = gtk::Expander::builder().label(format!("{title} ({})", nb.entries.len())).child(&list).expanded(notebooks.len() == 1).build();
         column.append(&ex);
     }

@@ -471,3 +471,10 @@ Two things the owner hit on his first full-access run.
   user whether…" steps. `ask` was in the grammar while working but not in the words ("Legal moves
   now: act, replan, done, give_up"), so the model wrote its questions into `ask_questions.json`,
   wrote it again, and the repeat guard gave up the job. The working hint now names `ask`. (v0.8.8)
+- **2026-09-23** ("it doesn't actually OWN the OS… what installed apps already exist"): the
+  machine map, `2026-09-23-machine-map-design.md`. Every prompt starts with *This machine*: the
+  system line, the desktop entries (open_app names), the tools on PATH, and what the AI installed
+  itself (an `installed` table the engine fills from successful apt/snap/flatpak commands; Clear
+  keeps it). The system text says to install the standard way so the scan finds it. Skills shows
+  *Installed on this computer* first, read-only. Discovery only, no usage guide (the owner's call).
+  (v0.9.0)

@@ -196,7 +196,7 @@ pub(crate) fn opens_a_window(argv: &[String]) -> Option<&str> {
 
 /// Whether dpkg holds this package as installed. Anything it cannot answer is "not installed",
 /// so the command runs as written.
-pub(crate) fn installed(pkg: &str) -> bool {
+pub fn installed(pkg: &str) -> bool {
     Command::new("dpkg-query").args(["-W", "-f=${db:Status-Status}", pkg]).stdin(Stdio::null()).output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "installed")
         .unwrap_or(false)

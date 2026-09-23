@@ -205,11 +205,14 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
     let (mut r, mut w) = Client::connect(&sock).unwrap().split();
     w.request(&aios_proto::Request::Skills {}).unwrap();
     let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event") };
-    assert_eq!(notebooks[0].name, "this computer");
-    assert_eq!(notebooks[0].entries[0].topic, "open a website");
+    // What is on disk comes first, read-only (machine-map spec §4).
+    assert_eq!(notebooks[0].name, "installed on this computer", "{notebooks:?}");
+    assert!(notebooks[0].entries.iter().all(|n| n.kind == "program"));
+    assert_eq!(notebooks[1].name, "this computer");
+    assert_eq!(notebooks[1].entries[0].topic, "open a website");
     w.request(&aios_proto::Request::Forget { notebook: "this computer".into(), topic: "open a website".into() }).unwrap();
     let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event after forget") };
-    assert!(notebooks.is_empty(), "{notebooks:?}");
+    assert!(notebooks.iter().all(|n| n.name == "installed on this computer"), "{notebooks:?}");
     // Clear works on the same database (here, not its own test: AI_OS_DB is one per process).
     let s = Store::open(db.to_str().unwrap()).unwrap();
     s.push_message("user", "open blender").unwrap();

@@ -44,6 +44,8 @@ pub struct Engine<M: Model> {
     /// The screen hand's latest picture, for the next model turn only (2b): one image at a time is
     /// what fits the 8k budget. In memory, never in the stored job.
     image: Option<Vec<u8>>,
+    /// The machine's system line, read once (it does not change while the engine runs).
+    system: std::cell::OnceCell<String>,
 }
 
 /// What the job left behind: entries under `folder` modified at or after `since` (unix
@@ -184,7 +186,13 @@ fn display_name(job: &Job) -> &str {
 
 impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf) -> Self {
-        Self { store, model, default_root, log_path, workers, housekeeping_dir, sink: Box::new(|_| {}), out: vec![], stop: Arc::new(AtomicBool::new(false)), image: None }
+        Self { store, model, default_root, log_path, workers, housekeeping_dir, sink: Box::new(|_| {}), out: vec![], stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new() }
+    }
+
+    /// What this machine has, ahead of every prompt (machine-map spec §2). Programs and installs
+    /// are scanned each time, so something installed shows on the very next turn.
+    fn machine_block(&self) -> String {
+        crate::machine::current_block(self.store.conn(), self.system.get_or_init(crate::machine::system_line))
     }
 
     /// A clone of the engine's own stop flag — raise it to cancel the open job between steps.
@@ -371,6 +379,7 @@ impl<M: Model> Engine<M> {
         // Names to pick skills from, a help like the tips: unreadable means none listed, not no answer.
         let notebooks = crate::notes::notebooks(self.store.conn()).unwrap_or_else(|e| { eprintln!("engine: no notebooks for the front door ({e})"); vec![] });
         let mut p = prompt::front_door(&self.store.instructions()?, &self.store.list_projects()?, &notebooks, &self.store.recent_messages(4)?, text);
+        p.user = format!("{}\n\n{}", self.machine_block(), p.user);
         self.tick("", "Working out what you are asking for…".into());
         // An answer that is not a move gets one more try with the reason; a second one is said in
         // plain words, never as "something went wrong".
@@ -715,6 +724,10 @@ impl<M: Model> Engine<M> {
         job.steps.push(StepRecord { plan_step, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
         self.emit(Event::Step { job_id: job.id.clone(), plan_step, text: describe(&action), ok: outcome.ok });
         if outcome.ok {
+            // What the scan cannot see (a tool with no window) is recorded as it is installed.
+            if let Action::RunCommand { argv } = &action {
+                if let Err(e) = crate::machine::record(self.store.conn(), argv) { eprintln!("engine: install not recorded ({e})"); }
+            }
             // A housekeeping job has no blueprint, so neither counter means anything to it.
             if !job.housekeeping {
                 match Self::is_blueprint(&action) {
@@ -755,6 +768,7 @@ impl<M: Model> Engine<M> {
             }
             let last_run = if job.housekeeping { None } else { std::fs::read_to_string(self.workspace(&job).join("LAST_RUN.md")).ok() };
             let mut p = prompt::job_turn(&self.store.instructions()?, &job, self.read_blueprint(&job).as_deref(), last_run.as_deref());
+            p.user = format!("{}\n\n{}", self.machine_block(), p.user);
             p.image = self.image.take();
             let step = job.steps.last().map(|s| s.plan_step).unwrap_or(1);
             let what = match job.plan.get(step.saturating_sub(1)) {
@@ -1863,6 +1877,23 @@ mod tests {
 
     use aios_proto::Event;
     use crate::testing::events_of;
+
+    #[test]
+    fn every_prompt_starts_with_the_machine() {
+        let (mut e, _, _) = engine_with(vec![Move::Reply { text: "Hello!".into(), remember: None }], "machine-block");
+        e.handle("hi").unwrap();
+        let user = e.model.prompts.borrow()[0].user.clone();
+        assert!(user.starts_with("This machine: ") && user.contains("never install it again"), "{user}");
+    }
+
+    #[test]
+    fn what_the_ai_installs_is_recorded() {
+        let root = Action::RunCommand { argv: vec!["sudo".into(), "apt-get".into(), "install".into(), "-y".into(), "cowsay".into()] };
+        let (mut e, log_path) = engine_with_log(vec![housekeep(), plan(), act(1, root), done(run("true"))], "records-install");
+        e.handle_events("install cowsay").unwrap();
+        assert_eq!(crate::machine::installed(e.store.conn()).unwrap(), vec![("cowsay".to_string(), "apt".to_string())]);
+        let _ = std::fs::remove_file(&log_path);
+    }
 
     #[test]
     fn a_note_the_user_did_not_ask_for_is_not_kept() {

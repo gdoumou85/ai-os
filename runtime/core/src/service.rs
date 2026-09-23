@@ -80,11 +80,18 @@ fn skills_event(forget: Option<(&str, &str)>) -> Event {
         let c = rusqlite::Connection::open(db_path())?;
         c.busy_timeout(std::time::Duration::from_secs(5))?;
         crate::notes::init(&c)?;
+        crate::machine::init(&c)?;
         if let Some((nb, tp)) = forget { crate::notes::remove(&c, nb, tp)?; }
-        Ok(crate::notes::all(&c)?.into_iter().map(|(name, notes)| aios_proto::Notebook {
+        // What is on disk first, read-only (machine-map spec §4): kind `program` has no ✕.
+        let program = |topic: String, text: String| aios_proto::NoteView { topic, kind: "program".into(), text, uses: 0, failed: false, needs_check: false };
+        let mut entries: Vec<_> = crate::machine::apps_in(&executor::atspi::APP_DIRS).into_iter().map(|a| program(a.name, format!("open_app {}", a.id))).collect();
+        entries.extend(crate::machine::installed(&c)?.into_iter().map(|(p, via)| program(p, format!("installed by the AI with {via}"))));
+        let mut all = vec![aios_proto::Notebook { name: "installed on this computer".into(), entries }];
+        all.extend(crate::notes::all(&c)?.into_iter().map(|(name, notes)| aios_proto::Notebook {
             name,
             entries: notes.into_iter().map(|n| aios_proto::NoteView { topic: n.topic, kind: n.kind, text: n.text, uses: n.uses, failed: n.failed, needs_check: n.needs_check }).collect(),
-        }).collect())
+        }));
+        Ok(all)
     };
     match read() { Ok(notebooks) => Event::Skills { notebooks }, Err(e) => Event::Error { text: format!("could not read the notebooks: {e}") } }
 }
