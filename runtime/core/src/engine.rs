@@ -143,6 +143,13 @@ pub fn is_discard_learned(text: &str) -> bool { normalize(text) == "discard what
 /// `job.project` is the empty string — "Stopped the job in ." is not a sentence.
 /// What the model is told when its answer was not a move (the owner's LM Studio run, 2026-09-19:
 /// a thinking Qwen wrote `{"understood":…,"act":{…}}`, which the runner did not stop).
+/// A reply that says it is about to act. A question back ("I need to know…") is not one.
+// ponytail: phrase list, a small model's promises in English; widen it when a live one slips past.
+fn promises_work(text: &str) -> bool {
+    let t = text.to_lowercase().replace('’', "'");
+    ["i will ", "i'll ", "let me ", "i am going to ", "i'm going to ", "proceeding"].iter().any(|w| t.contains(w))
+}
+
 fn not_a_move(allowed: &[&str], error: &str) -> String {
     let moves = if allowed.is_empty() { String::new() } else { format!(", one of: {}", allowed.join(", ")) };
     format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\"{moves}.", error.chars().take(120).collect::<String>())
@@ -369,6 +376,19 @@ impl<M: Model> Engine<M> {
                 }
             }
             r => r?,
+        };
+        // A reply runs nothing. One that promises work ("I will…", "Let me proceed") left the
+        // owner waiting on nothing three times over; ask once more with only the working moves.
+        let mv = match mv {
+            Move::Reply { ref text, .. } if promises_work(text) => {
+                p.user.push_str("\n\nYour reply said you would do something, but a reply runs nothing. Do it now: start or housekeep.");
+                p.allowed = vec!["start", "housekeep"];
+                match self.model.next_move(&p) {
+                    Err(ModelError::BadJson(_)) => mv,
+                    r => r?,
+                }
+            }
+            mv => mv,
         };
         match mv {
             Move::Reply { text, remember } => {
@@ -882,6 +902,21 @@ mod tests {
         assert_eq!(out, vec!["A prime is…".to_string()]);
         assert!(e.open_job().unwrap().is_none());
         assert!(rec.calls.borrow().is_empty());
+    }
+
+    /// The owner's Blender chat: "do it", "proceed" — and each time a reply that said "I will…"
+    /// and ran nothing. A reply that promises work is asked again, with only the working moves.
+    #[test]
+    fn a_reply_that_promises_work_is_asked_again_as_work() {
+        let (mut e, _, _) = engine_with(vec![
+            Move::Reply { text: "Understood. I will now proceed with the following steps: 1) Register Blender.".into(), remember: None },
+            Move::Housekeep { goal: "note how to open Blender".into(), understood: "Noting Blender".into(), remember: None },
+        ], "promise-reply");
+        let _ = e.handle("proceed");
+        let prompts = e.model.prompts.borrow();
+        assert_eq!(prompts[1].allowed, vec!["start", "housekeep"]);
+        assert!(!e.store.recent_messages(4).unwrap().iter().any(|(_, t)| t.contains("I will now proceed")), "the promise was said");
+        assert!(e.open_job().unwrap().is_some(), "no job started");
     }
 
     #[test]
