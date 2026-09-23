@@ -54,8 +54,8 @@ impl Model for FakeModel {
     }
 }
 
-/// The context Ollama is asked for and the one the rest of the machine plans against: one number,
-/// so `ollama_body` and `context_tokens` can never drift apart.
+/// The context assumed until the Model card says otherwise. Ollama is asked for `loaded_context()`,
+/// the same number the rest of the machine plans against, so the two can never drift apart.
 const NUM_CTX: usize = 8192;
 
 /// What the model was actually loaded with. LM Studio and the cloud runners are never told a
@@ -187,7 +187,9 @@ pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
         "stream": false,
         "think": false,
         "format": narrow_schema(schema::value(), &prompt.allowed),
-        "options": { "temperature": 0.0, "num_ctx": NUM_CTX },
+        // Ollama loads the model at what each request asks for, so a fixed 8192 here undid the
+        // Model card's bar on every question (the owner, 2026-09-23).
+        "options": { "temperature": 0.0, "num_ctx": loaded_context() },
         "messages": [ { "role": "system", "content": prompt.system }, user ]
     })
 }

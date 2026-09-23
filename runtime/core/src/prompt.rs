@@ -37,7 +37,8 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], notebooks: &
         "Standing instructions:\n{}\n\nProjects:\n{}\n\nSkill notebooks: {}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk: it runs nothing, so when the user wants something done — 'do it', 'proceed' — start or housekeep instead), start (something to build and keep as files — code, documents, a site: give project, new_project, description, goal, creative, understood, and skills (0-3 craft areas the job belongs to — coding, web design, a program like blender — named from the notebooks listed or a new short name; [] for a plain errand)), or \
          housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked, a browser and the websites in it included; give goal, understood). \
          Pick an existing project name when the user means one. Set creative=true only if the user said to decide yourself. \
-         The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim.\n\nUser says: {}",
+         The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim. \
+         Asked to forget, or to wipe what you remember, reply that the Clear button at the top does it: you cannot, and it is no job.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, notebooks_txt, recent_txt, message
     );
     Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"], image: None }

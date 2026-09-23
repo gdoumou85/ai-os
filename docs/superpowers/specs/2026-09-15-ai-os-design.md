@@ -450,3 +450,15 @@ Two things the owner hit on his first full-access run.
   and a new one on the Stopped card — sends `clear`, the service deletes the messages and
   broadcasts `cleared`, and every rail empties its screen on it. Projects, notebooks and standing
   instructions stay. (v0.8.6)
+- **2026-09-23** ("I told it to not do a task it thought it should continue, yet it did"): after
+  a Clear, "Hello AI" was answered with the Blender plan. Clear kept the standing instructions, and
+  those held "(Noted for the future: …Blender… a Models folder)". "Clean your memories" had no move
+  that could: `remember` only adds. The local model picked `housekeep`, planned the old Blender work
+  from its notes, and noted one more. Clear now deletes the standing instructions too (projects and
+  notebooks stay), and the front door says a request to forget is a reply pointing to Clear.
+  Same day ("the context bar resets to 8k every time i open models"): three leaks. An update folded
+  the model choice back into the unit and deleted the drop-in, but not `AI_OS_CONTEXT`, so every
+  update reset it. A model button re-applied the size held when the card opened, not the bar as
+  moved. And Ollama was sent a fixed `num_ctx: 8192` on every request, which reloads the model at
+  8k whatever was set. The update keeps the size, the buttons read the bar, and Ollama is asked for
+  `AI_OS_CONTEXT`. (v0.8.7)
