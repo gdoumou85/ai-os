@@ -436,7 +436,7 @@ mod tests {
         let s = summarise_steps(&j);
         assert!(s.starts_with("steps 1-170: 153 ok, 17 failed\n"), "{s}");
         assert_eq!(s.lines().count(), 1 + 30);
-        assert!(s.contains("step 171: ran cmd170 ok") && s.contains("detail-199"), "{s}");
+        assert!(s.contains("step 171: ran cmd170 failed") && s.contains("detail-199"), "{s}");
     }
 
     /// I4: a big `write_file` step must not blow the prompt budget — the content is summarised

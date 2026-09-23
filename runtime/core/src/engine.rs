@@ -1828,10 +1828,13 @@ mod tests {
         for s in [write("BLUEPRINT.md"), Action::EditFile { path: "a.py".into(), find: "a".into(), replace: "b".into() }] {
             for f in desktop.iter().chain(elsewhere.iter()) { assert!(cleared(&s, f), "{s:?} should clear {f:?}"); }
         }
-        // A `read` and a plain command change nothing anyone can see: they clear nothing.
-        for s in [Action::Read { control: 1, from_line: None, lines: None }, run("ls")] {
-            for f in desktop.iter().chain(elsewhere.iter()) { assert!(!cleared(&s, f), "{s:?} must not clear {f:?}"); }
-        }
+        // A `read` changes nothing anyone can see: it clears nothing.
+        let read = Action::Read { control: 1, from_line: None, lines: None };
+        for f in desktop.iter().chain(elsewhere.iter()) { assert!(!cleared(&read, f), "{f:?}"); }
+        // A command that worked changed the machine: the commands may run again, the windows' own
+        // failures stay theirs.
+        for f in &elsewhere { assert!(cleared(&run("ls"), f), "{f:?}"); }
+        for f in &desktop { assert!(!cleared(&run("ls"), f), "{f:?}"); }
     }
 
     #[test]
