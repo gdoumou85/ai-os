@@ -221,7 +221,19 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                     Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
                     Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
                     // On this thread, like the Skills screen: a Clear during a job must not wait for it.
-                    Ok(Request::Clear {}) => match crate::store::Store::open(&db_path()).and_then(|s| s.forget_chat()) {
+                    // A job still open ends too, the way "stop" ends it: a question left waiting took
+                    // the next "Hi" as its answer and went on with the old project (the owner, 2026-09-23).
+                    Ok(Request::Clear {}) => match {
+                        // Being worked: the flag lands between steps. Idle (a question waiting): the
+                        // word ends it. Not both — the spare one says "Nothing is running now."
+                        let worked = sh.mirror.lock().unwrap().as_ref().map(|j| j.waiting == Waiting::None && sh.running.load(Ordering::SeqCst));
+                        match worked {
+                            Some(true) => stop.store(true, Ordering::SeqCst),
+                            Some(false) => if tx.send(Command::Say("stop".into())).is_err() { break; },
+                            None => {}
+                        }
+                        crate::store::Store::open(&db_path()).and_then(|s| s.forget_chat())
+                    } {
                         Ok(()) => sh.broadcast(&Event::Cleared {}),
                         Err(e) => sh.send_to(id, &Event::Error { text: format!("could not clear the chat: {e}") }),
                     },
