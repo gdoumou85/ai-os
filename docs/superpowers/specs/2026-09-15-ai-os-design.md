@@ -516,4 +516,4 @@ Two things the owner hit on his first full-access run.
   - Older step lines say what each step was ("ran ls -la /data/projects"), not just its kind.
   - A plan step out of range costs a replan, not one of the two fatal rejections.
   - The ask rules say to ask only what the user's words leave open, both before planning and
-    while working.
+    while working. (v0.9.3)
