@@ -271,6 +271,7 @@ mod tests {
 
     #[test]
     fn a_line_only_a_shell_reads_is_sent_back() {
+        let argv = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
         assert!(needs_a_shell(&argv("rm -rf /data/projects/*")));
         assert!(needs_a_shell(&argv("sudo rm -rf ~/projects")));
         assert!(needs_a_shell(&argv("ls -la | wc -l")));
