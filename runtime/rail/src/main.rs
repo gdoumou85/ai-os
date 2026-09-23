@@ -525,7 +525,7 @@ fn main() {
         // newest card, its Yes button, the entry — below the edge. The cards scroll inside it.
         let header = gtk::HeaderBar::new();
         let clear = gtk::Button::with_label("Clear");
-        clear.set_tooltip_text(Some("A clean start: the AI forgets the chat and what it was told to keep (projects, skills and a task still running stay)"));
+        clear.set_tooltip_text(Some("A clean start: the AI forgets the chat and what it was told to keep and stops a task still open (projects and skills stay)"));
         header.pack_start(&clear);
         let model_btn = gtk::Button::with_label("Model");
         model_btn.set_tooltip_text(Some("Switch the AI's model"));

@@ -27,16 +27,26 @@ fn join_instructions(instructions: &[String]) -> String {
     if instructions.is_empty() { "(none)".into() } else { instructions.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n") }
 }
 
+/// A project the message names: its whole name, or one word of it (4+ letters) — "the car rental
+/// site" names car-rental-broker. The front door listed every project, and a 9B greeted with "Hi"
+/// picked the only one and started work on it, whatever the prompt said (the owner, 2026-09-23).
+fn named_in(p: &ProjectRow, message: &str) -> bool {
+    let m = message.to_lowercase();
+    let name = p.name.to_lowercase();
+    m.contains(&name) || name.split(|c: char| !c.is_alphanumeric()).any(|w| w.len() >= 4 && m.contains(w))
+}
+
 pub fn front_door(instructions: &[String], projects: &[ProjectRow], notebooks: &[String], recent: &[(String, String)], message: &str) -> Prompt {
-    let projects_txt = if projects.is_empty() { "(none yet)".into() } else {
-        projects.iter().map(|p| format!("- {} — {}", p.name, p.description)).collect::<Vec<_>>().join("\n")
+    let named: Vec<&ProjectRow> = projects.iter().filter(|p| named_in(p, message)).collect();
+    let projects_txt = if named.is_empty() { "(none named)".into() } else {
+        named.iter().map(|p| format!("- {} — {}", p.name, p.description)).collect::<Vec<_>>().join("\n")
     };
     let notebooks_txt = if notebooks.is_empty() { "(none yet)".to_string() } else { notebooks.join(", ") };
     let recent_txt = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
     let user = format!(
-        "Standing instructions:\n{}\n\nProjects:\n{}\n\nSkill notebooks: {}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk: it runs nothing, so when the user wants something done — 'do it', 'proceed' — start or housekeep instead), start (something to build and keep as files — code, documents, a site: give project, new_project, description, goal, creative, understood, and skills (0-3 craft areas the job belongs to — coding, web design, a program like blender — named from the notebooks listed or a new short name; [] for a plain errand)), or \
+        "Standing instructions:\n{}\n\nProjects the user named:\n{}\n\nSkill notebooks: {}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk: it runs nothing, so when the user wants something done — 'do it', 'proceed' — start or housekeep instead), start (something to build and keep as files — code, documents, a site: give project, new_project, description, goal, creative, understood, and skills (0-3 craft areas the job belongs to — coding, web design, a program like blender — named from the notebooks listed or a new short name; [] for a plain errand)), or \
          housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked, a browser and the websites in it included; give goal, understood). \
-         Pick an existing project name when the user means one; never bring a project up yourself, the list is only for when the user names one. Set creative=true only if the user said to decide yourself. \
+         Pick a project listed there when the user means it. Set creative=true only if the user said to decide yourself. \
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim. \
          Asked to forget, or to wipe what you remember, reply that the Clear button at the top does it: you cannot, and it is no job.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, notebooks_txt, recent_txt, message
@@ -257,18 +267,26 @@ mod tests {
     fn front_door_carries_instructions_projects_and_last_exchanges_only() {
         let projects = vec![ProjectRow { name: "primes".into(), folder: "/p/primes".into(), description: "prime printer".into(), touched_at: 1 }];
         let recent = vec![("user".into(), "old".into()), ("assistant".into(), "older reply".into())];
-        let p = front_door(&instr(), &projects, &[], &recent, "add a menu");
+        let p = front_door(&instr(), &projects, &[], &recent, "add a menu to primes");
         assert!(p.system.contains("write it down"), "the memory rule must be in the system text");
         assert!(p.user.contains("always use python3"));
         assert!(p.user.contains("primes — prime printer"));
         assert!(p.user.contains("older reply"));
-        assert!(p.user.ends_with("add a menu"));
+        assert!(p.user.ends_with("add a menu to primes"));
         assert!(p.user.contains("reply") && p.user.contains("start") && p.user.contains("housekeep"), "front door names its three legal moves");
         assert!(p.user.contains("a browser and the websites in it included"), "the owner's website login was started as a project (2026-09-19)");
         // The live run's finding: "prepare a folder where all my projects will live from now on"
         // reached the job as "create a folder for project storage" — the standing half of the
         // request was summarised away at the door, and the job could not act on what it never saw.
         assert!(p.user.contains("The goal carries the whole of what the user asked for"), "{}", p.user);
+    }
+
+    #[test]
+    fn the_front_door_shows_only_the_projects_the_message_names() {
+        let car = vec![ProjectRow { name: "car-rental-broker".into(), folder: "/p/c".into(), description: "a website".into(), touched_at: 1 }];
+        assert!(!front_door(&[], &car, &[], &[], "Hi").user.contains("car-rental"), "a greeting brings up no project");
+        assert!(front_door(&[], &car, &[], &[], "carry on with the car rental site").user.contains("car-rental-broker — a website"));
+        assert!(front_door(&[], &car, &[], &[], "open car-rental-broker").user.contains("car-rental-broker — a website"));
     }
 
     #[test]

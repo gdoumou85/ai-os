@@ -224,6 +224,24 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
 }
 
 #[test]
+fn clear_ends_a_job_waiting_on_a_question() {
+    // The owner's run, 2026-09-23: Clear left the car-rental question waiting, and the next "Hi"
+    // went to it as the answer. Cleared or not (AI_OS_DB is one per process), the job must stop.
+    let dir = temp("clear-job");
+    let sock = start(&dir, vec![
+        Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: false, understood: "Starting p".into(), skills: vec![], remember: None },
+        Move::Ask { questions: vec!["Which stack?".into()], options: vec![] },
+    ], Arc::new(Mutex::new(None)));
+    let (mut r, mut w) = Client::connect(&sock).unwrap().split();
+    w.request(&aios_proto::Request::Say("make p".into())).unwrap();
+    while !matches!(r.next_event(), Some(Event::NeedsAnswer { .. }) | None) {}
+    w.request(&aios_proto::Request::Clear {}).unwrap();
+    let mut got = vec![];
+    while let Some(e) = r.next_event() { let end = matches!(e, Event::Stopped { .. }); got.push(e); if end { break; } }
+    assert!(matches!(got.last(), Some(Event::Stopped { .. })), "{got:?}");
+}
+
+#[test]
 fn a_message_while_only_a_chat_reply_is_in_progress_is_queued_not_busy() {
     let dir = temp("chat-queue");
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
