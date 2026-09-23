@@ -99,6 +99,10 @@ pub struct Job {
     /// The keys (`notebook/topic`) of those tips, so the learning turn can mark only what was shown.
     #[serde(default)]
     pub shown_notes: Vec<String>,
+    /// The first step taken under the current plan: a replan starts the failure counts and the
+    /// card's ticks afresh, since its step 2 is not the old step 2. `serde(default)`: I3.
+    #[serde(default)]
+    pub plan_from: usize,
 }
 
 impl Job {
@@ -116,7 +120,7 @@ impl Job {
             folder: folder.into(), new_project: false, request: String::new(),
             started_at: (millis / 1000) as u64,
             done_gated: 0,
-            skills: vec![], notes_block: String::new(), shown_notes: vec![],
+            skills: vec![], notes_block: String::new(), shown_notes: vec![], plan_from: 0,
         }
     }
 

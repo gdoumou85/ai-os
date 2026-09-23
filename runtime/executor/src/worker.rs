@@ -64,6 +64,9 @@ impl MachineWorker {
     fn path(&self, p: &str) -> PathBuf { self.workspace.join(p) }
 
     fn command(&self, argv: &[String]) -> Outcome {
+        if needs_a_shell(argv) {
+            return Outcome::err("not run: run_command runs the program directly, with no shell, so *, ~, $VAR, |, >, && and ; would reach it as plain text (rm -rf dir/* removes nothing and says ok). Send the whole line through a shell: [\"bash\", \"-c\", \"<the line>\"]");
+        }
         // The owner, 2026-09-20: he said "open blender", and the AI — which had installed Blender
         // itself an hour before and kept no note of it — set out to install it again. Nothing
         // tells a model what this machine already has, so the hand answers for it: a check costs
@@ -91,7 +94,12 @@ impl MachineWorker {
                 let (stdout, stderr) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
                 // Success: the start of the output is what matters. Failure: the END is where the
                 // reason lives (1b spec §3), so cut from the tail.
-                let cut = |s: &str| if ok { head(s, 500) } else { tail(s, 500) };
+                // Said when cut: 8 names of 25 read as all of them (review, 2026-09-23).
+                let cut = |s: &str| {
+                    let n = s.chars().count();
+                    let c = if ok { head(s, 500) } else { tail(s, 500) };
+                    if n > 500 { format!("{c} (cut: {} more chars)", n - 500) } else { c }
+                };
                 let code = o.status.code().unwrap_or(-1);
                 let timed = if code == 124 { " (stopped after 30 min)" } else { "" };
                 let detail = format!("exit {code}{timed}; stdout: {} stderr: {}", cut(&stdout), cut(&stderr));
@@ -204,6 +212,18 @@ pub fn installed(pkg: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Words only a shell reads. The hand runs argv as it is, so `rm -rf /data/projects/*` asked `rm`
+/// for a file named `*`, found none, and said ok (review, 2026-09-23). A shell of its own
+/// (`bash -c`) is left alone, and so is a pattern a program reads itself (`find -name '*.py'`).
+/// ponytail: `*` is caught only for the file commands where it is always meant as a glob.
+pub(crate) fn needs_a_shell(argv: &[String]) -> bool {
+    let program = argv.iter().map(String::as_str).find(|a| *a != "sudo").unwrap_or("");
+    if matches!(program, "bash" | "sh") { return false; }
+    let files = matches!(program, "rm" | "ls" | "cp" | "mv" | "chmod" | "chown" | "cat" | "du" | "touch" | "mkdir" | "rmdir" | "tar" | "zip");
+    argv.iter().any(|a| matches!(a.as_str(), "|" | "||" | "&&" | ";" | ">" | ">>" | "<" | "2>&1" | "&" | "~")
+        || a.starts_with("~/") || a.starts_with('$') || (files && a.contains('*')))
+}
+
 /// Last `n` chars of `s` — for failures the reason is at the end of the output, not the start.
 pub(crate) fn tail(s: &str, n: usize) -> String {
     let count = s.chars().count();
@@ -215,10 +235,15 @@ pub(crate) fn head(s: &str, n: usize) -> String { s.chars().take(n).collect() }
 /// numbered lines so the model can quote exact passages back in `edit_file`.
 pub(crate) fn window(text: &str, from_line: Option<usize>, lines: Option<usize>) -> String {
     match (from_line, lines) {
-        (None, None) => head(text, 2000),
+        (None, None) => match text.chars().count() {
+            n if n > 2000 => format!("{} (cut: {} more chars; the file has {} lines, read on with from_line)", head(text, 2000), n - 2000, text.lines().count()),
+            _ => head(text, 2000),
+        },
         _ => {
             let start = from_line.unwrap_or(1).max(1);
             let n = lines.unwrap_or(200).min(200);
+            let total = text.lines().count();
+            if start > total { return format!("(the file has {total} lines; nothing from line {start})"); }
             text.lines().enumerate()
                 .skip(start - 1).take(n)
                 .map(|(i, l)| format!("{}: {l}\n", i + 1))
@@ -242,6 +267,20 @@ mod tests {
         assert_eq!(opens_a_window(&argv("ls -la")), None);
         assert_eq!(opens_a_window(&argv("./run")), None, "a path is not a desktop name");
         assert_eq!(opens_a_window(&[]), None);
+    }
+
+    #[test]
+    fn a_line_only_a_shell_reads_is_sent_back() {
+        assert!(needs_a_shell(&argv("rm -rf /data/projects/*")));
+        assert!(needs_a_shell(&argv("sudo rm -rf ~/projects")));
+        assert!(needs_a_shell(&argv("ls -la | wc -l")));
+        assert!(needs_a_shell(&argv("echo x > f")));
+        assert!(!needs_a_shell(&argv("rm -rf /data/projects/a")));
+        assert!(!needs_a_shell(&argv("find . -name *.py")), "find reads its own pattern");
+        assert!(!needs_a_shell(&["bash".into(), "-c".into(), "rm -rf /data/projects/*".into()]));
+        let w = MachineWorker { workspace: std::env::temp_dir() };
+        let o = w.run(&Action::RunCommand { argv: argv("rm -rf /nonexistent-aios/*") });
+        assert!(!o.ok && o.detail.contains("bash"), "{}", o.detail);
         // The entry is the gate: a name with no desktop file runs as written.
         assert!(crate::atspi::desktop_entry("no-such-program-anywhere").is_none());
     }

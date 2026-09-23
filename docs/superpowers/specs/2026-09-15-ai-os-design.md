@@ -502,3 +502,18 @@ Two things the owner hit on his first full-access run.
   `rm -rf` and `mkdir -p`. The file hand says "wrote a file of N bytes at <path>", not
   "written". An `act` for a plan step that does not exist is rejected. A working job asks only
   what the user's words and answers leave open.
+- **2026-09-23**, the same run and a review of the whole engine for the same kind of fault:
+  - A project the user places ("my site is in ~/work/site") is registered in that folder:
+    `start` takes an optional `folder`. A known project whose folder is gone gets it made again.
+  - `run_command` has no shell, so `rm -rf dir/*` removed nothing and still said ok. A command
+    with `*` (for file commands), `~`, `$`, `|`, `>`, `&&` or `;` is sent back with "use
+    bash -c", and the rules say so.
+  - Cut output says it was cut, and a `read_file` past the end says how long the file is.
+  - A command that works clears earlier command failures, so installing what was missing and
+    running again is a retry, not a refusal.
+  - Failure counts and the card's ticks restart with each plan (`plan_from`).
+  - A write, edit or setting is never a `done` check.
+  - Older step lines say what each step was ("ran ls -la /data/projects"), not just its kind.
+  - A plan step out of range costs a replan, not one of the two fatal rejections.
+  - The ask rules say to ask only what the user's words leave open, both before planning and
+    while working.

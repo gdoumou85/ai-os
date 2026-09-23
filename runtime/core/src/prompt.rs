@@ -8,15 +8,15 @@ pub const SYSTEM: &str = "You are the AI that runs this computer for its user. Y
 Rules:
 - You act only through moves; the executor runs them and reports back. Never claim something ran unless the report says so.
 - You have full access to this computer: every folder, the whole network, and root through `sudo` (it never asks for a password). Nobody is asked before you act: take the step yourself, never wait for permission and never ask for it.
-- You cannot know the full scope of what the user imagines. When starting work, ask what you need to know (1-3 questions) unless the job is in creative mode; then decide yourself. The user answers by clicking: give each question 2-4 short likely answers in options (options[i] for questions[i]), and leave its list empty only when the answer is theirs alone, like a name.
+- You cannot know the full scope of what the user imagines. When starting work, ask what you need to know (1-3 questions, only what the user's words leave open) unless the job is in creative mode; then decide yourself. A plain order ("delete X", "install Y") leaves nothing open: do it. The user answers by clicking: give each question 2-4 short likely answers in options (options[i] for questions[i]), and leave its list empty only when the answer is theirs alone, like a name.
 - Say what you understood before you act.
 - Work from the project's BLUEPRINT.md: read it to find what to change and where. After each change, update BLUEPRINT.md in place (replace lines, never pile on; keep it as small as possible). Create it first for a new project.
 - Edit code in place with edit_file (quote the exact passage). Use write_file only for new files. Use read_file with from_line/lines to read the part you need.
-- A step that failed once will fail again. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
+- A step that failed once will fail again unless something changed since. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
 - If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction — only what the user said is to hold from now on). You will not see this conversation again.
 - Never install what is already there: *This machine* lists what is installed; use it. For anything it does not list, `run_command <program> --help` answers in a second; an install takes minutes.
-- Install, remove and set up software with run_command: `sudo apt-get install -y …`, `sudo apt-get remove -y …`, `sudo systemctl …`; language packages with pip (into the working directory's .venv), npm or cargo. Install a program so it can be found again: `sudo apt-get install -y`, else `sudo snap install`, else `flatpak install -y flathub`. Never leave a loose download of a program (an AppImage, an unpacked archive; never a project): put it under /opt/<name> and write its launcher to /usr/local/share/applications/<name>.desktop. Make folders with `run_command mkdir -p`.
+- Install, remove and set up software with run_command: `sudo apt-get install -y …`, `sudo apt-get remove -y …`, `sudo systemctl …`; language packages with pip (into the working directory's .venv), npm or cargo. Install a program so it can be found again: `sudo apt-get install -y`, else `sudo snap install`, else `flatpak install -y flathub`. Never leave a loose download of a program (an AppImage, an unpacked archive; never a project): put it under /opt/<name> and write its launcher to /usr/local/share/applications/<name>.desktop. Make folders with `run_command mkdir -p`. run_command runs the program directly, with no shell: for *, ~, $VAR, pipes, > or &&, send ["bash","-c","<the line>"].
 - read_file, write_file and edit_file take relative or absolute paths; a file only root may write is written for you. Where projects live is changed with `set_setting`, only when the user asks for it.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project; so is using a program or a website for the user (opening it, clicking, filling it in). A project is something you build and keep as files.
 - Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`.
@@ -46,7 +46,7 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], notebooks: &
     let user = format!(
         "Standing instructions:\n{}\n\nProjects the user named:\n{}\n\nSkill notebooks: {}\n\nRecent exchange:\n{}\n\nLegal moves now: reply (just talk: it runs nothing, so when the user wants something done — 'do it', 'proceed' — start or housekeep instead), start (something to build and keep as files — code, documents, a site: give project, new_project, description, goal, creative, understood, and skills (0-3 craft areas the job belongs to — coding, web design, a program like blender — named from the notebooks listed or a new short name; [] for a plain errand)), or \
          housekeep (the machine itself: folders, settings, tools, or a program on the desktop — a window the user named, or one you open yourself to do what was asked, a browser and the websites in it included; give goal, understood). \
-         Pick a project listed there when the user means it. Set creative=true only if the user said to decide yourself. \
+         Pick a project listed there when the user means it; when the user says where a project is, give that absolute path as folder. Set creative=true only if the user said to decide yourself. \
          The goal carries the whole of what the user asked for, including what is to hold from now on — the job reads it verbatim. \
          Asked to forget, or to wipe what you remember, reply that the Clear button at the top does it: you cannot, and it is no job.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, notebooks_txt, recent_txt, message
@@ -100,24 +100,33 @@ pub(crate) fn compact_action(action: &Action) -> String {
     }
 }
 
-/// Last 6 steps in full (but compact — see `compact_action`); the 30 before them one line each;
+/// Last 6 steps in full (but compact — see `compact_action`); the 24 before them one line each;
 /// anything older a count (budget, parent §4.3): a job may run 200 steps, and 200 one-liners
 /// would take a fifth of an 8k context.
 pub fn summarise_steps(job: &Job) -> String {
     let n = job.steps.len();
     let mut out = String::new();
-    let old = n.saturating_sub(36);
+    let old = n.saturating_sub(30);
     if old > 0 {
         let failed = job.steps[..old].iter().filter(|s| !s.ok).count();
         out.push_str(&format!("steps 1-{old}: {} ok, {failed} failed\n", old - failed));
     }
     for (i, s) in job.steps.iter().enumerate().skip(old) {
-        let kind = serde_json::to_value(&s.action).ok().and_then(|v| v["kind"].as_str().map(String::from)).unwrap_or_default();
         let status = if s.ok { "ok" } else { "failed" };
         if i + 6 < n {
-            out.push_str(&format!("step {}: {kind} {status}\n", i + 1));
+            // What it was, not only its kind: "step 9: run_command ok" left the model guessing
+            // which folder it had listed (review, 2026-09-23). Capped for the 8k budget.
+            let what: String = crate::event::describe(&s.action).chars().take(40).collect();
+            out.push_str(&format!("step {}: {what} {status}\n", i + 1));
         } else {
-            out.push_str(&format!("step {} (plan step {}): {} -> {status}: {}\n", i + 1, s.plan_step, compact_action(&s.action), s.detail));
+            // The newest step in full; the five before it shorter (the 8k budget): a failure's
+            // reason is at the end of its output, a success's news at the start.
+            let (action, detail) = if i + 1 == n { (compact_action(&s.action), s.detail.clone()) } else {
+                let d = s.detail.chars().count();
+                (compact_action(&s.action).chars().take(200).collect(),
+                 if s.ok { s.detail.chars().take(250).collect() } else { s.detail.chars().skip(d.saturating_sub(250)).collect() })
+            };
+            out.push_str(&format!("step {} (plan step {}): {action} -> {status}: {detail}\n", i + 1, s.plan_step));
         }
     }
     if out.is_empty() { "(nothing done yet)".into() } else { out }
@@ -144,7 +153,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
     // `ask` was in the grammar while working but not in these words, so a plan step "ask the user
     // whether…" became a file of questions written twice, and the job gave up (the owner, 2026-09-23).
     let hint = match job.state {
-        State::Asking => "Legal moves now: ask (1-3 questions) or plan (if you have no questions). A question for the user is an ask, never a plan step.",
+        State::Asking => "Legal moves now: ask (1-3 questions, only what the user's words above leave open) or plan (if they leave nothing open). A question for the user is an ask, never a plan step.",
         State::Planning => "Legal moves now: plan. Give 2-8 short steps in plain words.",
         _ if job.creative => "Legal moves now: act (one action for the plan step it serves), replan, done (with a check action), give_up (say what was missing).",
         _ => "Legal moves now: act (one action for the plan step it serves), ask (only what the user's words and answers above leave open, and only the user can answer: the job waits for them; never write questions into a file), replan, done (with a check action), give_up (say what was missing).",
@@ -244,7 +253,10 @@ mod tests {
         let tools: Vec<String> = (0..16).map(|i| format!("tool{i}")).collect();
         let mine: Vec<(String, String)> = (0..10).map(|i| (format!("package-{i}"), "apt".into())).collect();
         let machine = crate::machine::block(&"s".repeat(150), &apps, &tools, &mine);
-        let tokens = (p.system.len() + p.user.len() + machine.len()) / 4;
+        // And where things are, with its ten projects (engine::places).
+        let places = format!("Where things are: the user's home is /home/{0}; projects live in /data/{0} (the projects_root setting); projects so far: {1}; the scratch folder for housekeeping is /data/housekeeping.",
+            "u".repeat(20), (0..10).map(|i| format!("project-name-{i} (/data/projects/project-name-{i})")).collect::<Vec<_>>().join(", "));
+        let tokens = (p.system.len() + p.user.len() + machine.len() + places.len()) / 4;
         assert!(tokens < 6500, "about {tokens} tokens");
     }
 
@@ -407,7 +419,7 @@ mod tests {
             j.steps.push(StepRecord { plan_step: 1, action: Action::RunCommand { argv: vec![format!("cmd{i}")] }, ok: i != 2, detail: format!("detail-{i}") });
         }
         let s = summarise_steps(&j);
-        assert!(s.contains("step 3: run_command failed"), "{s}");
+        assert!(s.contains("step 3: ran cmd2 failed"), "{s}");
         assert!(!s.contains("detail-2"), "old details are dropped: {s}");
         assert!(s.contains("detail-8"), "recent details are kept: {s}");
         let big = "x".repeat(10_000);
@@ -422,9 +434,9 @@ mod tests {
             j.steps.push(StepRecord { plan_step: 1, action: Action::RunCommand { argv: vec![format!("cmd{i}")] }, ok: i % 10 != 0, detail: format!("detail-{i}") });
         }
         let s = summarise_steps(&j);
-        assert!(s.starts_with("steps 1-164: 147 ok, 17 failed\n"), "{s}");
-        assert_eq!(s.lines().count(), 1 + 36);
-        assert!(s.contains("step 165: run_command") && s.contains("detail-199"));
+        assert!(s.starts_with("steps 1-170: 153 ok, 17 failed\n"), "{s}");
+        assert_eq!(s.lines().count(), 1 + 30);
+        assert!(s.contains("step 171: ran cmd170 ok") && s.contains("detail-199"), "{s}");
     }
 
     /// I4: a big `write_file` step must not blow the prompt budget — the content is summarised

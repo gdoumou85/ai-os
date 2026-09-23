@@ -50,7 +50,7 @@ fn until(c: &mut Client, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
 
 fn write(p: &str) -> Action { Action::WriteFile { path: p.into(), contents: "x".into() } }
 fn job() -> Vec<Move> { vec![
-    Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), skills: vec![], remember: None },
+    Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: true, understood: "Starting p".into(), skills: vec![], remember: None, folder: None },
     Move::Plan { steps: vec!["write".into()] },
     Move::Act { step: 1, action: write("BLUEPRINT.md") },
     Move::Done { summary: "finished".into(), check: Action::RunCommand { argv: vec!["true".into()] } },
@@ -231,7 +231,7 @@ fn clear_ends_a_job_waiting_on_a_question() {
     // went to it as the answer. Cleared or not (AI_OS_DB is one per process), the job must stop.
     let dir = temp("clear-job");
     let sock = start(&dir, vec![
-        Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: false, understood: "Starting p".into(), skills: vec![], remember: None },
+        Move::Start { project: "p".into(), new_project: true, description: "d".into(), goal: "g".into(), creative: false, understood: "Starting p".into(), skills: vec![], remember: None, folder: None },
         Move::Ask { questions: vec!["Which stack?".into()], options: vec![] },
     ], Arc::new(Mutex::new(None)));
     let (mut r, mut w) = Client::connect(&sock).unwrap().split();

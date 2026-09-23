@@ -36,6 +36,10 @@ pub enum Move {
         skills: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember: Option<String>,
+        /// Where the project is, when the user said so ("my site is in ~/work/site"): it is
+        /// registered there, made if missing, and the job works in it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
     },
     Housekeep {
         goal: String,
