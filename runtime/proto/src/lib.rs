@@ -74,6 +74,8 @@ pub enum Event {
     State { job: Option<JobState> },
     /// The service could not read a client line. Sent to that client only.
     Error { text: String },
+    /// The chat was forgotten (a `clear`): every client empties its screen.
+    Cleared {},
 }
 
 impl Event {
@@ -98,6 +100,8 @@ pub enum Request {
     #[serde(rename = "skills")] Skills {},
     /// The Skills screen's ✕ on one entry.
     #[serde(rename = "forget")] Forget { notebook: String, topic: String },
+    /// Clear: the AI forgets the chat, and every client empties its screen on `Cleared`.
+    #[serde(rename = "clear")] Clear {},
 }
 
 /// One connection: a writer half and a line-reader half over the same socket. `split` hands the

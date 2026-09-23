@@ -11,9 +11,9 @@ The AI OS is an assistant that does jobs on this computer for you. You tell it w
 • <b>Ask for a job</b> ("make me a script that renames my photos by date") and it starts a project. It may ask you one to three questions first, then says what it understood and gets to work.
 • <b>Say "you decide"</b> when you don't want questions: it makes the choices itself.
 • <b>Tell it something to keep</b> ("always use Python 3", "my projects go under Work") and it remembers it for every job after.
-• <b>"stop"</b> stops the job it is working on. So does the red <b>Stop</b> button at the top.
+• <b>"stop"</b> stops the job it is working on. So does the red <b>Stop</b> button at the top. The chat stays, so you can say what you want differently. To start clean instead, press <b>Clear</b> on the Stopped card.
 
-The AI does not remember the chat itself. What is worth keeping it writes down: in each project's notes, and in the things you told it to keep.
+The AI remembers only the last few messages of the chat, and forgets them when you press Clear. What is worth keeping it writes down: in each project's notes, and in the things you told it to keep.
 
 
 <big><b>The cards</b></big>
@@ -28,7 +28,7 @@ While the AI is working, the circle at the bottom turns and the line beside it s
 
 <big><b>The buttons at the top</b></big>
 
-• <b>Clear</b> empties the chat. A job still running and a question still waiting stay.
+• <b>Clear</b> empties the chat and the AI forgets it: a clean start. Your projects, skills and the things you told it to keep stay; name a project to go back to it. A job still running and a question still waiting stay.
 • <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop a job first. Your cloud accounts are there too. The same card has a bar, <b>How much it can hold</b>: move it to the context length you loaded the model with and press Set. The AI assumes 8k until you tell it otherwise, and on a bigger model that means it reads less of a window than it could.
 • <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
 • <b>Skills</b> shows what the AI has learned, and a way to delete it (see Skills below).

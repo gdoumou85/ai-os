@@ -431,7 +431,7 @@ fn render(card: &Card, say: &Sender<Request>, entry: &gtk::Entry) -> gtk::Widget
     }
     if !card.buttons.is_empty() {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        for btn in &card.buttons { let w = gtk::Button::with_label(&btn.label); let s = say.clone(); let t = btn.say.clone(); w.connect_clicked(move |_| { let _ = s.send(Request::Say(t.clone())); }); row.append(&w); }
+        for btn in &card.buttons { let w = gtk::Button::with_label(&btn.label); let s = say.clone(); let t = btn.say.clone(); w.connect_clicked(move |_| { let _ = s.send(if t == aios_rail::cards::CLEAR { Request::Clear {} } else { Request::Say(t.clone()) }); }); row.append(&w); }
         b.append(&row);
     }
     b.upcast()
@@ -513,7 +513,7 @@ fn main() {
         // newest card, its Yes button, the entry — below the edge. The cards scroll inside it.
         let header = gtk::HeaderBar::new();
         let clear = gtk::Button::with_label("Clear");
-        clear.set_tooltip_text(Some("Clear the chat (a task still running stays)"));
+        clear.set_tooltip_text(Some("Clear the chat: the AI forgets it too (a task still running stays)"));
         header.pack_start(&clear);
         let model_btn = gtk::Button::with_label("Model");
         model_btn.set_tooltip_text(Some("Switch the AI's model"));
@@ -602,12 +602,9 @@ fn main() {
         });
         let s_stop = say.clone();
         stop.connect_clicked(move |_| { let _ = s_stop.send(Request::Say("stop".into())); });
-        let (cards3, widgets3, column3, say3, entry3) = (cards.clone(), widgets.clone(), column.clone(), say.clone(), entry.clone());
-        clear.connect_clicked(move |_| {
-            cards3.borrow_mut().clear();
-            for w in widgets3.borrow_mut().drain(..) { column3.remove(&w); }
-            for c in &cards3.borrow().list { let w = render(c, &say3, &entry3); column3.append(&w); widgets3.borrow_mut().push(w); }
-        });
+        // The screen empties when the service says `cleared`, so every open rail does.
+        let s_clear = say.clone();
+        clear.connect_clicked(move |_| { let _ = s_clear.send(Request::Clear {}); });
 
         let s = say.clone();
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(Request::Say(t)); e.set_text(""); } });
@@ -641,6 +638,10 @@ fn main() {
                         }
                         // `apply` on its own line: the RefMut must end before `render` borrows.
                         let changes = cards2.borrow_mut().apply(&ev);
+                        if let Event::Cleared {} = ev {
+                            for w in widgets2.borrow_mut().drain(..) { column2.remove(&w); }
+                            for c in &cards2.borrow().list { let w = render(c, &say2, &entry2); column2.append(&w); widgets2.borrow_mut().push(w); }
+                        }
                         for ch in changes {
                             match ch {
                                 Change::Added(i) => { let w = render(&cards2.borrow().list[i], &say2, &entry2); column2.append(&w); widgets2.borrow_mut().push(w); }

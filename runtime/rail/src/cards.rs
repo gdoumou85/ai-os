@@ -43,7 +43,7 @@ pub fn busy_after(ev: &Event) -> Option<bool> {
         | Event::Error { .. } | Event::Learned { .. } => Some(false),
         // A slow local model can take minutes for the learning turn after Done/Failed, so the
         // spinner keeps turning until the Learned that always follows (engine.rs `learn`) stops it.
-        Event::Done { .. } | Event::Failed { .. } | Event::Busy { .. } | Event::State { .. } | Event::Skills { .. } => None,
+        Event::Done { .. } | Event::Failed { .. } | Event::Busy { .. } | Event::State { .. } | Event::Skills { .. } | Event::Cleared {} => None,
     }
 }
 
@@ -63,6 +63,8 @@ fn btn(label: &str, say: &str) -> Button { Button { label: label.into(), say: sa
 
 const KEEP: &str = "keep what you learned";
 const DISCARD: &str = "discard what you learned";
+/// The Stopped card's Clear: not words for the AI, the rail sends a `clear` request for it.
+pub const CLEAR: &str = "clear the chat";
 
 fn result_card(kind: CardKind, text: &str, files: &[ChangedFile], job_id: &str) -> Card {
     Card {
@@ -113,7 +115,14 @@ impl Cards {
                 ch
             }
             Event::Failed { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Failed { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
-            Event::Stopped { job_id, text, files } => { let mut ch = self.close_building(); ch.extend(self.push(result_card(CardKind::Stopped { text: text.clone(), files: files.clone() }, text, files, job_id))); ch }
+            Event::Stopped { job_id, text, files } => {
+                let mut ch = self.close_building();
+                let mut card = result_card(CardKind::Stopped { text: text.clone(), files: files.clone() }, text, files, job_id);
+                // Stop keeps the chat, to say it again differently; this starts clean.
+                card.buttons.push(btn("Clear", CLEAR));
+                ch.extend(self.push(card));
+                ch
+            }
             Event::Learned { job_id, lines, pending } => {
                 // Keep/Discard act on whatever waits now, and every learning turn drops what the one
                 // before left waiting: an older card's buttons would keep an entry nobody read there.
@@ -145,6 +154,8 @@ impl Cards {
             }
             // The Skills screen is its own window (main.rs), not a card.
             Event::Skills { .. } => vec![],
+            // The whole column is redrawn (main.rs), not one card.
+            Event::Cleared {} => { self.clear(); vec![] }
             Event::Busy { text, .. } | Event::Error { text } => vec![Change::Line(text.clone())],
             Event::State { job: None } => vec![],
             Event::State { job: Some(st) } => self.rebuild(st),

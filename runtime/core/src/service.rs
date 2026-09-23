@@ -213,6 +213,11 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                     }
                     Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
                     Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
+                    // On this thread, like the Skills screen: a Clear during a job must not wait for it.
+                    Ok(Request::Clear {}) => match crate::store::Store::open(&db_path()).and_then(|s| s.forget_chat()) {
+                        Ok(()) => sh.broadcast(&Event::Cleared {}),
+                        Err(e) => sh.send_to(id, &Event::Error { text: format!("could not clear the chat: {e}") }),
+                    },
                     Err(_) => sh.send_to(id, &Event::Error { text: "could not read that message".into() }),
                 }
             }
