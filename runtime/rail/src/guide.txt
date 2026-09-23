@@ -15,6 +15,8 @@ The AI OS is an assistant that does jobs on this computer for you. You tell it w
 
 The AI remembers only the last few messages of the chat. What is worth keeping it writes down: in each project's notes, and in the things you told it to keep (it shows these as "Noted for the future"). Clear forgets the chat and those notes; the AI cannot forget them itself, so asking it to just points you to Clear.
 
+<b>What the AI knows about this computer.</b> Before every answer it looks at what is installed: the programs you can open, the usual tools, and whatever it installed itself. So it uses them rather than installing them again, and you never need to tell it "Blender is already installed". When it does install something, it installs it the standard way so it shows up next time. The list is at the top of <b>Skills</b>, under <b>Installed on this computer</b>. Clear does not touch it: it is what is on the computer, not something the AI remembers.
+
 
 <big><b>The cards</b></big>
 
@@ -31,7 +33,7 @@ While the AI is working, the circle at the bottom turns and the line beside it s
 • <b>Clear</b> is a clean start: the AI forgets the chat and the things you told it to keep. Your projects and skills stay; name a project to go back to it. A job still running and a question still waiting stay.
 • <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop a job first. Your cloud accounts are there too. The same card has a bar, <b>How much it can hold</b>: move it to the context length you loaded the model with, then press Set, or press a model and it switches with that size. The bar shows the size in use each time you open the card, and an update keeps it. The AI assumes 8k until you tell it otherwise, and on a bigger model that means it reads less of a window than it could. With Ollama the model is loaded at that size, so set it only as high as your graphics card's memory allows.
 • <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
-• <b>Skills</b> shows what the AI has learned, and a way to delete it (see Skills below).
+• <b>Skills</b> shows what is installed on this computer and what the AI has learned, with a way to delete a lesson (see Skills below).
 • <b>Help</b> opens this guide.
 • <b>Stop</b> shows up only while a job runs.
 
@@ -53,7 +55,7 @@ After a job that worked, the AI writes down what it would want to know straight 
 • <b>A notebook per craft</b>, like "blender" or "web design": ways of doing things that worked, mistakes and how they were fixed, and what you liked. It reads one when a job is in that area.
 
 The Done card says what it learned ("Learned: open a website"). If it learned something that changes the computer, like installing a program, it asks first and shows what it would keep and the steps that did it: press <b>Keep</b> or <b>Discard</b>. Only the newest one waits: if you answer neither, the next job drops it.
-Press <b>Skills</b> at the top to read the notebooks and delete anything with ✕. A tip that stopped working is marked, and the AI fixes or removes it the next time.
+Press <b>Skills</b> at the top to read the notebooks and delete anything with ✕. <b>Installed on this computer</b>, the first list, has no ✕: it shows what is on the computer, and changes when a program is installed or removed. A tip that stopped working is marked, and the AI fixes or removes it the next time.
 
 
 <big><b>The AI model: its brain</b></big>

@@ -15,8 +15,8 @@ Rules:
 - A step that failed once will fail again. Read the reason and do something different, or replan. A step that already succeeded is done: read its result in the steps above and move on, never repeat it. Only give_up as a last resort, and say what was missing.
 - You are done only when a check proves it: done must carry a check action whose success is the proof.
 - If something is worth remembering, write it down (BLUEPRINT.md, or `remember` for a standing instruction — only what the user said is to hold from now on). You will not see this conversation again.
-- Never install what is already there: this machine has had programs installed on it before, some by you. `run_command <program> --help` answers in a second; an install takes minutes.
-- Install, remove and set up software with run_command: `sudo apt-get install -y …`, `sudo apt-get remove -y …`, `sudo systemctl …`; language packages with pip (into the working directory's .venv), npm or cargo. Make folders with `run_command mkdir -p`.
+- Never install what is already there: *This machine* lists what is installed; use it. For anything it does not list, `run_command <program> --help` answers in a second; an install takes minutes.
+- Install, remove and set up software with run_command: `sudo apt-get install -y …`, `sudo apt-get remove -y …`, `sudo systemctl …`; language packages with pip (into the working directory's .venv), npm or cargo. Install a program so it can be found again: `sudo apt-get install -y`, else `sudo snap install`, else `flatpak install -y flathub`. Never leave a loose download (an AppImage, an unpacked archive): put it under /opt/<name> and write its launcher to /usr/local/share/applications/<name>.desktop. Make folders with `run_command mkdir -p`.
 - The project's own files are named relative to the working directory (`BLUEPRINT.md`, `src/main.py`). read_file, write_file and edit_file take any absolute path too; a file only root may write is written for you. Where projects live is changed with `set_setting`.
 - The machine's own layout, settings and installed tools are housekeeping (`housekeep`), not a project; so is using a program or a website for the user (opening it, clicking, filling it in). A project is something you build and keep as files.
 - Programs on the desktop are worked through their controls, never through run_command: `look` with no window lists the open windows; `look` with a window lists its controls with ids (narrow with find); `press` a control by its id and name; `type` text into a control by id; `read` a text control by id; `open_app` opens a program by its desktop name (like org.gnome.TextEditor), on the visible display only if the user asked to see it. Look before you act and look again after; ids come from the latest look. A control that reports it has no action to press is a wrapper and the refusal names the control to press instead: press that one, do not look for another way. A program's own commands — save, print, find — may not be in the window itself: look for its menu or menu button, press it, look again, and press the command in the menu that opened. A control with no name of its own is listed by its keyboard shortcut and that shortcut is its name, so `Ctrl+S` is the one that saves. What a window shows is proven with `read` or `look`.
@@ -227,7 +227,12 @@ mod tests {
         j.steps = (0..40).map(|_| StepRecord { plan_step: 1, action: Action::RunCommand { argv: vec!["x".repeat(1000)] }, ok: true, detail: "d".repeat(500) }).collect();
         let instructions: Vec<String> = (0..5).map(|_| "i".repeat(200)).collect();
         let p = job_turn(&instructions, &j, Some(&"b".repeat(4000)), Some(&"l".repeat(2000)));
-        let tokens = (p.system.len() + p.user.len()) / 4;
+        // The engine puts the machine in front of every turn: its fullest form counts too.
+        let apps: Vec<crate::machine::App> = (0..80).map(|i| crate::machine::App { id: format!("org.example.Application{i}"), name: format!("Application {i}") }).collect();
+        let tools: Vec<String> = (0..16).map(|i| format!("tool{i}")).collect();
+        let mine: Vec<(String, String)> = (0..10).map(|i| (format!("package-{i}"), "apt".into())).collect();
+        let machine = crate::machine::block(&"s".repeat(150), &apps, &tools, &mine);
+        let tokens = (p.system.len() + p.user.len() + machine.len()) / 4;
         assert!(tokens < 6500, "about {tokens} tokens");
     }
 

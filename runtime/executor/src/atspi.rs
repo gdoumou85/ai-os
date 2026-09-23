@@ -88,7 +88,7 @@ fn role_name(role: u32) -> &'static str {
 /// named, as user `ai`, outside the sandbox — `open_app` is the one action that starts a program.
 /// Snap and Flatpak keep theirs under `/var/lib`, owned by root: Ubuntu's Firefox is a snap, and
 /// without them the owner's run found no Firefox and tried to install one.
-const APP_DIRS: [&str; 4] = ["/usr/share/applications", "/usr/local/share/applications",
+pub const APP_DIRS: [&str; 4] = ["/usr/share/applications", "/usr/local/share/applications",
     "/var/lib/snapd/desktop/applications", "/var/lib/flatpak/exports/share/applications"];
 
 /// The desktop entry `name` has, if it has one: the entry itself or a snap's `<name>_<name>`.

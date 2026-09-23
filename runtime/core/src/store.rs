@@ -37,6 +37,7 @@ impl Store {
         // works (Phase 3 §6): wait for the other side's write rather than fail on a locked file.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         crate::notes::init(&conn)?;
+        crate::machine::init(&conn)?;
         Ok(Self { conn })
     }
 
