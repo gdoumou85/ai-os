@@ -93,6 +93,9 @@ pub fn running() -> Vec<String> {
     v
 }
 
+/// Whether the program `name` runs now (the watchers' scheduler keeps theirs up).
+pub fn is_running(name: &str) -> bool { safe(name).ok().and_then(|n| live_pid(&n)).is_some() }
+
 #[cfg(test)]
 mod tests {
     use super::*;

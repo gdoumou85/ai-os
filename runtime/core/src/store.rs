@@ -16,7 +16,7 @@ pub struct ProjectRow { pub name: String, pub folder: String, pub description: S
 /// so these tables are named `projects`, `core_jobs`, `instructions`, `messages` to avoid the clash.
 pub struct Store { conn: Connection }
 
-fn now_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0) }
+pub fn now_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0) }
 
 impl Store {
     pub fn open(path: &str) -> Result<Self, StoreError> { Self::init(Connection::open(path)?) }
@@ -38,6 +38,7 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         crate::notes::init(&conn)?;
         crate::machine::init(&conn)?;
+        crate::watchers::init(&conn)?;
         Ok(Self { conn })
     }
 
