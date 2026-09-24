@@ -81,7 +81,8 @@ pub fn todo_lines(items: &[TodoItem]) -> Vec<String> {
 
 /// The chat as the model gets it (one-loop design §2): stored rows, newest kept first, results
 /// older than the newest six cut to 300 chars, the oldest dropped once `budget` tokens (chars/4)
-/// are spent. `result` rows are user-side, marked, so the model tells them from the user.
+/// are spent. `result` rows are user-side, marked, so the model tells them from the user. The
+/// newest row is always kept, cut to the budget if it alone is over it.
 pub fn fit(rows: &[(String, String)], budget: usize) -> Vec<Msg> {
     let mut out = vec![];
     let (mut used, mut results) = (0usize, 0usize);
@@ -95,8 +96,16 @@ pub fn fit(rows: &[(String, String)], budget: usize) -> Vec<Msg> {
             "assistant" => ("assistant", text.clone()),
             _ => ("user", text.clone()),
         };
-        let cost = content.len() / 4 + 4;
-        if used + cost > budget { break; }
+        let mut content = content;
+        let mut cost = content.len() / 4 + 4;
+        if used + cost > budget {
+            if !out.is_empty() { break; }
+            // The newest row always goes, cut to the budget: without it the model has nothing.
+            let mut end = (budget.saturating_sub(4) * 4).saturating_sub(12).min(content.len());
+            while !content.is_char_boundary(end) { end -= 1; }
+            content = format!("{}… (cut)", &content[..end]);
+            cost = content.len() / 4 + 4;
+        }
         used += cost;
         out.push(Msg { role: role.into(), content });
     }
@@ -231,6 +240,16 @@ mod tests {
         assert!(results.iter().rev().take(6).all(|m| m.content.len() > 1000), "the newest six stay whole");
         assert!(results.iter().rev().skip(6).all(|m| m.content.ends_with("(cut)")), "older ones are cut");
         assert!(got.iter().map(|m| m.content.len() / 4 + 4).sum::<usize>() <= 3000);
+    }
+
+    #[test]
+    fn an_oversized_newest_row_is_cut_not_dropped() {
+        // Multi-byte characters: the cut must land on a char boundary.
+        let rows: Vec<(String, String)> = vec![("user".into(), "older".into()), ("result".into(), "é".repeat(50_000))];
+        let got = fit(&rows, 1000);
+        assert_eq!(got.len(), 1, "only the newest fits");
+        assert!(got[0].content.starts_with("[result] é") && got[0].content.ends_with("… (cut)"), "{}", &got[0].content[..40]);
+        assert!(got[0].content.len() / 4 + 4 <= 1000, "{}", got[0].content.len());
     }
 
     #[test]

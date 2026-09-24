@@ -50,6 +50,8 @@ pub struct Engine<M: Model> {
     inbox: Inbox,
     /// The last turn ended on a Stop: the "stop" queued behind it is already answered.
     just_stopped: bool,
+    /// Words sent while a turn was ending (Stop, the cap, an error): they run as the next turn.
+    pending: Vec<String>,
 }
 
 /// The windows a job worked: those it looked into, in first-seen order, from the steps that
@@ -182,7 +184,7 @@ impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf) -> Self {
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         Self { store, model, default_root, log_path, workers, housekeeping_dir, home, sink: Box::new(|_| {}), out: vec![],
-            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false }
+            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![] }
     }
 
     /// Where commands run (tests point it at a temp folder).
@@ -326,13 +328,32 @@ impl<M: Model> Engine<M> {
             return Ok(());
         }
         self.just_stopped = false;
-        self.store.push_message("user", text)?;
-        let mut turn = Job::turn(&self.home.display().to_string(), text);
-        self.give_tips(&mut turn);
-        *self.inbox.lock().unwrap() = Some(vec![]);
-        let r = self.run_turn(&mut turn);
-        *self.inbox.lock().unwrap() = None;
-        r
+        let mut text = text.to_string();
+        loop {
+            self.store.push_message("user", &text)?;
+            let mut turn = Job::turn(&self.home.display().to_string(), &text);
+            self.give_tips(&mut turn);
+            *self.inbox.lock().unwrap() = Some(vec![]);
+            let r = self.run_turn(&mut turn);
+            // Whatever is still in the inbox was sent to this turn and never heard: never dropped.
+            let left = self.inbox.lock().unwrap().take().unwrap_or_default();
+            self.pending.extend(left);
+            if let Err(e) = r {
+                // A model or executor error mid-turn (a 429 from a free cloud provider is common)
+                // still closes the card; with no card it is said as a line. Either way the words
+                // sent meanwhile run next, so the error is said here rather than returned.
+                if turn.is_open() && !(turn.steps.is_empty() && turn.plan.is_empty()) {
+                    self.end(&mut turn, State::Failed, format!("I could not go on: {e}"))?;
+                } else if turn.is_open() {
+                    self.emit(Event::Said { text: format!("(something went wrong: {e})") });
+                } else {
+                    return Err(e);
+                }
+            }
+            if self.pending.is_empty() { return Ok(()) }
+            // Already echoed to the chat by the service when they were sent.
+            text = std::mem::take(&mut self.pending).join("\n");
+        }
     }
 
     /// Skill tips by the message's words; notebooks the message names count as its skills.
@@ -387,7 +408,7 @@ impl<M: Model> Engine<M> {
                 }
                 Err(ModelError::BadJson(_)) => {
                     let text = "(I could not read my own answer twice — the model is not answering in the required format. Please say that again, or switch the model.)".to_string();
-                    if turn.steps.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                    if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, State::Failed, text);
                 }
                 Err(e) => return Err(e.into()),
@@ -409,7 +430,8 @@ impl<M: Model> Engine<M> {
                     }
                     let more = self.take_inbox(true);
                     if !more.is_empty() { for w in more { self.heard(turn, &w)?; } continue; }
-                    if turn.steps.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                    // A to-do list already put a card up: it closes like work did.
+                    if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, if outcome == Ending::CouldNot { State::Failed } else { State::Done }, text);
                 }
                 Move::Ask { question, options, .. } => {
@@ -555,6 +577,10 @@ impl<M: Model> Engine<M> {
     /// The end of a turn that did something: the card closes, the journal gets its line, and a
     /// finished or failed turn gets its learning turn.
     fn end(&mut self, turn: &mut Job, state: State, text: String) -> Result<(), EngineError> {
+        // The inbox shuts before the learning turn (it can take minutes): what came in is kept
+        // for the next turn, and a word sent after this is a new turn of its own.
+        let left = self.inbox.lock().unwrap().take().unwrap_or_default();
+        self.pending.extend(left);
         self.image = None;
         turn.state = state;
         turn.outcome_text = text.clone();
@@ -564,6 +590,7 @@ impl<M: Model> Engine<M> {
         }
         // What the model did not say itself joins the chat, so the next message knows.
         if state == State::Failed { self.store.push_message("result", &format!("(the work ended: {text})"))?; }
+        if state == State::Cancelled { self.store.push_message("result", "(the user stopped the work)")?; }
         let job_id = turn.id.clone();
         let files = Self::files_written(turn);
         self.emit(match state {
@@ -712,6 +739,56 @@ mod tests {
         let ev = e.resume().unwrap();
         assert!(matches!(&ev[..], [Event::Said { text }] if text.contains("closed")), "{ev:?}");
         assert!(e.store.open_job().unwrap().is_none());
+    }
+
+    /// Runs `hook` once, on the first call, then answers from `moves`; `fail_after` calls in, it
+    /// answers with an http error instead (a free cloud provider's 429).
+    struct Hooked { inner: crate::model::FakeModel, hook: std::cell::RefCell<Option<Box<dyn FnOnce()>>>, calls: std::cell::Cell<usize>, fail_after: usize }
+    impl Model for Hooked {
+        fn next_move(&self, p: &Prompt) -> Result<Move, ModelError> {
+            if let Some(h) = self.hook.borrow_mut().take() { h() }
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() > self.fail_after && p.allowed != ["learn"] { return Err(ModelError::Http("429 too many requests".into())) }
+            self.inner.next_move(p)
+        }
+    }
+    fn hooked(moves: Vec<Move>, fail_after: usize) -> Hooked {
+        Hooked { inner: crate::model::FakeModel::new(moves), hook: Default::default(), calls: Default::default(), fail_after }
+    }
+
+    #[test]
+    fn a_word_sent_while_a_turn_is_stopped_runs_as_the_next_turn() {
+        let (mut e, _, _) = crate::testing::engine_with_model(hooked(vec![act(run("true")), reply("blue it is")], usize::MAX), "late-word");
+        let (inbox, stop) = (e.inbox(), e.stop_flag());
+        *e.model.hook.borrow_mut() = Some(Box::new(move || {
+            inbox.lock().unwrap().as_mut().unwrap().push("and make it blue".into());
+            stop.store(true, Ordering::SeqCst);
+        }));
+        let ev = e.handle_events("make it").unwrap();
+        assert!(ev.iter().any(|v| matches!(v, Event::Stopped { .. })), "{ev:?}");
+        assert!(matches!(ev.last(), Some(Event::Said { text }) if text == "blue it is"), "{ev:?}");
+        let prompts = e.model.inner.prompts.borrow();
+        assert!(prompts.last().unwrap().user.ends_with("and make it blue"), "{}", prompts.last().unwrap().user);
+        let rows = e.store.all_messages().unwrap();
+        assert!(rows.iter().any(|(r, t)| r == "result" && t == "(the user stopped the work)"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_todo_list_with_no_actions_still_closes_its_card() {
+        let (mut e, _, _) = engine_with(vec![
+            Move::Todo { thought: String::new(), items: vec![TodoItem { text: "think".into(), done: false }] },
+            reply("nothing needed doing"),
+        ], "todo-only");
+        let ev = events_of(&mut e, "check it");
+        assert!(ev.iter().any(|v| matches!(v, Event::Done { text, .. } if text == "nothing needed doing")), "{ev:?}");
+    }
+
+    #[test]
+    fn a_model_error_mid_work_closes_the_card() {
+        let (mut e, _, _) = crate::testing::engine_with_model(hooked(vec![act(run("true"))], 1), "http-error");
+        let ev = e.handle_events("go").unwrap();
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { text, .. } if text.contains("could not go on") && text.contains("429")), "{ev:?}");
+        assert!(matches!(ev.last(), Some(Event::Learned { .. })), "{ev:?}");
     }
 
     #[test]
