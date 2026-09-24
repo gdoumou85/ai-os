@@ -216,3 +216,19 @@ fn clicked_answers_are_sent_once_every_question_has_one() {
     assert_eq!(answer(&two, &[Some("Rust".into()), None]), ("Which language? Rust.".into(), false), "the name is still to type");
     assert_eq!(answer(&two, &[Some("Rust".into()), Some("primes".into())]), ("Which language? Rust. Its name? primes.".into(), true));
 }
+
+#[test]
+fn an_alert_opens_an_orange_card_its_turn_fills_and_closes() {
+    let mut cards = Cards::default();
+    let ev = Event::Alert { job_id: j(), watcher: "price".into(), text: "AAPL at 180".into(), reason: "I expect a drop; buy then".into(), urgent: true };
+    assert_eq!(busy_after(&ev), Some(true));
+    assert_eq!(cards.apply(&ev), vec![Change::Added(0)]);
+    let CardKind::Building { name, understood, alert, .. } = &cards.list[0].kind else { panic!() };
+    assert!(*alert && name == "price" && understood.starts_with("Urgent. AAPL at 180") && understood.contains("buy then"), "{understood}");
+    cards.apply(&Event::Step { job_id: j(), plan_step: 0, text: "searched the web".into(), ok: true });
+    assert_eq!(cards.list.len(), 1, "its steps fill the alert card");
+    cards.apply(&Event::Done { job_id: j(), text: "told them".into(), check: None, files: vec![], windows: vec![] });
+    assert!(matches!(cards.list[0].kind, CardKind::Building { collapsed: true, alert: true, .. }));
+    assert!(!cards.running());
+    assert!(cards.apply(&Event::Watchers { watchers: vec![] }).is_empty());
+}

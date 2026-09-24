@@ -256,6 +256,9 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                     Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
                     Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
                     Ok(Request::Projects {}) => sh.send_to(id, &projects_event(&root)),
+                    // The Watchers page and `ai-os-alert` land in Task 5 (watchers design §2); for
+                    // now these requests reach the service and are accepted but do nothing.
+                    Ok(Request::Watchers {}) | Ok(Request::WatcherPause { .. }) | Ok(Request::WatcherDelete { .. }) | Ok(Request::Alert { .. }) => {}
                     // A turn open (the inbox exists): its inbox closes and the words in it go (the
                     // user cleared them), the flag lands between its steps as "stop" would, and the
                     // screen empties now; the engine forgets the rows once that turn has ended

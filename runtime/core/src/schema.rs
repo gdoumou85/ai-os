@@ -31,7 +31,9 @@ pub const MOVE_SCHEMA: &str = r##"{
       { "type":"object", "properties": { "kind": {"enum":["key"]}, "keys": {"type":"string"} }, "required":["kind","keys"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["scroll"]}, "cell": {"type":"integer","minimum":1,"maximum":48}, "spot": {"type":"integer","minimum":1,"maximum":16}, "direction": {"enum":["up","down","left","right"]}, "amount": {"type":"integer","minimum":1,"maximum":20} }, "required":["kind","cell","spot","direction","amount"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["drag"]}, "from_cell": {"type":"integer","minimum":1,"maximum":48}, "from_spot": {"type":"integer","minimum":1,"maximum":16}, "to_cell": {"type":"integer","minimum":1,"maximum":48}, "to_spot": {"type":"integer","minimum":1,"maximum":16} }, "required":["kind","from_cell","from_spot","to_cell","to_spot"], "additionalProperties": false },
-      { "type":"object", "properties": { "kind": {"enum":["wait"]}, "seconds": {"type":"integer","minimum":1,"maximum":300} }, "required":["kind","seconds"], "additionalProperties": false }
+      { "type":"object", "properties": { "kind": {"enum":["wait"]}, "seconds": {"type":"integer","minimum":1,"maximum":300} }, "required":["kind","seconds"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["watch"]}, "name": {"type":"string"}, "reason": {"type":"string"}, "urgent": {"type":"boolean"}, "when": {"type":"string"}, "command": {"type":"array","items":{"type":"string"}} }, "required":["kind","name","reason","urgent","when"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["unwatch"]}, "name": {"type":"string"} }, "required":["kind","name"], "additionalProperties": false }
     ] }
   },
   "oneOf": [
@@ -101,7 +103,7 @@ mod tests {
             "screen_look", "screen_click", "screen_type",
             "web_read", "web_search",
             "start_program", "program_output", "stop_program",
-            "key", "scroll", "drag", "wait",
+            "key", "scroll", "drag", "wait", "watch", "unwatch",
         ]);
     }
 

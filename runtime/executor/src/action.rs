@@ -100,6 +100,18 @@ pub enum Action {
     Drag { from_cell: u32, from_spot: u32, to_cell: u32, to_spot: u32 },
     /// Waits, then says what changed (one-loop design §1b); the engine's own.
     Wait { seconds: u32 },
+    /// Wakes the AI later (watchers design §1): a timer, a check or a live program, with the
+    /// reason for whoever handles the alert. The engine's own.
+    Watch {
+        name: String,
+        reason: String,
+        #[serde(default)]
+        urgent: bool,
+        when: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        command: Vec<String>,
+    },
+    Unwatch { name: String },
 }
 
 fn one() -> u32 { 1 }
@@ -164,6 +176,14 @@ mod tests {
         assert_eq!(l, Action::Look { window: None, find: None });
         let r: Action = serde_json::from_str(r#"{"kind":"read","control":9,"from_line":5,"lines":20}"#).unwrap();
         assert_eq!(r, Action::Read { control: 9, from_line: Some(5), lines: Some(20) });
+    }
+
+    #[test]
+    fn a_watch_needs_no_command() {
+        let a: Action = serde_json::from_str(r#"{"kind":"watch","name":"time","reason":"say the time","urgent":false,"when":"every 2 minutes"}"#).unwrap();
+        assert_eq!(a, Action::Watch { name: "time".into(), reason: "say the time".into(), urgent: false, when: "every 2 minutes".into(), command: vec![] });
+        let u: Action = serde_json::from_str(r#"{"kind":"unwatch","name":"time"}"#).unwrap();
+        assert_eq!(u, Action::Unwatch { name: "time".into() });
     }
 
     #[test]

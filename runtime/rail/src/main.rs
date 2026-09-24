@@ -136,9 +136,9 @@ fn render(card: &Card, say: &Sender<Request>, entry: &gtk::Entry) -> gtk::Widget
     match &card.kind {
         CardKind::You => { b.add_css_class("you"); b.append(&text(&card.text)); }
         CardKind::Said => { b.add_css_class("said"); b.append(&text(&card.text)); }
-        CardKind::Building { name, understood, steps, actions, collapsed } => {
-            b.add_css_class("building");
-            b.append(&title(&if name.is_empty() { "Working".to_string() } else { format!("Building: {name}") }));
+        CardKind::Building { name, understood, steps, actions, collapsed, alert } => {
+            b.add_css_class(if *alert { "alert" } else { "building" });
+            b.append(&title(&if *alert { format!("🔔 Alert: {name}") } else if name.is_empty() { "Working".to_string() } else { format!("Building: {name}") }));
             if !collapsed {
                 if !understood.is_empty() { b.append(&text(understood)); }
                 for s in steps {
@@ -207,6 +207,7 @@ const CSS: &str = "
 .you { background: alpha(@theme_selected_bg_color, 0.25); margin-left: 40px; }
 .said { margin-right: 40px; }
 .building { border-left: 3px solid @theme_selected_bg_color; }
+.alert { border-left: 3px solid #e08020; }
 .ask { border-left: 3px solid #4090e0; }
 .done { border-left: 3px solid #40b060; }
 .failed { border-left: 3px solid #d04040; }
