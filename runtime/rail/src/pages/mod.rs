@@ -3,6 +3,7 @@ pub mod help;
 pub mod model;
 pub mod projects;
 pub mod skills;
+pub mod watchers;
 
 use gtk4 as gtk;
 use gtk::prelude::*;
