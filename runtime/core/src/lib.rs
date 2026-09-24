@@ -10,6 +10,7 @@ pub mod machine;
 pub mod model;
 pub mod moves;
 pub mod notes;
+pub mod projects;
 pub mod prompt;
 pub mod schema;
 pub mod service;

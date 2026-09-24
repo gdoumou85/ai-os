@@ -146,23 +146,6 @@ fn journal_for(journal: &str, words: &str) -> String {
     format!("What earlier jobs did (the journal, lines about this request only):\n{}\n", lines[lines.len().saturating_sub(5)..].join("\n"))
 }
 
-/// A folder's folders, hidden ones left out.
-fn subfolders(dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(dir).map(|rd| rd.flatten().map(|d| d.path())
-        .filter(|p| p.is_dir() && !p.file_name().is_some_and(|f| f.to_string_lossy().starts_with('.'))).collect()).unwrap_or_default()
-}
-
-/// The projects in a folder of projects, `depth` levels of groups down at most: each folder in it
-/// with a BLUEPRINT.md, or with none anywhere below it. A folder with some below is a group
-/// ("WEb Games"), looked into the same way, so a sibling with no notes yet still counts.
-fn projects_in(dir: &Path, depth: u32) -> Vec<PathBuf> {
-    subfolders(dir).into_iter().flat_map(|d| {
-        if depth == 0 || d.join("BLUEPRINT.md").is_file() { return vec![d] }
-        let inner = projects_in(&d, depth - 1);
-        if inner.iter().any(|p| p.join("BLUEPRINT.md").is_file()) { inner } else { vec![d] }
-    }).collect()
-}
-
 /// The paths an action touches: the file it reads or writes, and absolute paths in a command.
 fn paths_in(action: &Action, folder: &str) -> Vec<PathBuf> {
     match action {
@@ -272,10 +255,7 @@ impl<M: Model> Engine<M> {
     /// Where a new project's folder goes. A store error is propagated, not read as "unset":
     /// that would quietly put the project under the wrong root (I3's lesson).
     fn projects_root(&self) -> Result<PathBuf, EngineError> {
-        Ok(match self.store.get_setting("projects_root")? {
-            Some(p) => PathBuf::from(p),
-            None => self.default_root.clone(),
-        })
+        Ok(crate::projects::root(&self.store, &self.default_root)?)
     }
 
     /// The engine's own lane (`executor::Lane::Engine`): a setting is a row in our store, so no
@@ -628,19 +608,9 @@ impl<M: Model> Engine<M> {
         Ok(())
     }
 
-    /// Every project: under the projects root, as `projects_in` finds them, and folders registered
-    /// elsewhere that still exist (one-loop design §2). The owner's "WEb Games/Pool Game" read as a
-    /// project called "WEb Games" with no notes (2026-09-24).
+    /// Every project (`core::projects`).
     fn projects(&self) -> Result<Vec<ProjectRow>, EngineError> {
-        let root = self.projects_root()?;
-        let mut v: Vec<ProjectRow> = projects_in(&root, 2).iter().map(|p| ProjectRow {
-            name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
-            folder: p.display().to_string(), description: String::new(), touched_at: 0 }).collect();
-        v.sort_by(|a, b| a.name.cmp(&b.name));
-        for r in self.store.list_projects()? {
-            if Path::new(&r.folder).is_dir() && !Path::new(&r.folder).starts_with(&root) && v.iter().all(|p| p.folder != r.folder) { v.push(r); }
-        }
-        Ok(v)
+        Ok(crate::projects::list(&self.store, &self.default_root)?)
     }
 
     /// The project a path is under, if any.
