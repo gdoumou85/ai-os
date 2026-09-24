@@ -190,7 +190,7 @@ impl<M: Model> Engine<M> {
     /// What a model that cannot see is told where the desktop hand offered the screen (final
     /// review, 2026-09-24): the picture never reaches it, so neither does the advice to use it.
     const CANNOT_SEE: &'static str = "this window lists no controls, and this model cannot see the screen: use key, the command line, or the program's own scripting (like blender --background --python)";
-    /// The same action failing the same way this many times in a row: warn, then end.
+    /// The same action this many times in a row (any result), or failing the same way: warn, then end.
     const SAME_FAIL_WARN: usize = 3;
     const SAME_FAIL_END: usize = 5;
 
@@ -540,15 +540,23 @@ impl<M: Model> Engine<M> {
         let same = 1 + turn.steps.iter().rev()
             // `starts_with`: a stored detail may carry the warning or a project's notes after it.
             .take_while(|s| !s.ok && s.detail.starts_with(&outcome.detail) && serde_json::to_string(&s.action).unwrap_or_default() == key).count();
-        if !outcome.ok && same >= Self::SAME_FAIL_WARN {
-            outcome.detail.push_str(&format!(" (this has failed the same way {same} times in a row: do something different)"));
+        // The same action over and over, whatever it gives: a 27B enlarged one screen square 20
+        // times and never clicked (the owner, 2026-09-24). Keys, scrolls, waits and a program's
+        // output are fine to repeat.
+        let again = if matches!(action, Action::Key { .. } | Action::Scroll { .. } | Action::Wait { .. } | Action::ProgramOutput { .. }) { 0 }
+            else { 1 + turn.steps.iter().rev().take_while(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).count() };
+        let n = again.max(if outcome.ok { 0 } else { same });
+        if n >= Self::SAME_FAIL_WARN {
+            outcome.detail.push_str(&if outcome.ok { format!(" (you have done exactly this {n} times in a row: it shows nothing new, do something different)") }
+                else { format!(" (this has failed the same way {n} times in a row: do something different)") });
         }
         outcome.detail.push_str(&self.notes_on_first_touch(turn, &action)?);
         turn.steps.push(StepRecord { plan_step: 0, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
         self.emit(Event::Step { job_id: turn.id.clone(), plan_step: 0, text: describe(&action), ok: outcome.ok });
         self.store.push_message("result", &format!("{} -> {}: {}", prompt::compact_action(&action), if outcome.ok { "ok" } else { "failed" }, outcome.detail))?;
-        if !outcome.ok && same >= Self::SAME_FAIL_END {
-            let text = format!("I stopped: {} failed the same way {same} times in a row. {}", describe(&action), short(&outcome.detail));
+        if n >= Self::SAME_FAIL_END {
+            let text = if outcome.ok { format!("I stopped: \"{}\" {n} times in a row, without getting anywhere.", describe(&action)) }
+                else { format!("I stopped: {} failed the same way {n} times in a row. {}", describe(&action), short(&outcome.detail)) };
             self.end(turn, State::Failed, text)?;
             return Ok(true);
         }
@@ -843,6 +851,15 @@ mod tests {
         assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { text, .. } if text.contains("5 times")), "{ev:?}");
         let rows = e.store.all_messages().unwrap();
         assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("3 times in a row")), "{rows:?}");
+    }
+
+    #[test]
+    fn the_same_action_warns_at_three_and_ends_at_five_even_when_it_works() {
+        let (mut e, _, _) = engine_with((0..5).map(|_| act(run("ls"))).collect(), "repeat");
+        let ev = events_of(&mut e, "look around");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { text, .. } if text.contains("5 times")), "{ev:?}");
+        let rows = e.store.all_messages().unwrap();
+        assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("exactly this 3 times in a row")), "{rows:?}");
     }
 
     #[test]
