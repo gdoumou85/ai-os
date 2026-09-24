@@ -27,12 +27,23 @@ pub enum ModelError {
     /// 402 or 429: the account's allowance is used up for now; the cloud pool moves on.
     #[error("model allowance used up: {0}")] Quota(String),
     #[error("model answer was not a valid move: {0}")] BadJson(String),
+    /// Stop, pressed while the answer came: the stream was dropped where it stood.
+    #[error("the answer was stopped")] Stopped,
+    /// The runner stopped the answer at its length limit: said as that, not as a bad format.
+    #[error("the answer was cut off at the model's length limit, {0} words in")] CutOff(usize),
     #[error("fake model has no more scripted moves")] Exhausted,
 }
 
 /// The one thing the loop needs from a model: given a prompt, one move. Swappable (1b spec §5).
 pub trait Model {
     fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError>;
+    /// `next_move`, with `watch` told how many words of the answer have come, every few seconds
+    /// while it comes; `watch` answering false drops the answer where it stands (Stop). A model
+    /// that does not stream answers in one go and never calls it.
+    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
+        let _ = watch;
+        self.next_move(prompt)
+    }
     /// The context the model is run with, in tokens: what a step's evidence has to fit in. The
     /// desktop hand's look cap follows it (2a §4).
     fn context_tokens(&self) -> usize { 8192 }
@@ -118,31 +129,33 @@ impl RemoteModel {
 
     /// One request to the runner at `url`. `Err((true, _))` when it could not be reached at all —
     /// the only failure worth looking for it elsewhere.
-    fn ask_at(&self, url: &str, prompt: &Prompt) -> Result<Move, (bool, ModelError)> {
+    fn ask_at(&self, url: &str, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, (bool, ModelError)> {
         let (endpoint, body) = match self.kind {
             Kind::Ollama => (format!("{url}/api/chat"), ollama_body(&self.model, prompt)),
             Kind::OpenAi => (format!("{url}/v1/chat/completions"), openai_body(&self.model, prompt)),
         };
-        let mut req = ureq::AgentBuilder::new().timeout(answer_timeout()).build().post(&endpoint);
+        let mut req = ureq::AgentBuilder::new().timeout_read(answer_timeout()).build().post(&endpoint);
         if let Some(k) = &self.key { req = req.set("Authorization", &format!("Bearer {k}")); }
-        let resp: serde_json::Value = match req.send_json(body) {
-            Ok(r) => r.into_json().map_err(|e| (false, ModelError::Http(e.to_string())))?,
-            Err(ureq::Error::Transport(t)) if t.kind() == ureq::ErrorKind::ConnectionFailed => return Err((true, ModelError::Http(t.to_string()))),
+        match req.send_json(body) {
+            Ok(r) => read_stream(self.kind, r.into_reader(), std::time::Duration::from_secs(2), watch).and_then(|c| parse_content(&c)).map_err(|e| (false, e)),
+            Err(ureq::Error::Transport(t)) if t.kind() == ureq::ErrorKind::ConnectionFailed => Err((true, ModelError::Http(t.to_string()))),
             // The runner's own reason, not just its number: a 402 from a signed-in Ollama means a
             // cloud model's allowance ran out, and only the body says so.
             Err(ureq::Error::Status(code, r)) => {
                 let why = format!("{endpoint}: status {code}: {}", runner_reason(&r.into_string().unwrap_or_default()));
-                return Err((false, if matches!(code, 402 | 429) { ModelError::Quota(why) } else { ModelError::Http(why) }));
+                Err((false, if matches!(code, 402 | 429) { ModelError::Quota(why) } else { ModelError::Http(why) }))
             }
-            Err(e) => return Err((false, ModelError::Http(e.to_string()))),
-        };
-        match self.kind { Kind::Ollama => parse_ollama(&resp), Kind::OpenAi => parse_openai(&resp) }.map_err(|e| (false, e))
+            Err(e) => Err((false, ModelError::Http(e.to_string()))),
+        }
     }
 }
 
 /// How long one answer may take: 30 minutes, or `AI_OS_MODEL_TIMEOUT` seconds. Three minutes was
 /// too short for the owner's bigger LM Studio model on a long job (2026-09-19): a model that must
 /// load first, or a machine with no graphics card, can take several minutes over one answer.
+/// Since answers stream (v0.11.0) this is the silence allowed — a model loading, a long prompt
+/// being read — not the whole answer: a slow model writing a big file goes on as long as words
+/// keep coming.
 fn answer_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(std::env::var("AI_OS_MODEL_TIMEOUT").ok().and_then(|s| s.parse().ok()).filter(|s| *s > 0).unwrap_or(1800))
 }
@@ -207,20 +220,20 @@ pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
     if let Some(png) = &prompt.image { user["images"] = serde_json::json!([base64(png)]); }
     serde_json::json!({
         "model": model,
-        "stream": false,
+        "stream": true,
         "think": false,
         "format": format_for(prompt),
         // Ollama loads the model at what each request asks for, so a fixed 8192 here undid the
-        // Model card's bar on every question (the owner, 2026-09-23).
-        "options": { "temperature": 0.0, "num_ctx": loaded_context() },
+        // Model card's bar on every question (the owner, 2026-09-23). `num_predict: -1`: no length
+        // limit on the answer but the window itself — a whole file is one answer (2026-09-24).
+        "options": { "temperature": 0.0, "num_ctx": loaded_context(), "num_predict": -1 },
         "messages": std::iter::once(serde_json::json!({ "role": "system", "content": prompt.system }))
             .chain(history(prompt)).chain(std::iter::once(user)).collect::<Vec<_>>()
     })
 }
 
 pub fn parse_ollama(resp: &serde_json::Value) -> Result<Move, ModelError> {
-    let content = resp["message"]["content"].as_str().unwrap_or("");
-    serde_json::from_str(content).map_err(|e| ModelError::BadJson(format!("{e}: {content}")))
+    parse_content(resp["message"]["content"].as_str().unwrap_or(""))
 }
 
 /// LM Studio's OpenAI-style request: the same narrowed schema, forced through `response_format`.
@@ -236,7 +249,7 @@ pub fn openai_body(model: &str, prompt: &Prompt) -> serde_json::Value {
     };
     serde_json::json!({
         "model": model,
-        "stream": false,
+        "stream": true,
         "temperature": 0.0,
         "response_format": { "type": "json_schema", "json_schema": {
             "name": "move", "strict": true, "schema": format_for(prompt) } },
@@ -246,14 +259,54 @@ pub fn openai_body(model: &str, prompt: &Prompt) -> serde_json::Value {
 }
 
 pub fn parse_openai(resp: &serde_json::Value) -> Result<Move, ModelError> {
-    let content = resp["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    parse_content(resp["choices"][0]["message"]["content"].as_str().unwrap_or(""))
+}
+
+/// A move from the whole of an answer's text.
+pub fn parse_content(content: &str) -> Result<Move, ModelError> {
     serde_json::from_str(content).map_err(|e| ModelError::BadJson(format!("{e}: {content}")))
 }
 
+/// An answer as it streams in, whole: Ollama sends a JSON object per line, an OpenAI-style runner
+/// `data: ` lines ending in `data: [DONE]`. `watch` hears the words so far at most every `every`
+/// and drops the stream by answering false. A silence longer than the read timeout is an error
+/// that says "timed out", which `next_move_watched` asks once more after. A body with no JSON in
+/// it at all (a proxy's page, a runner that ignored `stream`) is said as that, with its first line.
+pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Duration, watch: &mut dyn FnMut(usize) -> bool) -> Result<String, ModelError> {
+    use std::io::BufRead;
+    let (mut content, mut seen, mut odd) = (String::new(), false, String::new());
+    let mut told = std::time::Instant::now();
+    for line in std::io::BufReader::new(from).lines() {
+        let line = line.map_err(|e| ModelError::Http(match e.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => format!("timed out: the model said nothing for {} s", answer_timeout().as_secs()),
+            _ => e.to_string(),
+        }))?;
+        let json = match kind { Kind::Ollama => Some(line.as_str()), Kind::OpenAi => line.strip_prefix("data:").map(str::trim).filter(|d| *d != "[DONE]") };
+        let Some(v) = json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) else {
+            if odd.is_empty() { odd = line.chars().take(300).collect(); }
+            continue
+        };
+        seen = true;
+        if let Some(why) = v["error"].as_str().or(v["error"]["message"].as_str()) { return Err(ModelError::Http(why.to_string())) }
+        let cut = match kind { Kind::Ollama => v["done_reason"] == "length", Kind::OpenAi => v["choices"][0]["finish_reason"] == "length" };
+        let piece = match kind { Kind::Ollama => &v["message"]["content"], Kind::OpenAi => &v["choices"][0]["delta"]["content"] };
+        if let Some(p) = piece.as_str() { content.push_str(p); }
+        if cut { return Err(ModelError::CutOff(content.split_whitespace().count())) }
+        if told.elapsed() >= every {
+            told = std::time::Instant::now();
+            if !watch(content.split_whitespace().count()) { return Err(ModelError::Stopped) }
+        }
+    }
+    if !seen { return Err(ModelError::Http(format!("the runner's answer was not a stream: {}", odd.trim()))) }
+    Ok(content)
+}
+
 impl Model for RemoteModel {
-    fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> {
+    fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> { self.next_move_watched(prompt, &mut |_| true) }
+
+    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
         let url = self.url.borrow().clone();
-        match self.ask_at(&url, prompt) {
+        match self.ask_at(&url, prompt, watch) {
             Err((true, gone)) => {
                 // The same model at another address: the router handed the runner's machine a new one.
                 let Some(moved) = (self.finder)().into_iter()
@@ -261,14 +314,15 @@ impl Model for RemoteModel {
                 else { return Err(gone) };
                 eprintln!("the model {} moved: {url} -> {}", self.model, moved.url);
                 *self.url.borrow_mut() = moved.url.clone();
-                self.ask_at(&moved.url, prompt).map_err(|(_, e)| e)
+                self.ask_at(&moved.url, prompt, watch).map_err(|(_, e)| e)
             }
             // A read that timed out, once: the owner's VM slept mid-request and woke to a dead
             // wait, and LM Studio reloading an unloaded model can outlast one wait too.
+            // A silence mid-answer says "timed out" too (`read_stream`), and is asked once more.
             // ponytail: matched on ureq's wording; untested, since a test would sit out the whole answer timeout.
             Err((false, ModelError::Http(e))) if e.contains("timed out") => {
                 eprintln!("the model did not answer in time ({e}); asking once more");
-                self.ask_at(&url, prompt).map_err(|(_, e)| e)
+                self.ask_at(&url, prompt, watch).map_err(|(_, e)| e)
             }
             answer => answer.map_err(|(_, e)| e),
         }
@@ -330,7 +384,7 @@ mod tests {
     fn openai_request_is_grammar_forced_and_deterministic() {
         let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "ask"], image: None, ..Default::default() });
         assert_eq!(b["model"], "bonsai-8b");
-        assert_eq!(b["stream"], false);
+        assert_eq!(b["stream"], true);
         assert_eq!(b["temperature"], 0.0);
         assert_eq!(b["response_format"]["type"], "json_schema");
         assert_eq!(b["response_format"]["json_schema"]["strict"], true);
@@ -372,7 +426,8 @@ mod tests {
 
     #[test]
     fn an_lm_studio_answer_comes_back_as_a_move() {
-        let addr = serve(json_response("200 OK", OPENAI_HI), 1);
+        let chunk = serde_json::json!({"choices":[{"delta":{"content": r#"{"move":"reply","text":"hi"}"#}}]});
+        let addr = serve(json_response("200 OK", &format!("data: {chunk}\n\ndata: [DONE]\n")), 1);
         let mut m = RemoteModel::at(Kind::OpenAi, &format!("http://{addr}"), "bonsai-8b");
         m.key = Some("k".into());
         assert!(matches!(m.next_move(&p()).unwrap(), Move::Reply { text, .. } if text == "hi"));
@@ -436,10 +491,11 @@ mod tests {
     fn ollama_request_is_grammar_forced_and_deterministic() {
         let b = ollama_body("qwen3.5:9b", &p());
         assert_eq!(b["model"], "qwen3.5:9b");
-        assert_eq!(b["stream"], false);
+        assert_eq!(b["stream"], true);
         assert_eq!(b["think"], false);
         assert_eq!(b["options"]["temperature"], 0.0);
         assert_eq!(b["options"]["num_ctx"], 8192);
+        assert_eq!(b["options"]["num_predict"], -1, "no length limit but the window");
         assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 6);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
@@ -476,6 +532,37 @@ mod tests {
         let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None, ..Default::default() };
         let b2 = ollama_body("m", &all);
         assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn a_streamed_answer_is_read_whole_from_either_runner() {
+        let o = [r#"{"message":{"content":"{\"move\":\"reply\",\"thought\":\"t\","},"done":false}"#,
+                 r#"{"message":{"content":"\"text\":\"hi\",\"outcome\":\"done\"}"},"done":true}"#].join("\n");
+        let got = read_stream(Kind::Ollama, o.as_bytes(), std::time::Duration::ZERO, &mut |_| true).unwrap();
+        assert!(matches!(parse_content(&got).unwrap(), Move::Reply { text, .. } if text == "hi"), "{got}");
+        let s = "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"move\\\":\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\\"reply\\\",\\\"thought\\\":\\\"t\\\",\\\"text\\\":\\\"hi\\\",\\\"outcome\\\":\\\"done\\\"}\"}}]}\n\ndata: [DONE]\n";
+        let got = read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true).unwrap();
+        assert!(matches!(parse_content(&got).unwrap(), Move::Reply { text, .. } if text == "hi"), "{got}");
+    }
+
+    #[test]
+    fn stop_drops_a_stream_and_a_runner_error_is_said() {
+        let o = r#"{"message":{"content":"one two three"},"done":false}"#;
+        let mut heard = 0;
+        assert!(matches!(read_stream(Kind::Ollama, o.as_bytes(), std::time::Duration::ZERO, &mut |w| { heard = w; false }), Err(ModelError::Stopped)));
+        assert_eq!(heard, 3);
+        let e = r#"{"error":"model runner has unexpectedly stopped"}"#;
+        assert!(matches!(read_stream(Kind::Ollama, e.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::Http(w)) if w.contains("unexpectedly")));
+    }
+
+    #[test]
+    fn an_answer_cut_at_the_length_limit_says_so() {
+        let o = r#"{"message":{"content":"a b"},"done":true,"done_reason":"length"}"#;
+        assert!(matches!(read_stream(Kind::Ollama, o.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::CutOff(2))));
+        let s = r#"data: {"choices":[{"delta":{"content":"a b c"},"finish_reason":"length"}]}"#;
+        assert!(matches!(read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::CutOff(3))));
+        // A runner that ignored `stream` is said as that, not read as an empty answer.
+        assert!(matches!(read_stream(Kind::OpenAi, OPENAI_HI.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::Http(w)) if w.contains("not a stream")));
     }
 
     #[test]

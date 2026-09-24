@@ -452,8 +452,22 @@ impl<M: Model> Engine<M> {
             let mut p = self.prompt_for(turn)?;
             if let Some(m) = last { p.allowed.retain(|a| *a != m); }
             self.tick(&turn.id, "Thinking…".into());
-            let mv = match self.model.next_move(&p) {
+            // The words so far on the status line, and Stop dropping the answer where it stands:
+            // a big file at 5 words a second is a long answer (the owner, 2026-09-24).
+            let (stop, sink, id) = (&self.stop, &mut self.sink, turn.id.clone());
+            let answer = self.model.next_move_watched(&p, &mut |words| {
+                if stop.load(Ordering::SeqCst) { return false }
+                sink(&Event::Busy { job_id: id.clone(), text: format!("Writing its answer… {words} words") });
+                true
+            });
+            let mv = match answer {
                 Ok(m) => { unreadable = 0; m }
+                // A whole file past the runner's length limit: not a bad format, so said as what it is.
+                Err(ModelError::CutOff(words)) if unreadable == 0 => {
+                    unreadable = 1;
+                    self.store.push_message("result", &format!("your answer was cut off at the model's length limit after {words} words, so nothing was done. Write a big file in parts: write_file the first part, then edit_file to add each next part at its end."))?;
+                    continue;
+                }
                 Err(ModelError::BadJson(e)) if unreadable == 0 => {
                     unreadable = 1;
                     self.store.push_message("result", &not_a_move(&e))?;
@@ -463,6 +477,11 @@ impl<M: Model> Engine<M> {
                     let text = "(I could not read my own answer twice — the model is not answering in the required format. Please say that again, or switch the model.)".to_string();
                     if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, State::Failed, text);
+                }
+                Err(ModelError::Stopped) => {
+                    self.stop.swap(false, Ordering::SeqCst);
+                    self.just_stopped = true;
+                    return self.end(turn, State::Cancelled, "Stopped.".into());
                 }
                 Err(e) => return Err(e.into()),
             };
@@ -539,7 +558,10 @@ impl<M: Model> Engine<M> {
         let programs = executor::programs::running();
         let ctx = prompt::context_block(&prompt::Context { machine: &machine, places: &places, programs: &programs, instructions: &instructions,
             journal: &journal, notes: &notes, tips: &turn.notes_block, request: &turn.request, todo: &turn.plan });
-        let budget = self.model.context_tokens().saturating_sub(1500 + (system.len() + ctx.len()) / 4);
+        // The answer needs room too, and a whole file is one answer: a quarter of the window, at
+        // least the 1500 tokens it always had.
+        let window = self.model.context_tokens();
+        let budget = window.saturating_sub((window / 4).max(1500) + (system.len() + ctx.len()) / 4);
         let mut chat = prompt::fit(&self.store.all_messages()?, budget);
         let last = chat.pop().map(|m| m.content).unwrap_or_default();
         Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: if self.answered { vec!["reply", "todo", "act", "remember"] } else { vec!["reply", "ask", "todo", "act", "remember"] }, image: self.image.take(), no_screen: !sees })
@@ -963,6 +985,52 @@ mod tests {
     }
     fn hooked(moves: Vec<Move>, fail_after: usize) -> Hooked {
         Hooked { inner: crate::model::FakeModel::new(moves), hook: Default::default(), calls: Default::default(), fail_after }
+    }
+
+    /// Streams: says it has 12 words, after `before` runs once (a Stop pressed mid-answer).
+    struct Streaming { inner: crate::model::FakeModel, before: std::cell::RefCell<Option<Box<dyn FnOnce()>>> }
+    impl Model for Streaming {
+        fn next_move(&self, p: &Prompt) -> Result<Move, ModelError> { self.inner.next_move(p) }
+        fn next_move_watched(&self, p: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
+            if let Some(b) = self.before.borrow_mut().take() { b() }
+            if !watch(12) { return Err(ModelError::Stopped) }
+            self.inner.next_move(p)
+        }
+    }
+
+    #[test]
+    fn a_long_answer_shows_its_words_and_stop_cuts_it() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let s = seen.clone();
+        let model = Streaming { inner: crate::model::FakeModel::new(vec![reply("hi"), act(run("true"))]), before: Default::default() };
+        let (e, _, _) = crate::testing::engine_with_model(model, "streaming");
+        let mut e = e.with_sink(Box::new(move |ev: &Event| s.borrow_mut().push(ev.clone())));
+        e.handle("hello").unwrap();
+        assert!(seen.borrow().iter().any(|v| matches!(v, Event::Busy { text, .. } if text.contains("12 words"))), "{:?}", seen.borrow());
+        let stop = e.stop_flag();
+        *e.model.before.borrow_mut() = Some(Box::new(move || stop.store(true, Ordering::SeqCst)));
+        let ev = e.handle_events("make it").unwrap();
+        assert!(ev.iter().any(|v| matches!(v, Event::Stopped { .. })), "{ev:?}");
+        assert_eq!(e.model.inner.prompts.borrow().len(), 1, "the stopped answer was not acted on");
+    }
+
+    /// Cut off at the runner's length limit once, then answers from `inner`.
+    struct CutOnce { inner: crate::model::FakeModel, cut: std::cell::Cell<bool> }
+    impl Model for CutOnce {
+        fn next_move(&self, p: &Prompt) -> Result<Move, ModelError> {
+            if !self.cut.replace(true) { return Err(ModelError::CutOff(900)) }
+            self.inner.next_move(p)
+        }
+    }
+
+    #[test]
+    fn an_answer_cut_at_the_length_limit_is_told_to_write_in_parts() {
+        let model = CutOnce { inner: crate::model::FakeModel::new(vec![reply("I will write it in parts.")]), cut: Default::default() };
+        let (mut e, _, _) = crate::testing::engine_with_model(model, "cut-off");
+        let ev = e.handle_events("write the whole page").unwrap();
+        assert_eq!(ev, vec![Event::Said { text: "I will write it in parts.".into() }]);
+        let rows = e.store.all_messages().unwrap();
+        assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("cut off at the model's length limit after 900 words")), "{rows:?}");
     }
 
     #[test]

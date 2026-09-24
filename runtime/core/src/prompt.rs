@@ -69,7 +69,8 @@ pub fn context_block(c: &Context) -> String {
     // Tips are a help: at their fullest (3000 chars) they would crowd out the chat, so half.
     let tips: String = c.tips.chars().take(1500).collect();
     for part in [c.journal, c.notes, tips.as_str()] { if !part.trim().is_empty() { s.push_str(part.trim_end()); s.push('\n'); } }
-    let request: String = c.request.chars().take(1500).collect();
+    // Cut, it says so: a model that thinks it has the whole request would act on half of it.
+    let request: String = if c.request.chars().count() > 1500 { format!("{}… (cut; the whole message is in the chat)", c.request.chars().take(1500).collect::<String>()) } else { c.request.to_string() };
     s.push_str(&format!("The request you are working on: {request}\n"));
     if !c.todo.is_empty() { s.push_str(&format!("Your to-do list: {}\n", c.todo.join(" / "))); }
     s
