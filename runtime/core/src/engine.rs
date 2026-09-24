@@ -407,6 +407,9 @@ impl<M: Model> Engine<M> {
         let mut unreadable = 0;
         let mut reminded = false;
         let mut moves = 0;
+        // The last move was the to-do list: the next one works it. A 27B re-sent the same list
+        // every 20 seconds and never acted on it (the owner, 2026-09-24).
+        let mut listed = false;
         loop {
             if self.stop.swap(false, Ordering::SeqCst) {
                 self.just_stopped = true;
@@ -422,7 +425,8 @@ impl<M: Model> Engine<M> {
                 return self.end(turn, State::Failed, text);
             }
             moves += 1;
-            let p = self.prompt_for(turn)?;
+            let mut p = self.prompt_for(turn)?;
+            if listed { p.allowed.retain(|m| *m != "todo"); }
             self.tick(&turn.id, "Thinking…".into());
             let mv = match self.model.next_move(&p) {
                 Ok(m) => { unreadable = 0; m }
@@ -444,6 +448,7 @@ impl<M: Model> Engine<M> {
                 return self.end(turn, State::Cancelled, "Stopped.".into());
             }
             self.store.push_message("assistant", &serde_json::to_string(&mv).unwrap_or_default())?;
+            let was_listed = std::mem::replace(&mut listed, matches!(mv, Move::Todo { .. }));
             match mv {
                 Move::Reply { text, outcome, .. } => {
                     if !reminded {
@@ -473,10 +478,14 @@ impl<M: Model> Engine<M> {
                     self.emit(Event::NeedsAnswer { job_id: turn.id.clone(), questions: vec![question], options: vec![options] });
                     return Ok(());
                 }
+                // For a runner that does not hold the model to the narrowed moves.
+                Move::Todo { .. } if was_listed => {
+                    self.store.push_message("result", "you just sent your to-do list: now act on its first open item")?;
+                }
                 Move::Todo { items, .. } => {
                     turn.plan = prompt::todo_lines(&items);
                     self.emit(Event::Plan { job_id: turn.id.clone(), steps: turn.plan.clone() });
-                    self.store.push_message("result", "your to-do list is on the user's screen")?;
+                    self.store.push_message("result", "your to-do list is on the user's screen: now act on its first open item")?;
                 }
                 Move::Act { thought, action } => { if self.act(turn, action, &thought)? { return Ok(()); } }
                 Move::Remember { text, .. } => {
@@ -789,6 +798,16 @@ mod tests {
         assert!(p.user.contains("working on: write me a script
 (you asked) Which language?
 (their answer) Python") && !p.allowed.contains(&"ask"), "{p:?}");
+    }
+
+    #[test]
+    fn a_todo_list_is_not_sent_twice_in_a_row() {
+        let todo = || Move::Todo { thought: String::new(), items: vec![TodoItem { text: "change it".into(), done: false }] };
+        let (mut e, _, _) = engine_with(vec![todo(), todo(), act(run("true")), reply("done")], "todo twice");
+        let ev = events_of(&mut e, "change it");
+        assert_eq!(ev.iter().filter(|v| matches!(v, Event::Plan { .. })).count(), 1, "{ev:?}");
+        let ps = e.model.prompts.borrow();
+        assert!(ps[0].allowed.contains(&"todo") && !ps[1].allowed.contains(&"todo") && !ps[2].allowed.contains(&"todo") && ps[3].allowed.contains(&"todo"));
     }
 
     #[test]

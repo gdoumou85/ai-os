@@ -558,3 +558,6 @@ Two things the owner hit on his first full-access run.
   was the answer alone, and a 9B asked again round after round. The answer now carries the
   request and the question ("(you asked) … (their answer) …"), and that turn cannot ask again (a
   Clear since the question drops it). The brief: ask what the user wants, never how. (v0.10.1)
+- **2026-09-24**, no to-do loop: a 27B re-sent the same one-item list every 20 seconds and never
+  acted, and only the 200-move cap would have ended it. Right after a to-do list, todo is out of
+  the allowed moves; one sent anyway is answered, not shown. (v0.10.2)
