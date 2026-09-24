@@ -11,7 +11,7 @@ use std::path::PathBuf;
 fn main() {
     let db = service::db_path();
     let model = std::env::var("AI_OS_MODEL").unwrap_or_else(|_| "qwen3.5:9b".into());
-    let root = PathBuf::from(std::env::var("AI_OS_PROJECTS").unwrap_or_else(|_| "/data/projects".into()));
+    let root = aios_core::projects::default_root();
     let sock = service::socket_path();
     let listener = service::bind(&sock).unwrap_or_else(|e| { eprintln!("cannot listen on {}: {e}", sock.display()); std::process::exit(1) });
     eprintln!("ai-os-engine listening on {}", sock.display());

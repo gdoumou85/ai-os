@@ -575,3 +575,9 @@ Two things the owner hit on his first full-access run.
   fresh chat, said on screen; a restart does too; standing instructions stay. A project is named
   by a telling word only ("a snake game" is not Pool Game). One guard for moves that change
   nothing twice (todo, remember); after acting on an answer a new question may come. (v0.10.5)
+- **2026-09-24**, the sidebar (spec `2026-09-24-watchers-and-sidebar-design.md` §3): a menu on
+  the left (Chat, Projects, Skills; Model, Cloud, Help) picks the page; the header keeps Clear
+  and Stop. The Projects page lists every project, newest first, from `Request::Projects`; the
+  project list lives in `core::projects`. Answers stream: the answer timeout is the silence
+  allowed, not the whole answer; Stop drops the stream; the status line counts the words; the
+  chat leaves a quarter of the window for the answer. (v0.11.0)

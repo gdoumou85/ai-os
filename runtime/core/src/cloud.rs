@@ -50,14 +50,16 @@ impl<M: Model> Pooled<M> {
 }
 
 impl<M: Model> Model for Pooled<M> {
-    fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> {
-        if !self.dir.join(SWITCH).exists() { return self.local.next_move(prompt) }
+    fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> { self.next_move_watched(prompt, &mut |_| true) }
+
+    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
+        if !self.dir.join(SWITCH).exists() { return self.local.next_move_watched(prompt, watch) }
         let accounts = parse(&std::fs::read_to_string(self.dir.join(ACCOUNTS)).unwrap_or_default());
         for a in accounts {
             let id = format!("{} {}", a.url, a.model);
             if self.resting.borrow().get(&id).is_some_and(|t| t.elapsed() < REST) { continue }
             let m = RemoteModel { key: Some(a.key.clone()), ..RemoteModel::at(a.kind, &a.url, &a.model) };
-            match m.next_move(prompt) {
+            match m.next_move_watched(prompt, watch) {
                 Err(ModelError::Quota(why)) => {
                     eprintln!("cloud: {} {} is used up ({why}); trying the next account", a.name, a.model);
                     self.resting.borrow_mut().insert(id, Instant::now());
@@ -69,7 +71,7 @@ impl<M: Model> Model for Pooled<M> {
             }
         }
         eprintln!("cloud: no account has allowance left; using this machine's model");
-        self.local.next_move(prompt)
+        self.local.next_move_watched(prompt, watch)
     }
 
     fn context_tokens(&self) -> usize { self.local.context_tokens() }

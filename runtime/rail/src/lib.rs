@@ -1,6 +1,7 @@
 pub mod cards;
 pub mod update;
 pub mod models;
+pub mod sidebar;
 
 /// The Help window's text, in Pango markup: what the AI OS is, how to talk to it, the models and
 /// runners it works with, and the accounts the cloud pool will need. Every feature a person can

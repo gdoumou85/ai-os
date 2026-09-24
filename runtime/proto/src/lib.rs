@@ -51,6 +51,11 @@ pub struct NoteView { pub topic: String, pub kind: String, pub text: String, pub
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Notebook { pub name: String, pub entries: Vec<NoteView> }
 
+/// One project as the rail's Projects page shows it (sidebar design §3). `touched_at`: seconds
+/// since the epoch, the newer of the folder's and its BLUEPRINT.md's change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectView { pub name: String, pub folder: String, pub summary: String, pub touched_at: i64 }
+
 /// One event, `kind` first (the same first-key rule the move grammar lives by).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -70,6 +75,8 @@ pub enum Event {
     Learned { job_id: String, lines: Vec<String>, #[serde(default)] pending: bool },
     /// The Skills screen's notebooks, answered to the client that asked (Phase 3 §6).
     Skills { notebooks: Vec<Notebook> },
+    /// The Projects page's list, answered to the client that asked, newest first.
+    Projects { projects: Vec<ProjectView> },
     Busy { job_id: String, text: String },
     State { job: Option<JobState> },
     /// The service could not read a client line. Sent to that client only.
@@ -98,6 +105,8 @@ pub enum Request {
     #[serde(rename = "hello")] Hello(serde_json::Map<String, serde_json::Value>),
     /// The Skills screen asks for the notebooks (Phase 3 §6); answered to that client only.
     #[serde(rename = "skills")] Skills {},
+    /// The Projects page asks for the projects.
+    #[serde(rename = "projects")] Projects {},
     /// The Skills screen's ✕ on one entry.
     #[serde(rename = "forget")] Forget { notebook: String, topic: String },
     /// Clear: the AI forgets the chat, and every client empties its screen on `Cleared`.
@@ -174,6 +183,7 @@ mod tests {
             Event::Stopped { job_id: "j".into(), text: "Stopped".into(), files: vec![] },
             Event::Learned { job_id: "j".into(), lines: vec!["Learned: open a website (this computer)".into()], pending: false },
             Event::Skills { notebooks: vec![Notebook { name: "this computer".into(), entries: vec![NoteView { topic: "t".into(), kind: "technique".into(), text: "x".into(), uses: 2, failed: false, needs_check: true }] }] },
+            Event::Projects { projects: vec![ProjectView { name: "game".into(), folder: "/p/game".into(), summary: "A pool table".into(), touched_at: 1 }] },
             Event::Busy { job_id: "j".into(), text: "working".into() },
             Event::State { job: None },
             Event::Error { text: "bad".into() },
@@ -189,6 +199,7 @@ mod tests {
     #[test]
     fn skills_requests_have_the_wire_shape_the_service_reads() {
         assert_eq!(serde_json::to_string(&Request::Skills {}).unwrap(), r#"{"skills":{}}"#);
+        assert_eq!(serde_json::to_string(&Request::Projects {}).unwrap(), r#"{"projects":{}}"#);
         let f = Request::Forget { notebook: "blender".into(), topic: "bevel".into() };
         assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&f).unwrap()).unwrap(), f);
         let e = Event::Skills { notebooks: vec![Notebook { name: "this computer".into(), entries: vec![NoteView { topic: "t".into(), kind: "technique".into(), text: "x".into(), uses: 2, failed: false, needs_check: true }] }] };
