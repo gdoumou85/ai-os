@@ -690,9 +690,11 @@ impl<M: Model> Engine<M> {
 
     /// Clear pressed while a turn worked: run by the engine thread after the stopped turn has
     /// written its last rows, so none of them leak into the fresh chat (final review, 2026-09-24).
-    /// No "stop" word was queued behind this stop, so the user's next real one must be answered.
+    /// No "stop" word was queued behind this stop, so the user's next real one must be answered;
+    /// and nothing said before the Clear may run after it.
     pub fn clear(&mut self) -> Result<(), EngineError> {
         self.just_stopped = false;
+        self.pending.clear();
         Ok(self.store.forget_chat()?)
     }
 }

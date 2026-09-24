@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
-/// `Clear`: pressed while a turn worked. It waits behind that turn so the stopped turn's last
-/// rows are written first and then forgotten with the rest (final review, 2026-09-24).
+/// `Clear`: pressed while a turn worked. The screen was cleared at once; this waits behind that
+/// turn so its last rows are written first and then forgotten with the rest (final review,
+/// 2026-09-24).
 enum Command { Say(String), Clear }
 
 /// Everything the client threads need without touching the engine.
@@ -158,11 +159,9 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         for cmd in rx {
             let text = match cmd {
                 Command::Say(text) => text,
+                // `Cleared` already went out from the client thread.
                 Command::Clear => {
-                    match engine.clear() {
-                        Ok(()) => sh.broadcast(&Event::Cleared {}),
-                        Err(e) => sh.broadcast(&Event::Error { text: format!("could not clear the chat: {e}") }),
-                    }
+                    if let Err(e) = engine.clear() { sh.broadcast(&Event::Error { text: format!("could not clear the chat: {e}") }); }
                     engine.stop_flag().swap(false, Ordering::SeqCst);
                     continue;
                 }
@@ -235,12 +234,16 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                     }
                     Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
                     Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
-                    // A turn open (the inbox exists): the flag lands between its steps, as "stop"
-                    // would, and the engine clears once that turn has ended (`Command::Clear`). A
-                    // question already ended its own turn, so then nothing is running to stop.
-                    Ok(Request::Clear {}) if inbox.lock().unwrap().is_some() => {
+                    // A turn open (the inbox exists): its inbox closes and the words in it go (the
+                    // user cleared them), the flag lands between its steps as "stop" would, and the
+                    // screen empties now; the engine forgets the rows once that turn has ended
+                    // (`Command::Clear`). Words typed after this find no inbox, so they queue behind
+                    // the Clear and run in the fresh chat. A question already ended its own turn,
+                    // so then nothing is running to stop.
+                    Ok(Request::Clear {}) if inbox.lock().unwrap().take().is_some() => {
                         stop.store(true, Ordering::SeqCst);
                         if tx.send(Command::Clear).is_err() { break; }
+                        sh.broadcast(&Event::Cleared {});
                     }
                     // Nothing running: on this thread at once, like the Skills screen.
                     Ok(Request::Clear {}) => match crate::store::Store::open(&db_path()).and_then(|s| s.forget_chat()) {

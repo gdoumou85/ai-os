@@ -93,6 +93,13 @@ fn until(c: &mut Client, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
     panic!("connection closed before the event: {got:?}");
 }
 
+/// `until` for the read half of a split client.
+fn until_r(r: &mut aios_proto::Reader, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
+    let mut got = vec![];
+    while let Some(e) = r.next_event() { let stop = pred(&e); got.push(e); if stop { return got; } }
+    panic!("connection closed before the event: {got:?}");
+}
+
 fn write(p: &str) -> Action { Action::WriteFile { path: p.into(), contents: "x".into() } }
 fn job() -> Vec<Move> { vec![
     Move::Act { thought: String::new(), action: write("a.txt") },
@@ -274,29 +281,34 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
 }
 
 #[test]
-fn clear_during_work_stops_it_then_forgets_every_row() {
+fn clear_during_work_empties_the_screen_at_once_and_the_next_word_starts_fresh() {
     let _turn = db_turn();
     let dir = temp("clear-work");
     let db = test_db();
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
-    let sock = start_with(&dir, job(), Arc::new(Mutex::new(Some(grx))), true);
+    let reply = |t: &str| Move::Reply { thought: String::new(), text: t.into(), outcome: aios_core::moves::Ending::Done };
+    // The Act, the Reply the Stop swallows, then the answer to the word said after the Clear.
+    let mut moves = job();
+    moves.push(reply("hello, fresh start"));
+    let sock = start_with(&dir, moves, Arc::new(Mutex::new(Some(grx))), true);
     let (mut r, mut w) = connect(&sock).split();
-    w.request(&aios_proto::Request::Say("make p".into())).unwrap();
-    gtx.send(()).unwrap();
-    while !matches!(r.next_event(), Some(Event::Step { .. }) | None) {}
+    w.say("make p").unwrap();
+    gtx.send(()).unwrap(); // the Act
+    until_r(&mut r, |e| matches!(e, Event::Step { .. }));
+    // The engine waits at the gate inside its next model call: Cleared must not wait for it.
     w.request(&aios_proto::Request::Clear {}).unwrap();
-    // One reader thread takes a client's requests in order: the hello answered means the Clear
-    // before it has armed the stop flag, so opening the gate next cannot race past the stop check.
-    w.hello().unwrap();
-    while !matches!(r.next_event(), Some(Event::State { .. }) | None) {}
-    gtx.send(()).unwrap();
-    // Cleared comes after Stopped now: the stopped turn writes its last rows first (final review).
-    let mut got = vec![];
-    while let Some(e) = r.next_event() { let end = matches!(e, Event::Cleared {}); got.push(e); if end { break; } }
-    let ends: Vec<&Event> = got.iter().filter(|e| matches!(e, Event::Stopped { .. } | Event::Done { .. } | Event::Cleared {})).collect();
-    assert!(matches!(&ends[..], [Event::Stopped { .. }, Event::Cleared {}]), "{got:?}");
+    let got = until_r(&mut r, |e| matches!(e, Event::Cleared {} | Event::Stopped { .. }));
+    assert!(matches!(got.last(), Some(Event::Cleared {})), "Cleared comes before Stopped: {got:?}");
+    w.say("hello again").unwrap();
+    until_r(&mut r, |e| matches!(e, Event::You { text } if text == "hello again"));
+    gtx.send(()).unwrap(); // the Reply the Stop swallows
+    gtx.send(()).unwrap(); // the answer to "hello again"
+    let got = until_r(&mut r, |e| matches!(e, Event::Said { .. }));
+    assert!(got.iter().any(|e| matches!(e, Event::Stopped { .. })), "{got:?}");
+    assert!(matches!(got.last(), Some(Event::Said { text }) if text == "hello, fresh start"), "{got:?}");
+    // Only the new exchange: nothing of the stopped turn leaks into the fresh chat.
     let rows = Store::open(db.to_str().unwrap()).unwrap().all_messages().unwrap();
-    assert!(rows.is_empty(), "nothing of the stopped turn leaks into the fresh chat: {rows:?}");
+    assert!(matches!(&rows[..], [(u, said), (m, answer)] if u == "user" && said == "hello again" && m == "assistant" && answer.contains("hello, fresh start")), "{rows:?}");
 }
 
 #[test]
