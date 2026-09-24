@@ -52,6 +52,12 @@ pub struct Engine<M: Model> {
     just_stopped: bool,
     /// Words sent while a turn was ending (Stop, the cap, an error): they run as the next turn.
     pending: Vec<String>,
+    /// The last turn ended on a question: its request and the question, so the answer carries
+    /// them. Alone, "search the whole system" read as a new vague request and a 9B asked again,
+    /// round after round (the owner, 2026-09-24).
+    asked: Option<String>,
+    /// This turn answers a question: no second one, the model works with the answer.
+    answered: bool,
 }
 
 /// The windows a job worked: those it looked into, in first-seen order, from the steps that
@@ -191,7 +197,7 @@ impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf) -> Self {
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         Self { store, model, default_root, log_path, workers, housekeeping_dir, home, sink: Box::new(|_| {}), out: vec![],
-            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![] }
+            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![], asked: None, answered: false }
     }
 
     /// Where commands run (tests point it at a temp folder).
@@ -337,8 +343,13 @@ impl<M: Model> Engine<M> {
         self.just_stopped = false;
         let mut text = text.to_string();
         loop {
+            // Only while the question is still the last word: a Clear since then forgot it.
+            let last_ask = self.store.recent_messages(1)?.first().is_some_and(|(r, t)| r == "assistant" && t.contains(r#""move":"ask""#));
+            let answer_to = self.asked.take().filter(|_| last_ask);
+            self.answered = answer_to.is_some();
             self.store.push_message("user", &text)?;
-            let mut turn = Job::turn(&self.home.display().to_string(), &text);
+            let request = answer_to.map_or(text.clone(), |a| format!("{a}{text}"));
+            let mut turn = Job::turn(&self.home.display().to_string(), &request);
             self.give_tips(&mut turn);
             *self.inbox.lock().unwrap() = Some(vec![]);
             let r = self.run_turn(&mut turn);
@@ -448,11 +459,17 @@ impl<M: Model> Engine<M> {
                     if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, if outcome == Ending::CouldNot { State::Failed } else { State::Done }, text);
                 }
+                Move::Ask { .. } if self.answered => {
+                    self.store.push_message("result", "the user already answered your question: work with that answer, or reply")?;
+                }
                 Move::Ask { question, options, .. } => {
                     let more = self.take_inbox(true);
                     if !more.is_empty() { for w in more { self.heard(turn, &w)?; } continue; }
                     self.image = None;
                     if !turn.steps.is_empty() { self.write_journal(turn, "asked a question", &question); }
+                    self.asked = Some(format!("{}
+(you asked) {question}
+(their answer) ", turn.request));
                     self.emit(Event::NeedsAnswer { job_id: turn.id.clone(), questions: vec![question], options: vec![options] });
                     return Ok(());
                 }
@@ -488,7 +505,7 @@ impl<M: Model> Engine<M> {
         let budget = self.model.context_tokens().saturating_sub(1500 + (system.len() + ctx.len()) / 4);
         let mut chat = prompt::fit(&self.store.all_messages()?, budget);
         let last = chat.pop().map(|m| m.content).unwrap_or_default();
-        Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: vec!["reply", "ask", "todo", "act", "remember"], image: self.image.take(), no_screen: !sees })
+        Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: if self.answered { vec!["reply", "todo", "act", "remember"] } else { vec!["reply", "ask", "todo", "act", "remember"] }, image: self.image.take(), no_screen: !sees })
     }
 
     /// Runs one action and puts its result in the conversation. `true`: the turn ended here.
@@ -769,6 +786,24 @@ mod tests {
         e.handle("Python").unwrap();
         let p = &e.model.prompts.borrow()[1];
         assert!(p.history.iter().any(|m| m.content.contains("Which language?")) && p.user.ends_with("Python"), "{p:?}");
+        assert!(p.user.contains("working on: write me a script
+(you asked) Which language?
+(their answer) Python") && !p.allowed.contains(&"ask"), "{p:?}");
+    }
+
+    #[test]
+    fn an_answered_question_is_not_asked_again() {
+        let q = || Move::Ask { thought: String::new(), question: "Which scope?".into(), options: vec!["All".into()] };
+        let (mut e, _, _) = engine_with(vec![q(), q(), reply("Here they are."), q()], "ask twice");
+        e.handle("list my projects").unwrap();
+        let ev = events_of(&mut e, "All");
+        assert_eq!(ev, vec![Event::Said { text: "Here they are.".into() }]);
+        // A Clear forgets the question: the next words are a request of their own, and may be asked about.
+        e.store.forget_chat().unwrap();
+        let ev = events_of(&mut e, "something new");
+        assert!(matches!(ev.last(), Some(Event::NeedsAnswer { .. })), "{ev:?}");
+        assert!(e.model.prompts.borrow()[3].user.contains("working on: something new
+"));
     }
 
     #[test]
