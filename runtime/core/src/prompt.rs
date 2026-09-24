@@ -85,6 +85,12 @@ pub fn todo_lines(items: &[TodoItem]) -> Vec<String> {
     items.iter().map(|i| format!("[{}] {}", if i.done { "x" } else { " " }, i.text.trim())).collect()
 }
 
+/// What an alert turn works on (watchers design §2): what happened, and why the watcher was there.
+pub fn alert_request(a: &crate::watchers::Alert) -> String {
+    format!("An alert woke you. Watcher: {} (made by {}; {}). What happened: {}. Its reason: {}. After acting on it, bring its reason up to date with watch, or unwatch it if its job is done.",
+        a.watcher, a.made_by, if a.urgent { "urgent" } else { "not urgent" }, a.text, a.reason)
+}
+
 /// The chat as the model gets it (one-loop design §2): stored rows, newest kept first, results
 /// older than the newest six cut to 300 chars, the oldest dropped once `budget` tokens (chars/4)
 /// are spent. `result` rows are user-side, marked, so the model tells them from the user. The

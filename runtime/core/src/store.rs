@@ -14,7 +14,7 @@ pub struct ProjectRow { pub name: String, pub folder: String, pub description: S
 /// Memory that lives outside the chat: projects, jobs, standing instructions, recent messages.
 /// The same SQLite file also holds the executor's `jobs`/`actions` tables (separate connection),
 /// so these tables are named `projects`, `core_jobs`, `instructions`, `messages` to avoid the clash.
-pub struct Store { conn: Connection }
+pub struct Store { conn: Connection, chat: String }
 
 pub fn now_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0) }
 
@@ -30,16 +30,20 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY, folder TEXT NOT NULL, description TEXT NOT NULL, touched_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS core_jobs(id TEXT PRIMARY KEY, project TEXT NOT NULL, state TEXT NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS instructions(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, at INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL, chat TEXT NOT NULL DEFAULT 'main');
              CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
+        // A database from before v0.12.0: every message in it is the owner's.
+        if conn.prepare("SELECT chat FROM messages LIMIT 0").is_err() {
+            conn.execute("ALTER TABLE messages ADD COLUMN chat TEXT NOT NULL DEFAULT 'main'", ())?;
+        }
         // The service reads and deletes notebook entries on its own connection while the engine
         // works (Phase 3 §6): wait for the other side's write rather than fail on a locked file.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         crate::notes::init(&conn)?;
         crate::machine::init(&conn)?;
         crate::watchers::init(&conn)?;
-        Ok(Self { conn })
+        Ok(Self { conn, chat: "main".into() })
     }
 
     pub fn upsert_project(&self, name: &str, folder: &str, description: &str) -> Result<(), StoreError> {
@@ -123,8 +127,13 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The conversation messages go to and come from: `main` is the owner's, `alert-<id>` an
+    /// alert turn's (watchers design §2).
+    pub fn set_chat(&mut self, chat: &str) { self.chat = chat.into(); }
+    pub fn chat(&self) -> &str { &self.chat }
+
     pub fn push_message(&self, role: &str, text: &str) -> Result<(), StoreError> {
-        self.conn.execute("INSERT INTO messages(role, text, at) VALUES (?1, ?2, ?3)", (role, text, now_ms()))?;
+        self.conn.execute("INSERT INTO messages(role, text, at, chat) VALUES (?1, ?2, ?3, ?4)", (role, text, now_ms(), &self.chat))?;
         Ok(())
     }
 
@@ -132,20 +141,26 @@ impl Store {
     /// Clear that kept "(Noted for the future: …Blender…)" answered his next "Hello" with Blender,
     /// and nothing else could forget them). Projects and notebooks stay.
     pub fn forget_chat(&self) -> Result<(), StoreError> {
-        self.forget_messages()?;
+        self.forget_all_messages()?;
         self.conn.execute("DELETE FROM instructions", ())?;
         Ok(())
     }
 
-    /// A fresh chat that keeps the standing instructions: at a restart, and on a switch of project.
+    /// This chat afresh: on a switch of project, and when an alert turn ends.
     pub fn forget_messages(&self) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM messages WHERE chat = ?1", [&self.chat])?;
+        Ok(())
+    }
+
+    /// Every chat, the owner's and any alert's: at a restart, and in Clear.
+    pub fn forget_all_messages(&self) -> Result<(), StoreError> {
         self.conn.execute("DELETE FROM messages", ())?;
         Ok(())
     }
 
     pub fn recent_messages(&self, n: usize) -> Result<Vec<(String, String)>, StoreError> {
-        let mut st = self.conn.prepare("SELECT role, text FROM messages ORDER BY id DESC LIMIT ?1")?;
-        let rows = st.query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut st = self.conn.prepare("SELECT role, text FROM messages WHERE chat = ?2 ORDER BY id DESC LIMIT ?1")?;
+        let rows = st.query_map((n as i64, &self.chat), |r| Ok((r.get(0)?, r.get(1)?)))?;
         let mut v: Vec<(String, String)> = rows.collect::<Result<_, _>>()?;
         v.reverse();
         Ok(v)
@@ -153,8 +168,8 @@ impl Store {
 
     /// The chat since the last Clear, oldest first: what the model's conversation is built from.
     pub fn all_messages(&self) -> Result<Vec<(String, String)>, StoreError> {
-        let mut st = self.conn.prepare("SELECT role, text FROM messages ORDER BY id")?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut st = self.conn.prepare("SELECT role, text FROM messages WHERE chat = ?1 ORDER BY id")?;
+        let rows = st.query_map([&self.chat], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 }
@@ -222,5 +237,35 @@ mod tests {
         assert!(s.open_job().unwrap().is_none());
         let state: String = s.conn.query_row("SELECT state FROM core_jobs WHERE id = 'old'", [], |r| r.get(0)).unwrap();
         assert_eq!(state, "failed", "closed for good, not re-read every time");
+    }
+
+    #[test]
+    fn each_chat_keeps_its_own_messages_and_clear_forgets_them_all() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.push_message("user", "hi").unwrap();
+        s.set_chat("alert-1");
+        s.push_message("user", "an alert").unwrap();
+        assert_eq!(s.all_messages().unwrap(), vec![("user".to_string(), "an alert".to_string())]);
+        s.forget_messages().unwrap();
+        s.set_chat("main");
+        assert_eq!(s.all_messages().unwrap(), vec![("user".to_string(), "hi".to_string())]);
+        s.set_chat("alert-2");
+        s.push_message("user", "x").unwrap();
+        s.forget_chat().unwrap();
+        assert!(s.all_messages().unwrap().is_empty());
+        s.set_chat("main");
+        assert!(s.all_messages().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_database_from_before_chats_keeps_its_messages_as_the_owners() {
+        let path = std::env::temp_dir().join(format!("ai-os-old-chat-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
+                         INSERT INTO messages(role, text, at) VALUES ('user', 'old', 1);").unwrap();
+        drop(c);
+        let s = Store::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(s.all_messages().unwrap(), vec![("user".to_string(), "old".to_string())]);
     }
 }

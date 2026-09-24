@@ -33,6 +33,9 @@ pub enum EngineError {
 /// the service then queues the words as a new turn instead.
 pub type Inbox = Arc<Mutex<Option<Vec<String>>>>;
 
+/// Alerts waiting for the engine thread (watchers design §2), urgent ones first.
+pub type Alerts = Arc<Mutex<std::collections::VecDeque<crate::watchers::Alert>>>;
+
 pub struct Engine<M: Model> {
     pub store: Store,
     pub model: M,
@@ -60,6 +63,13 @@ pub struct Engine<M: Model> {
     answered: bool,
     /// The project the chat is about: a message naming another starts a fresh chat.
     chat_project: Option<String>,
+    /// Alerts waiting: the service fills it, the engine thread takes one between turns, and a
+    /// turn takes an urgent one when `yield_` is up.
+    alerts: Alerts,
+    /// Raised with an urgent alert: the turn at work parks at its next step.
+    yield_: Arc<AtomicBool>,
+    /// The turn running is an alert's: no inbox, no question, nothing kept for later.
+    in_alert: bool,
 }
 
 /// The windows a job worked: those it looked into, in first-seen order, from the steps that
@@ -205,7 +215,8 @@ impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf) -> Self {
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         Self { store, model, default_root, log_path, workers, housekeeping_dir, home, sink: Box::new(|_| {}), out: vec![],
-            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![], asked: None, answered: false, chat_project: None }
+            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![], asked: None, answered: false, chat_project: None,
+            alerts: Default::default(), yield_: Arc::new(AtomicBool::new(false)), in_alert: false }
     }
 
     /// Where commands run (tests point it at a temp folder).
@@ -213,6 +224,12 @@ impl<M: Model> Engine<M> {
 
     /// The service's handle on words sent while a turn works.
     pub fn inbox(&self) -> Inbox { self.inbox.clone() }
+
+    /// The service's handle on the alerts waiting (watchers design §2).
+    pub fn alerts(&self) -> Alerts { self.alerts.clone() }
+
+    /// Raised by the service with an urgent alert.
+    pub fn yield_flag(&self) -> Arc<AtomicBool> { self.yield_.clone() }
 
     /// What this machine has, ahead of every prompt (machine-map spec §2). Programs and installs
     /// are scanned each time, so something installed shows on the very next turn.
@@ -283,7 +300,7 @@ impl<M: Model> Engine<M> {
 
     /// `watch` (watchers design §1): creates the watcher or replaces the one of that name.
     fn watch(&mut self, turn: &Job, name: &str, reason: &str, urgent: bool, when: &str, command: &[String]) -> Result<Outcome, EngineError> {
-        let who = if asks_to_watch(&turn.request) { "you" } else { "AI" };
+        let who = if !self.in_alert && asks_to_watch(&turn.request) { "you" } else { "AI" };
         let words: String = turn.request.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
         let w = match crate::watchers::build(name, reason, urgent, &format!("{who} (\"{words}\")"), when, command.to_vec()) {
             Ok(w) => w,
@@ -351,7 +368,7 @@ impl<M: Model> Engine<M> {
         // A restart shows an empty screen, so the AI starts with an empty chat too: an update left
         // twenty old to-do lists behind a fresh "Hi AI" (the owner, 2026-09-24). What is kept
         // lives in the projects' notes, the journal and the standing instructions.
-        self.store.forget_messages()?;
+        self.store.forget_all_messages()?;
         if let Some(mut old) = self.store.open_job()? {
             old.state = State::Cancelled;
             self.store.save_job(&old)?;
@@ -372,6 +389,41 @@ impl<M: Model> Engine<M> {
         r?;
         Ok(out)
     }
+
+    /// An alert the service took off the queue between turns (watchers design §2).
+    pub fn handle_alert(&mut self, a: &crate::watchers::Alert) -> Result<Vec<Event>, EngineError> {
+        self.out.clear();
+        let r = self.alert_turn(a);
+        let out = std::mem::take(&mut self.out);
+        r?;
+        Ok(out)
+    }
+
+    /// One alert as a turn of its own, in a chat of its own that goes when it ends; the owner's
+    /// chat, and a turn of theirs parked under this one, are left as they were. How it ended.
+    fn alert_turn(&mut self, a: &crate::watchers::Alert) -> Result<State, EngineError> {
+        let mut turn = Job::turn(&self.home.display().to_string(), &prompt::alert_request(a));
+        let main = self.store.chat().to_string();
+        let (answered, image) = (std::mem::take(&mut self.answered), self.image.take());
+        self.store.set_chat(&format!("alert-{}", turn.id));
+        self.in_alert = true;
+        self.give_tips(&mut turn);
+        self.emit(Event::Alert { job_id: turn.id.clone(), watcher: a.watcher.clone(), text: a.text.clone(), reason: a.reason.clone(), urgent: a.urgent });
+        let r = self.store.push_message("user", &turn.request).map_err(EngineError::from).and_then(|_| self.run_turn(&mut turn));
+        // Its card is up from the start, so an error closes it like work that could not go on.
+        let r = match r { Err(e) if turn.is_open() => self.end(&mut turn, State::Failed, format!("I could not go on: {e}")), r => r };
+        let forgot = self.store.forget_messages();
+        self.store.set_chat(&main);
+        self.in_alert = false;
+        (self.answered, self.image) = (answered, image);
+        r?;
+        forgot?;
+        Ok(turn.state)
+    }
+
+    /// Whether the turn has its card up: from its first to-do list or action, or from the start
+    /// for an alert.
+    fn has_card(&self, turn: &Job) -> bool { self.in_alert || !turn.steps.is_empty() || !turn.plan.is_empty() }
 
     fn handle_inner(&mut self, text: &str) -> Result<(), EngineError> {
         if is_keep_learned(text) || is_discard_learned(text) {
@@ -480,13 +532,25 @@ impl<M: Model> Engine<M> {
                 self.just_stopped = true;
                 return self.end(turn, State::Cancelled, "Stopped.".into());
             }
-            for w in self.take_inbox(false) { self.heard(turn, &w)?; }
+            // An urgent alert parks this turn where it stands (watchers design §2): the alert's
+            // turn runs, then this one carries on with its request, to-do list and steps.
+            if !self.in_alert && self.yield_.swap(false, Ordering::SeqCst) {
+                let urgent = { let mut q = self.alerts.lock().unwrap(); q.iter().position(|a| a.urgent).and_then(|i| q.remove(i)) };
+                if let Some(a) = urgent {
+                    // A Stop during the alert ends the parked turn too.
+                    if self.alert_turn(&a)? == State::Cancelled { return self.end(turn, State::Cancelled, "Stopped.".into()); }
+                    self.store.push_message("result", &format!("(an urgent alert was handled in between: {}; carry on)", a.watcher))?;
+                    continue;
+                }
+            }
+            // An alert's turn hears nobody: the owner's words wait for their own chat.
+            if !self.in_alert { for w in self.take_inbox(false) { self.heard(turn, &w)?; } }
             if turn.steps.len() >= Self::MAX_ACTIONS {
                 return self.end(turn, State::Failed, format!("I stopped after {} actions without finishing.", Self::MAX_ACTIONS));
             }
             if moves >= Self::MAX_MOVES {
                 let text = Self::WENT_ROUND.to_string();
-                if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                if !self.has_card(turn) { self.emit(Event::Said { text }); return Ok(()); }
                 return self.end(turn, State::Failed, text);
             }
             moves += 1;
@@ -516,7 +580,7 @@ impl<M: Model> Engine<M> {
                 }
                 Err(ModelError::BadJson(_)) => {
                     let text = "(I could not read my own answer twice — the model is not answering in the required format. Please say that again, or switch the model.)".to_string();
-                    if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                    if !self.has_card(turn) { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, State::Failed, text);
                 }
                 Err(ModelError::Stopped) => {
@@ -546,17 +610,17 @@ impl<M: Model> Engine<M> {
                             continue;
                         }
                     }
-                    let more = self.take_inbox(true);
+                    let more = if self.in_alert { vec![] } else { self.take_inbox(true) };
                     if !more.is_empty() { for w in more { self.heard(turn, &w)?; } continue; }
                     // A to-do list already put a card up: it closes like work did.
-                    if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                    if !self.has_card(turn) { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, if outcome == Ending::CouldNot { State::Failed } else { State::Done }, text);
                 }
-                Move::Ask { .. } if self.answered => {
-                    self.store.push_message("result", "the user already answered your question: work with that answer, or reply")?;
+                Move::Ask { .. } if self.answered || self.in_alert => {
+                    self.store.push_message("result", if self.in_alert { "nobody is here to answer during an alert: decide yourself, act, or reply" } else { "the user already answered your question: work with that answer, or reply" })?;
                 }
                 Move::Ask { question, options, .. } => {
-                    let more = self.take_inbox(true);
+                    let more = if self.in_alert { vec![] } else { self.take_inbox(true) };
                     if !more.is_empty() { for w in more { self.heard(turn, &w)?; } continue; }
                     self.image = None;
                     if !turn.steps.is_empty() { self.write_journal(turn, "asked a question", &question); }
@@ -577,7 +641,7 @@ impl<M: Model> Engine<M> {
                     if self.act(turn, action, &thought)? { return Ok(()); }
                 }
                 Move::Remember { text, .. } => {
-                    let note = if asks_to_keep(&turn.request) {
+                    let note = if asks_to_keep(&turn.request) && !self.in_alert {
                         self.store.add_instruction(&text)?;
                         self.emit(Event::Said { text: format!("(Noted for the future: {text})") });
                         format!("kept for every later conversation: {text}")
@@ -606,7 +670,7 @@ impl<M: Model> Engine<M> {
         let budget = window.saturating_sub((window / 4).max(1500) + (system.len() + ctx.len()) / 4);
         let mut chat = prompt::fit(&self.store.all_messages()?, budget);
         let last = chat.pop().map(|m| m.content).unwrap_or_default();
-        Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: if self.answered { vec!["reply", "todo", "act", "remember"] } else { vec!["reply", "ask", "todo", "act", "remember"] }, image: self.image.take(), no_screen: !sees })
+        Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: if self.answered || self.in_alert { vec!["reply", "todo", "act", "remember"] } else { vec!["reply", "ask", "todo", "act", "remember"] }, image: self.image.take(), no_screen: !sees })
     }
 
     /// Runs one action and puts its result in the conversation. `true`: the turn ended here.
@@ -744,7 +808,8 @@ impl<M: Model> Engine<M> {
         let n = seconds.clamp(1, 300);
         let mut waited = 0;
         while waited < n {
-            if self.stop.load(Ordering::SeqCst) || self.inbox.lock().unwrap().as_ref().is_some_and(|v| !v.is_empty()) { break; }
+            if self.stop.load(Ordering::SeqCst) { break; }
+            if !self.in_alert && (self.yield_.load(Ordering::SeqCst) || self.inbox.lock().unwrap().as_ref().is_some_and(|v| !v.is_empty())) { break; }
             std::thread::sleep(std::time::Duration::from_secs(1));
             waited += 1;
         }
@@ -779,9 +844,9 @@ impl<M: Model> Engine<M> {
     /// finished or failed turn gets its learning turn.
     fn end(&mut self, turn: &mut Job, state: State, text: String) -> Result<(), EngineError> {
         // The inbox shuts before the learning turn (it can take minutes): what came in is kept
-        // for the next turn, and a word sent after this is a new turn of its own.
-        let left = self.inbox.lock().unwrap().take().unwrap_or_default();
-        self.pending.extend(left);
+        // for the next turn, and a word sent after this is a new turn of its own. A parked turn's
+        // inbox stays open under an alert.
+        if !self.in_alert { let left = self.inbox.lock().unwrap().take().unwrap_or_default(); self.pending.extend(left); }
         self.image = None;
         turn.state = state;
         turn.outcome_text = text.clone();
@@ -1311,5 +1376,83 @@ mod tests {
         assert!(crate::watchers::get(e.store.conn(), "site").unwrap().unwrap().made_by.starts_with("AI"));
         e.handle("hello").unwrap();
         assert!(e.model.prompts.borrow().last().unwrap().user.contains("Your watchers: site (every 5 min)."));
+    }
+
+    fn alert(w: &str, urgent: bool) -> crate::watchers::Alert {
+        crate::watchers::Alert { watcher: w.into(), text: "AAPL is at 180".into(), reason: "I expect it to drop; tell the user".into(), urgent, made_by: "AI".into() }
+    }
+
+    /// Runs its next hook before each call, then answers from `inner`.
+    struct Staged { inner: crate::model::FakeModel, hooks: std::cell::RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>> }
+    impl Model for Staged {
+        fn next_move(&self, p: &Prompt) -> Result<Move, ModelError> {
+            if let Some(h) = self.hooks.borrow_mut().pop_front() { h() }
+            self.inner.next_move(p)
+        }
+    }
+
+    #[test]
+    fn an_alert_is_a_turn_in_its_own_chat_and_the_owners_chat_is_left_as_it_was() {
+        let (mut e, _, _) = engine_with(vec![reply("hi"), reply("Told them."), reply("still here")], "alert-chat");
+        e.handle("hello").unwrap();
+        let before = e.store.all_messages().unwrap();
+        let ev = e.handle_alert(&alert("price", false)).unwrap();
+        assert!(matches!(&ev[0], Event::Alert { watcher, urgent: false, .. } if watcher == "price"), "{ev:?}");
+        assert!(ev.iter().any(|v| matches!(v, Event::Done { text, .. } if text == "Told them.")), "the alert's card closes: {ev:?}");
+        {
+            let ps = e.model.prompts.borrow();
+            assert!(ps[1].user.contains("An alert woke you. Watcher: price (made by AI; not urgent)") && ps[1].user.contains("I expect it to drop"), "{}", ps[1].user);
+            assert!(!ps[1].history.iter().any(|m| m.content == "hello") && !ps[1].allowed.contains(&"ask"), "{:?}", ps[1]);
+        }
+        assert_eq!(e.store.all_messages().unwrap(), before);
+        let left: i64 = e.store.conn().query_row("SELECT COUNT(*) FROM messages WHERE chat != 'main'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "an alert's chat goes when its turn ends");
+        e.handle("are you there").unwrap();
+        assert!(e.model.prompts.borrow()[2].history.iter().any(|m| m.content == "hello"));
+    }
+
+    #[test]
+    fn an_urgent_alert_parks_the_turn_and_it_carries_on_with_its_list_and_steps() {
+        let todo = Move::Todo { thought: String::new(), items: vec![TodoItem { text: "build it".into(), done: false }] };
+        let model = Staged { inner: crate::model::FakeModel::new(vec![todo, act(run("true")), reply("Told them."), reply("built")]), hooks: Default::default() };
+        let (mut e, _, _) = crate::testing::engine_with_model(model, "urgent");
+        let (q, y) = (e.alerts(), e.yield_flag());
+        let raise: Box<dyn FnOnce()> = Box::new(move || { crate::watchers::enqueue(&mut q.lock().unwrap(), alert("price", true)); y.store(true, Ordering::SeqCst); });
+        e.model.hooks.borrow_mut().extend([Box::new(|| {}) as Box<dyn FnOnce()>, raise]);
+        let ev = e.handle_events("build it").unwrap();
+        let at = |f: &dyn Fn(&Event) -> bool| ev.iter().position(f).unwrap_or_else(|| panic!("{ev:?}"));
+        let step = at(&|v| matches!(v, Event::Step { .. }));
+        let alerted = at(&|v| matches!(v, Event::Alert { urgent: true, .. }));
+        let done = at(&|v| matches!(v, Event::Done { text, .. } if text == "built"));
+        assert!(step < alerted && alerted < done, "{ev:?}");
+        let ps = e.model.inner.prompts.borrow();
+        let last = ps.iter().rev().find(|p| p.allowed != ["learn"]).unwrap();
+        assert!(last.user.contains("Your to-do list: [ ] build it") && last.user.contains("urgent alert was handled in between: price"), "{}", last.user);
+        assert!(last.history.iter().any(|m| m.content.contains("run_command")), "its steps are still in its chat");
+        assert!(e.alerts().lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_during_an_urgent_alert_ends_the_parked_turn_too() {
+        let model = Staged { inner: crate::model::FakeModel::new(vec![act(run("true")), act(run("ls")), reply("never")]), hooks: Default::default() };
+        let (mut e, _, _) = crate::testing::engine_with_model(model, "urgent-stop");
+        let (q, y, stop) = (e.alerts(), e.yield_flag(), e.stop_flag());
+        let raise: Box<dyn FnOnce()> = Box::new(move || { crate::watchers::enqueue(&mut q.lock().unwrap(), alert("price", true)); y.store(true, Ordering::SeqCst); });
+        let press: Box<dyn FnOnce()> = Box::new(move || stop.store(true, Ordering::SeqCst));
+        e.model.hooks.borrow_mut().extend([raise, press]);
+        let ev = e.handle_events("build it").unwrap();
+        assert_eq!(ev.iter().filter(|v| matches!(v, Event::Stopped { .. })).count(), 2, "{ev:?}");
+        assert_eq!(e.model.inner.prompts.borrow().len(), 2);
+        assert!(e.handle_events("stop").unwrap().is_empty(), "one Stop answered both");
+    }
+
+    #[test]
+    fn a_watcher_set_during_an_alert_is_the_ais() {
+        let (mut e, _, _) = engine_with(vec![
+            act(Action::Watch { name: "price".into(), reason: "keep an eye on it".into(), urgent: false, when: "every 5 minutes".into(), command: vec![] }),
+            reply("Updated."),
+        ], "alert-watch");
+        e.handle_alert(&alert("price", false)).unwrap();
+        assert!(crate::watchers::get(e.store.conn(), "price").unwrap().unwrap().made_by.starts_with("AI"));
     }
 }
