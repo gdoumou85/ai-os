@@ -599,7 +599,20 @@ impl<M: Model> Engine<M> {
             .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
         if let Err(e) = wrote { eprintln!("engine: the journal was not written ({e})"); }
     }
-    fn wait(&mut self, seconds: u32) -> Outcome { Outcome::ok(format!("waited {seconds} s")) }
+    /// Gives something time to happen (one-loop design §1b). Stop, or a word from the user, cuts
+    /// it short; the flag is left set so the loop ends the turn as a Stop.
+    fn wait(&mut self, seconds: u32) -> Outcome {
+        let n = seconds.clamp(1, 300);
+        let mut waited = 0;
+        while waited < n {
+            if self.stop.load(Ordering::SeqCst) || self.inbox.lock().unwrap().as_ref().is_some_and(|v| !v.is_empty()) { break; }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            waited += 1;
+        }
+        let running = executor::programs::running();
+        let now = if running.is_empty() { String::new() } else { format!(" Running in the background now: {}.", running.join(", ")) };
+        Outcome::ok(format!("waited {waited} s of {n}.{now}"))
+    }
 
     /// The machine hand works in the user's home.
     fn executor_for(&self, turn: &Job) -> Result<Executor<Box<dyn Worker>>, EngineError> {
@@ -904,6 +917,38 @@ mod tests {
         let n = prompts.len();
         assert!(prompts[n - 2].user.contains("What earlier jobs did") && prompts[n - 2].user.contains("game.js"), "{}", prompts[n - 2].user);
         assert!(!prompts[n - 1].user.contains("What earlier jobs did"));
+    }
+
+    #[test]
+    fn words_sent_mid_work_join_the_next_step() {
+        // A model that, on its first call, has the user say something more.
+        struct Chatty { inner: crate::model::FakeModel, inbox: std::cell::RefCell<Option<Inbox>> }
+        impl Model for Chatty {
+            fn next_move(&self, p: &Prompt) -> Result<Move, ModelError> {
+                if let Some(i) = self.inbox.borrow_mut().take() { i.lock().unwrap().as_mut().unwrap().push("make it blue".into()); }
+                self.inner.next_move(p)
+            }
+        }
+        let rec = crate::testing::Recorder::default();
+        let root = crate::testing::temp_root("chatty");
+        for d in ["housekeeping", "projects", "home"] { std::fs::create_dir_all(root.join(d)).unwrap(); }
+        let model = Chatty { inner: crate::model::FakeModel::new(vec![act(run("true")), reply("blue it is")]), inbox: Default::default() };
+        let mut e = Engine::new(Store::open_in_memory().unwrap(), model, root.join("projects"), None, crate::testing::scripted_workers(&rec), root.join("housekeeping")).with_home(root.join("home"));
+        *e.model.inbox.borrow_mut() = Some(e.inbox());
+        e.handle("draw a bird").unwrap();
+        let p = e.model.inner.prompts.borrow();
+        assert!(p[1].user.contains("(added while you worked) make it blue"), "{}", p[1].user);
+        assert!(e.inbox().lock().unwrap().is_none(), "closed when the turn ends");
+    }
+
+    #[test]
+    fn wait_ends_early_on_stop() {
+        let (mut e, _, _) = engine_with(vec![], "wait");
+        e.stop_flag().store(true, Ordering::SeqCst);
+        let t = std::time::Instant::now();
+        let o = e.wait(300);
+        assert!(t.elapsed() < std::time::Duration::from_secs(3) && o.detail.starts_with("waited 0 s"), "{}", o.detail);
+        assert!(e.stop_flag().load(Ordering::SeqCst), "the flag is left for the loop to end the turn");
     }
 
     #[test]

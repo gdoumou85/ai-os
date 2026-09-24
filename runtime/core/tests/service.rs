@@ -5,7 +5,7 @@ use aios_core::moves::Move;
 use aios_core::service;
 use aios_core::store::Store;
 use aios_core::testing::{scripted_workers, Recorder};
-use aios_proto::{Client, Event, Waiting};
+use aios_proto::{Client, Event};
 use executor::action::Action;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -114,31 +114,30 @@ fn seq_is_contiguous_on_the_wire() {
 }
 
 #[test]
-#[ignore = "rewritten in Task 7 (inbox)"]
-fn hello_answers_state_and_busy_is_answered_during_a_job() {
-    let dir = temp("busy");
+fn words_sent_during_work_join_it_instead_of_busy() {
+    let dir = temp("inbox");
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
-    let gate = Arc::new(Mutex::new(Some(grx)));
-    let sock = start(&dir, job(), gate.clone());
+    // The reply after the words is not the end: they join the turn, so the model moves once more.
+    let reply = |t: &str| Move::Reply { thought: String::new(), text: t.into(), outcome: aios_core::moves::Ending::Done };
+    let moves = vec![Move::Act { thought: String::new(), action: write("a.txt") }, reply("one"), reply("finished")];
+    let sock = start(&dir, moves, Arc::new(Mutex::new(Some(grx))));
     let mut a = connect(&sock);
     a.hello().unwrap();
     assert_eq!(a.next_event(), Some(Event::State { job: None }));
     a.say("make p").unwrap();
-    gtx.send(()).unwrap(); // Start
-    gtx.send(()).unwrap(); // Plan
-    until(&mut a, |e| matches!(e, Event::Plan { .. }));
-    // The engine is now blocked inside the job (waiting for the gate before Act).
+    gtx.send(()).unwrap(); // the Act
+    until(&mut a, |e| matches!(e, Event::Step { .. }));
+    // The engine now waits at the gate before its next move: the turn is open.
     let mut b = connect(&sock);
     b.hello().unwrap();
-    // b is registered on connect, so the engine's status line (a busy tick) can beat the state.
     let got = until(&mut b, |e| matches!(e, Event::State { .. }));
-    let Some(Event::State { job: Some(st) }) = got.last().cloned() else { panic!("{got:?}") };
-    assert_eq!((st.name.as_str(), st.plan.len(), st.waiting), ("p", 1, Waiting::None));
+    assert!(matches!(got.last(), Some(Event::State { job: Some(st) }) if st.steps.len() == 1), "{got:?}");
     b.say("use python").unwrap();
-    until(&mut b, |e| matches!(e, Event::You { .. }));
-    until(&mut b, |e| matches!(e, Event::Busy { text, .. } if text.contains("working on p")));
-    gtx.send(()).unwrap(); gtx.send(()).unwrap(); // Act, Done
-    until(&mut a, |e| matches!(e, Event::Done { .. }));
+    let got = until(&mut b, |e| matches!(e, Event::You { .. }));
+    assert!(!got.iter().any(|e| matches!(e, Event::Busy { text, .. } if text.contains("Say stop"))), "{got:?}");
+    for _ in 0..3 { gtx.send(()).unwrap(); } // reply "one", reply "finished", the learning turn
+    let got = until(&mut a, |e| matches!(e, Event::Done { .. }));
+    assert!(matches!(got.last(), Some(Event::Done { text, .. }) if text == "finished"), "{got:?}");
     b.hello().unwrap();
     let got = until(&mut b, |e| matches!(e, Event::State { .. }));
     assert_eq!(got.last(), Some(&Event::State { job: None }));
@@ -246,21 +245,19 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
 }
 
 #[test]
-#[ignore = "rewritten in Task 7 (inbox)"]
-fn clear_ends_a_job_waiting_on_a_question() {
-    // The owner's run, 2026-09-23: Clear left the car-rental question waiting, and the next "Hi"
-    // went to it as the answer. Cleared or not (AI_OS_DB is one per process), the job must stop.
-    let dir = temp("clear-job");
-    let sock = start(&dir, vec![
-        Move::Ask { thought: String::new(), question: "Which stack?".into(), options: vec![] },
-    ], Arc::new(Mutex::new(None)));
+fn clear_during_work_stops_it() {
+    let dir = temp("clear-work");
+    let (gtx, grx) = std::sync::mpsc::channel::<()>();
+    let sock = start(&dir, job(), Arc::new(Mutex::new(Some(grx))));
     let (mut r, mut w) = connect(&sock).split();
     w.request(&aios_proto::Request::Say("make p".into())).unwrap();
-    while !matches!(r.next_event(), Some(Event::NeedsAnswer { .. }) | None) {}
+    gtx.send(()).unwrap();
+    while !matches!(r.next_event(), Some(Event::Step { .. }) | None) {}
     w.request(&aios_proto::Request::Clear {}).unwrap();
+    gtx.send(()).unwrap();
     let mut got = vec![];
-    while let Some(e) = r.next_event() { let end = matches!(e, Event::Stopped { .. }); got.push(e); if end { break; } }
-    assert!(matches!(got.last(), Some(Event::Stopped { .. })), "{got:?}");
+    while let Some(e) = r.next_event() { let end = matches!(e, Event::Stopped { .. } | Event::Done { .. }); got.push(e); if end { break; } }
+    assert!(got.iter().any(|e| matches!(e, Event::Cleared {})) && matches!(got.last(), Some(Event::Stopped { .. })), "{got:?}");
 }
 
 #[test]
