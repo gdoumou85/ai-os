@@ -71,6 +71,14 @@ pub enum Action {
         #[serde(default)]
         enter: bool,
     },
+    /// A page as text (one-loop design §1b), paged like `ReadFile`.
+    WebRead {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_line: Option<usize>,
+    },
+    /// The top results of a web search: title, address, snippet.
+    WebSearch { query: String },
 }
 
 /// A desktop-entry id: `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Dots and capitals are normal there

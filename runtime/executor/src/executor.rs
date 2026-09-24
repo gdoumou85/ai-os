@@ -15,7 +15,8 @@ pub enum Lane {
 /// Pure: the same action always picks the same hand.
 pub fn lane(action: &Action) -> Lane {
     match action {
-        Action::RunCommand { .. } | Action::ReadFile { .. } | Action::WriteFile { .. } | Action::EditFile { .. } => Lane::Machine,
+        Action::RunCommand { .. } | Action::ReadFile { .. } | Action::WriteFile { .. } | Action::EditFile { .. }
+        | Action::WebRead { .. } | Action::WebSearch { .. } => Lane::Machine,
         Action::SetSetting { .. } => Lane::Engine,
         // Listed, not `_`: a new action kind must fail to compile here rather than land
         // silently on the wrong hand.

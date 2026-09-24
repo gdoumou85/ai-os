@@ -7,5 +7,6 @@ pub mod worker;
 pub mod desktop;
 pub mod atspi;
 pub mod screen;
+pub mod web;
 pub mod awake;
 pub mod executor;

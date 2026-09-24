@@ -26,6 +26,8 @@ pub fn describe(action: &Action) -> String {
         Action::ScreenLook { cell: Some(c) } => format!("looked closely at screen square {c}"),
         Action::ScreenClick { name, double, .. } => format!("{} {name} on the screen", if *double { "double-clicked" } else { "clicked" }),
         Action::ScreenType { text, enter } => format!("typed {} on the screen{}", plural(text.chars().count(), "character"), if *enter { " and pressed Enter" } else { "" }),
+        Action::WebRead { url, .. } => format!("read the page {url}"),
+        Action::WebSearch { query } => format!("searched the web for {query}"),
     }
 }
 
@@ -51,6 +53,8 @@ pub fn doing(action: &Action) -> String {
         Action::ScreenLook { cell: Some(c) } => format!("looking closely at screen square {c}"),
         Action::ScreenClick { name, .. } => format!("clicking {name} on the screen"),
         Action::ScreenType { .. } => "typing on the screen".into(),
+        Action::WebRead { url, .. } => format!("reading the page {url}"),
+        Action::WebSearch { query } => format!("searching the web for {query}"),
     }
 }
 

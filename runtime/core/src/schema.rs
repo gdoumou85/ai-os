@@ -22,7 +22,9 @@ pub const MOVE_SCHEMA: &str = r##"{
       { "type":"object", "properties": { "kind": {"enum":["open_app"]}, "name": {"type":"string"}, "visible": {"type":"boolean"} }, "required":["kind","name"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["screen_look"]}, "cell": {"type":"integer","minimum":1,"maximum":48} }, "required":["kind"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["screen_click"]}, "cell": {"type":"integer","minimum":1,"maximum":48}, "spot": {"type":"integer","minimum":1,"maximum":16}, "name": {"type":"string"}, "double": {"type":"boolean"} }, "required":["kind","cell","spot","name"], "additionalProperties": false },
-      { "type":"object", "properties": { "kind": {"enum":["screen_type"]}, "text": {"type":"string"}, "enter": {"type":"boolean"} }, "required":["kind","text"], "additionalProperties": false }
+      { "type":"object", "properties": { "kind": {"enum":["screen_type"]}, "text": {"type":"string"}, "enter": {"type":"boolean"} }, "required":["kind","text"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["web_read"]}, "url": {"type":"string"}, "from_line": {"type":"integer","minimum":1} }, "required":["kind","url"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["web_search"]}, "query": {"type":"string"} }, "required":["kind","query"], "additionalProperties": false }
     ] }
   },
   "oneOf": [
@@ -79,6 +81,7 @@ mod tests {
             "run_command", "read_file", "write_file", "edit_file", "set_setting",
             "look", "press", "type", "read", "open_app",
             "screen_look", "screen_click", "screen_type",
+            "web_read", "web_search",
         ]);
     }
 
