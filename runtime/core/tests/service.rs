@@ -309,6 +309,7 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
 
 #[test]
 fn the_projects_page_gets_the_projects_newest_first() {
+    let _turn = db_turn();
     let dir = temp("projects-page");
     std::fs::create_dir_all(dir.join("projects/game")).unwrap();
     std::fs::write(dir.join("projects/game/BLUEPRINT.md"), "# Pool\nA pool table").unwrap();
