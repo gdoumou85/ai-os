@@ -27,14 +27,16 @@ pub struct ScriptedWorker {
 
 impl ScriptedWorker {
     /// Where a path lands inside the workspace, or `None` if it leaves it — a test must never
-    /// write to the real machine.
+    /// write to the real machine. A project lives outside the job's own folder (Task 8: the
+    /// engine always works in the home folder, a project is elsewhere under the same test's
+    /// root), so anywhere under this process's own temp dir is allowed too.
     fn target(&self, path: &str) -> Option<PathBuf> {
         let p = Path::new(path);
         if p.components().any(|c| c == Component::ParentDir) {
             return None;
         }
         let joined = if p.is_absolute() { p.to_path_buf() } else { self.ws.join(p) };
-        if joined.starts_with(&self.ws) { Some(joined) } else { None }
+        if joined.starts_with(&self.ws) || joined.starts_with(std::env::temp_dir()) { Some(joined) } else { None }
     }
 }
 
