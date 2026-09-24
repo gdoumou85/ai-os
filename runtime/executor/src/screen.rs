@@ -181,11 +181,25 @@ impl Session {
         Ok(())
     }
 
-    /// Held in order, let go in reverse: ctrl+s is ctrl down, s down, s up, ctrl up.
+    /// Held in order, let go in reverse: ctrl+s is ctrl down, s down, s up, ctrl up. A press that
+    /// fails partway stops pressing there, but every key already down still gets its release —
+    /// ctrl must never stick on the real keyboard because s's press bounced off a bus hiccup.
     fn keys(&self, syms: &[u32]) -> Result<(), String> {
-        for k in syms { self.input("NotifyKeyboardKeysym", &(*k, true))?; }
-        for k in syms.iter().rev() { self.input("NotifyKeyboardKeysym", &(*k, false))?; }
-        Ok(())
+        let mut down = Vec::with_capacity(syms.len());
+        let mut press_err = None;
+        for k in syms {
+            match self.input("NotifyKeyboardKeysym", &(*k, true)) {
+                Ok(()) => down.push(*k),
+                Err(e) => { press_err = Some(e); break; }
+            }
+        }
+        let mut release_err = None;
+        for k in down.iter().rev() {
+            if let Err(e) = self.input("NotifyKeyboardKeysym", &(*k, false)) {
+                release_err.get_or_insert(e);
+            }
+        }
+        match press_err.or(release_err) { Some(e) => Err(e), None => Ok(()) }
     }
 
     /// Mutter's axis 0 is vertical, 1 horizontal; positive steps go down or right.
@@ -195,16 +209,23 @@ impl Session {
         self.input("NotifyPointerAxisDiscrete", &(axis, steps))
     }
 
+    /// Once the button is down it always comes back up, even if a motion in between fails: a
+    /// stuck button would leave every later click and drag dragging something instead.
     fn drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
         self.input("NotifyPointerMotionAbsolute", &(self.stream.as_str(), from.0, from.1))?;
         std::thread::sleep(Duration::from_millis(60));
         self.input("NotifyPointerButton", &(BTN_LEFT, true))?;
+        let mut move_err = None;
         for i in 1..=10 {
             let t = i as f64 / 10.0;
-            self.input("NotifyPointerMotionAbsolute", &(self.stream.as_str(), from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t))?;
+            if let Err(e) = self.input("NotifyPointerMotionAbsolute", &(self.stream.as_str(), from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)) {
+                move_err = Some(e);
+                break;
+            }
             std::thread::sleep(Duration::from_millis(30));
         }
-        self.input("NotifyPointerButton", &(BTN_LEFT, false))
+        let up_err = self.input("NotifyPointerButton", &(BTN_LEFT, false)).err();
+        match move_err.or(up_err) { Some(e) => Err(e), None => Ok(()) }
     }
 }
 
