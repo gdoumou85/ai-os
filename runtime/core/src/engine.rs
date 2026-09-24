@@ -321,12 +321,15 @@ impl<M: Model> Engine<M> {
     fn watch(&mut self, turn: &Job, name: &str, reason: &str, urgent: bool, when: &str, command: &[String]) -> Result<Outcome, EngineError> {
         let who = if !self.in_alert && asks_to_watch(&turn.request) { "you" } else { "AI" };
         let words: String = turn.request.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
-        let w = match crate::watchers::build(name, reason, urgent, &format!("{who} (\"{words}\")"), when, command.to_vec()) {
+        let mut w = match crate::watchers::build(name, reason, urgent, &format!("{who} (\"{words}\")"), when, command.to_vec()) {
             Ok(w) => w,
             Err(e) => return Ok(Outcome::err(e)),
         };
+        let old = crate::watchers::get(self.store.conn(), &w.name)?;
+        // Every alert brings its watcher's reason up to date: that does not make it the AI's.
+        if let Some(old) = old.as_ref().filter(|_| self.in_alert) { w.made_by = old.made_by.clone(); }
         // A live program runs its new command from the scheduler's next tick.
-        if crate::watchers::get(self.store.conn(), &w.name)?.is_some_and(|old| old.kind == crate::watchers::Kind::Push) {
+        if old.is_some_and(|old| crate::watchers::needs_restart(&old, &w)) {
             let _ = executor::programs::stop(&crate::watchers::program_name(&w.name));
         }
         crate::watchers::put(self.store.conn(), &w, crate::store::now_ms())?;
@@ -362,7 +365,10 @@ impl<M: Model> Engine<M> {
         let nothing = Event::Learned { job_id: job_id.clone(), lines: vec![], pending: false };
         // What an earlier job left waiting for Keep/Discard and nobody answered goes now (spec §5),
         // whatever this turn comes to: the rail takes the older card's Keep away on this Learned.
-        if let Err(e) = crate::notes::discard_pending(self.store.conn()) { eprintln!("engine: an old proposal could not be discarded ({e})"); }
+        // An alert is not the owner moving on: what waits for their Keep still waits.
+        if !self.in_alert {
+            if let Err(e) = crate::notes::discard_pending(self.store.conn()) { eprintln!("engine: an old proposal could not be discarded ({e})"); }
+        }
         // A job that did not pass can only mark the tips it was shown; with none, there is nothing
         // to ask the model.
         if !passed && job.shown_notes.is_empty() { self.emit(nothing); return }
@@ -560,6 +566,9 @@ impl<M: Model> Engine<M> {
                     // A Stop during the alert ends the parked turn too.
                     if self.alert_turn(&a)? == State::Cancelled { return self.end(turn, State::Cancelled, "Stopped.".into()); }
                     self.store.push_message("result", &format!("(an urgent alert was handled in between: {}; carry on)", a.watcher))?;
+                    // The alert's card took this one's place on the rail: it comes back with its
+                    // list, its spinner and its Stop.
+                    if self.has_card(turn) { self.emit(Event::Plan { job_id: turn.id.clone(), steps: turn.plan.clone() }); }
                     continue;
                 }
             }
@@ -778,7 +787,8 @@ impl<M: Model> Engine<M> {
         if !notes.is_empty() && !notes.ends_with('\n') { notes.push('\n'); }
         if !notes.lines().any(|l| l.trim() == "## Files") { notes.push_str("\n## Files\n"); }
         let rel = file.strip_prefix(&p.folder).unwrap_or(&file).display().to_string();
-        let why = thought.trim();
+        // One line, so a thought of several cannot break the list.
+        let why = thought.split_whitespace().collect::<Vec<_>>().join(" ");
         notes.push_str(&format!("- {rel}{}\n", if why.is_empty() { String::new() } else { format!(": {why}") }));
         if let Err(e) = std::fs::write(&bp, notes) { eprintln!("engine: the new file was not noted in {} ({e})", bp.display()); }
         Ok(())
@@ -1503,6 +1513,11 @@ mod tests {
         let alerted = at(&|v| matches!(v, Event::Alert { urgent: true, .. }));
         let done = at(&|v| matches!(v, Event::Done { text, .. } if text == "built"));
         assert!(step < alerted && alerted < done, "{ev:?}");
+        // The parked turn's card comes back with its list after the alert's closed.
+        let Event::Plan { job_id: parked, steps: list } = &ev[at(&|v| matches!(v, Event::Plan { .. }))] else { unreachable!() };
+        let told = at(&|v| matches!(v, Event::Done { text, .. } if text == "Told them."));
+        let back = ev.iter().rposition(|v| matches!(v, Event::Plan { job_id, steps } if job_id == parked && steps == list)).unwrap();
+        assert!(alerted < told && told < back && back < done, "{ev:?}");
         let ps = e.model.inner.prompts.borrow();
         let last = ps.iter().rev().find(|p| p.allowed != ["learn"]).unwrap();
         assert!(last.user.contains("Your to-do list: [ ] build it") && last.user.contains("urgent alert was handled in between: price"), "{}", last.user);
@@ -1532,6 +1547,29 @@ mod tests {
         ], "alert-watch");
         e.handle_alert(&alert("price", false)).unwrap();
         assert!(crate::watchers::get(e.store.conn(), "price").unwrap().unwrap().made_by.starts_with("AI"));
+    }
+
+    #[test]
+    fn an_alert_bringing_the_owners_watcher_up_to_date_leaves_it_the_owners() {
+        let (mut e, _, _) = engine_with(vec![
+            act(Action::Watch { name: "time".into(), reason: "say the time; they liked it".into(), urgent: false, when: "every 2 minutes".into(), command: vec![] }),
+            reply("Told them."),
+        ], "alert-rewatch");
+        let mine = crate::watchers::build("time", "say the time", false, "you (\"every 2 minutes tell me the time\")", "every 2 minutes", vec![]).unwrap();
+        crate::watchers::put(e.store.conn(), &mine, 0).unwrap();
+        e.handle_alert(&alert("time", false)).unwrap();
+        let got = crate::watchers::get(e.store.conn(), "time").unwrap().unwrap();
+        assert!(got.made_by.starts_with("you (") && got.reason == "say the time; they liked it", "{got:?}");
+    }
+
+    #[test]
+    fn an_alert_leaves_what_waits_for_the_owners_keep() {
+        let (mut e, _, _) = engine_with(vec![act(run("true")), reply("Told them.")], "alert-keep");
+        let n = crate::notes::Note { notebook: "this computer".into(), topic: "open a website".into(), kind: "technique".into(), text: "open_app firefox".into(), ..Default::default() };
+        crate::notes::put(e.store.conn(), &n, Some("an-older-job")).unwrap();
+        e.handle_alert(&alert("price", false)).unwrap();
+        let waiting: i64 = e.store.conn().query_row("SELECT COUNT(*) FROM notes_pending", [], |r| r.get(0)).unwrap();
+        assert_eq!(waiting, 1, "the alert did an action and learned, and the owner's entry still waits");
     }
 
     #[test]

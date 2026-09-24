@@ -57,6 +57,8 @@ impl Shared {
             // A turn's card opens on its first to-do list or action (one-loop design §3).
             Event::Plan { job_id, steps } => { m.get_or_insert_with(|| open(job_id)).plan = steps.clone(); }
             Event::Step { job_id, plan_step, text, ok } => { m.get_or_insert_with(|| open(job_id)).steps.push(StepView { plan_step: *plan_step, text: text.clone(), ok: *ok }); }
+            // An alert's card is the one up now, even over a parked turn's.
+            Event::Alert { job_id, .. } => *m = Some(open(job_id)),
             Event::NeedsAnswer { .. } | Event::Done { .. } | Event::Failed { .. } | Event::Stopped { .. } => *m = None,
             _ => {}
         }

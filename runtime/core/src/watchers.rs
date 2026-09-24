@@ -50,8 +50,11 @@ pub fn parse_when(s: &str) -> Result<When, String> {
     let every = |n: i64, unit: &str| -> Result<When, String> {
         let per = match unit { "minute" | "minutes" | "min" | "mins" => 60, "hour" | "hours" => 3600, "day" | "days" => 86_400,
             _ => return Err(format!("cannot read when \"{s}\" (at least a minute apart): {WHEN_HELP}")) };
-        if n < 1 { return Err(format!("cannot read when \"{s}\": {WHEN_HELP}")) }
-        Ok(When::Every(n * per))
+        // Up to a year: a bigger number would overflow the times it is added to.
+        match n.checked_mul(per) {
+            Some(secs) if n >= 1 && secs <= 365 * 86_400 => Ok(When::Every(secs)),
+            _ => Err(format!("cannot read when \"{s}\": {WHEN_HELP}")),
+        }
     };
     match w[..] {
         ["live"] => Ok(When::Live),
@@ -86,6 +89,12 @@ pub fn build(name: &str, reason: &str, urgent: bool, made_by: &str, when: &str, 
     };
     Ok(Watcher { name: name.into(), reason: reason.trim().into(), urgent, made_by: made_by.into(), kind, every_s, daily_at, argv,
         paused: false, next_at: 0, last_fired_at: 0, last_text: String::new(), fails: 0, skipped: 0, created_at: 0 })
+}
+
+/// Whether replacing `old` with `new` must stop its live program: only when what runs changed,
+/// so an alert that only brings the reason up to date misses no events.
+pub fn needs_restart(old: &Watcher, new: &Watcher) -> bool {
+    old.kind == Kind::Push && (new.kind != old.kind || new.argv != old.argv)
 }
 
 /// Creates it, or replaces the one of that name (its last alert kept); on again, fails forgotten.
@@ -314,13 +323,23 @@ mod tests {
         assert_eq!(parse_when("every minute"), Ok(When::Every(60)));
         assert_eq!(parse_when("daily 8:00"), Ok(When::Daily("08:00".into())));
         assert_eq!(parse_when("live"), Ok(When::Live));
-        for bad in ["every 30 seconds", "daily 25:00", "sometimes", "every 0 minutes", ""] { assert!(parse_when(bad).is_err(), "{bad}"); }
+        for bad in ["every 30 seconds", "daily 25:00", "sometimes", "every 0 minutes", "every 99999999999999999 hours", "every 400 days", ""] { assert!(parse_when(bad).is_err(), "{bad}"); }
         assert!(build("t", "why", false, "AI", "live", vec![]).unwrap_err().contains("live needs a command"));
         assert!(build("t", "why", false, "AI", "daily 08:00", vec!["ls".into()]).is_err());
         assert!(build("t", " ", false, "AI", "every 5 minutes", vec![]).unwrap_err().contains("reason"));
         assert!(build("a/b", "why", false, "AI", "every 5 minutes", vec![]).is_err());
         assert_eq!(build("t", "why", false, "AI", "every 5 minutes", vec!["ls".into()]).unwrap().kind, Kind::Check);
         assert_eq!(build("t", "why", false, "AI", "live", vec!["w.sh".into()]).unwrap().kind, Kind::Push);
+    }
+
+    #[test]
+    fn a_live_program_is_stopped_only_when_what_it_runs_changed() {
+        let w = |when: &str, argv: &[&str]| build("price", "why", false, "AI", when, argv.iter().map(|s| s.to_string()).collect()).unwrap();
+        let live = w("live", &["watch-price.sh"]);
+        assert!(!needs_restart(&live, &w("live", &["watch-price.sh"])), "the same command: left running");
+        assert!(needs_restart(&live, &w("live", &["watch-price.sh", "--fast"])));
+        assert!(needs_restart(&live, &w("every 5 minutes", &["watch-price.sh"])));
+        assert!(!needs_restart(&w("every 5 minutes", &["ls"]), &w("live", &["ls"])), "no program was running");
     }
 
     #[test]
