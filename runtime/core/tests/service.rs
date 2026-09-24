@@ -8,12 +8,25 @@ use aios_core::testing::{scripted_workers, Recorder};
 use aios_proto::{Client, Event};
 use executor::action::Action;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 fn temp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("ai-os-svc-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap(); d
+}
+
+/// The on-disk database `Skills`/`Clear` read (`AI_OS_DB`), set once for the whole test binary.
+/// Cargo runs every `#[test]` here as a thread of one process, and `db_path()` reads the env var
+/// fresh on every request — two tests each pointing it at their own path would race. `forget_chat`
+/// never touches notebooks, so sharing it with the Skills test's own note is safe.
+fn test_db() -> &'static PathBuf {
+    static DB: OnceLock<PathBuf> = OnceLock::new();
+    DB.get_or_init(|| {
+        let db = temp("db").join("notes.db");
+        std::env::set_var("AI_OS_DB", &db);
+        db
+    })
 }
 
 /// A model whose moves can be refilled from the test and that blocks on a gate so the test can
@@ -215,10 +228,9 @@ fn bind_refuses_a_live_socket_and_removes_a_stale_file() {
 #[test]
 fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
     let dir = temp("skills");
-    let db = dir.join("notes.db");
-    std::env::set_var("AI_OS_DB", &db);
+    let db = test_db();
     {
-        let c = rusqlite::Connection::open(&db).unwrap();
+        let c = rusqlite::Connection::open(db).unwrap();
         aios_core::notes::init(&c).unwrap();
         aios_core::notes::put(&c, &aios_core::notes::Note { notebook: "this computer".into(), topic: "open a website".into(), kind: "technique".into(), text: "open_app firefox".into(), ..Default::default() }, None).unwrap();
     }
@@ -234,7 +246,8 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
     w.request(&aios_proto::Request::Forget { notebook: "this computer".into(), topic: "open a website".into() }).unwrap();
     let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event after forget") };
     assert!(notebooks.iter().all(|n| n.name == "installed on this computer"), "{notebooks:?}");
-    // Clear works on the same database (here, not its own test: AI_OS_DB is one per process).
+    // Clear works on the same database as every other test (test_db() above): forget_chat only
+    // touches messages/instructions, never the notebook this test just put and forgot.
     let s = Store::open(db.to_str().unwrap()).unwrap();
     s.push_message("user", "open blender").unwrap();
     s.add_instruction("Blender is installed; new projects need a Models folder").unwrap();
@@ -247,9 +260,7 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
 #[test]
 fn clear_during_work_stops_it() {
     let dir = temp("clear-work");
-    // Clear also forgets the chat on the on-disk database (AI_OS_DB): its own path, so this does
-    // not race the_skills_screen test's own env::set_var in the same process.
-    std::env::set_var("AI_OS_DB", dir.join("notes.db"));
+    test_db(); // forget_chat's Store::open needs AI_OS_DB to point somewhere real
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let sock = start(&dir, job(), Arc::new(Mutex::new(Some(grx))));
     let (mut r, mut w) = connect(&sock).split();
@@ -257,14 +268,13 @@ fn clear_during_work_stops_it() {
     gtx.send(()).unwrap();
     while !matches!(r.next_event(), Some(Event::Step { .. }) | None) {}
     w.request(&aios_proto::Request::Clear {}).unwrap();
+    // service.rs sets the stop flag before forget_chat runs: waiting for Cleared here proves the
+    // flag is already armed, so opening the gate next cannot race the engine past its stop check.
+    while !matches!(r.next_event(), Some(Event::Cleared {}) | None) {}
     gtx.send(()).unwrap();
-    // Cleared (the on-disk chat, its own thread, its own file I/O) and Stopped (the turn, on the
-    // engine thread) land in either order: wait for both rather than the first terminal event.
     let mut got = vec![];
-    while got.iter().filter(|e| matches!(e, Event::Cleared {} | Event::Stopped { .. })).count() < 2 {
-        match r.next_event() { Some(e) => got.push(e), None => break }
-    }
-    assert!(got.iter().any(|e| matches!(e, Event::Cleared {})) && got.iter().any(|e| matches!(e, Event::Stopped { .. })), "{got:?}");
+    while let Some(e) = r.next_event() { let end = matches!(e, Event::Stopped { .. } | Event::Done { .. }); got.push(e); if end { break; } }
+    assert!(matches!(got.last(), Some(Event::Stopped { .. })), "{got:?}");
 }
 
 #[test]

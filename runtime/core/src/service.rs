@@ -49,7 +49,6 @@ impl Shared {
     fn update_mirror(&self, ev: &Event) {
         let mut m = self.mirror.lock().unwrap();
         match ev {
-            Event::Understood { job_id, name, text, housekeeping } => *m = Some(JobState { id: job_id.clone(), name: name.clone(), housekeeping: *housekeeping, understood: text.clone(), plan: vec![], steps: vec![], waiting: Waiting::None }),
             // A turn's card opens on its first to-do list or action (one-loop design §3).
             Event::Plan { job_id, steps } => { m.get_or_insert_with(|| open(job_id)).plan = steps.clone(); }
             Event::Step { job_id, plan_step, text, ok } => { m.get_or_insert_with(|| open(job_id)).steps.push(StepView { plan_step: *plan_step, text: text.clone(), ok: *ok }); }
@@ -196,20 +195,23 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                             if tx.send(Command::Say(text)).is_err() { break; }
                             continue;
                         }
+                        // Decide before the echo goes out (as with the stop flag above): a test —
+                        // or the engine's own gate — that waits on `You` and then acts must already
+                        // find the word either in the inbox or on its way as a new turn, never in
+                        // the gap between the two.
+                        let joined = match inbox.lock().unwrap().as_mut() { Some(v) => { v.push(text.clone()); true } None => false };
                         sh.broadcast(&Event::You { text: text.clone() });
                         // While a turn works, the words join it at its next step (one-loop design §3);
                         // otherwise they are the next turn.
-                        let joined = match inbox.lock().unwrap().as_mut() { Some(v) => { v.push(text.clone()); true } None => false };
                         if !joined && tx.send(Command::Say(text)).is_err() { break; }
                     }
                     Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
                     Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
                     // On this thread, like the Skills screen: a Clear during a job must not wait for it.
-                    // A job still open ends too, the way "stop" ends it: a question left waiting took
-                    // the next "Hi" as its answer and went on with the old project (the owner, 2026-09-23).
                     Ok(Request::Clear {}) => match {
-                        // A turn open (the inbox exists): the flag lands between its steps. Idle
-                        // (a question waiting, or nothing): nothing to stop.
+                        // A turn open (the inbox exists): the flag lands between its steps, as
+                        // "stop" would. A question already ended its own turn (NeedsAnswer clears
+                        // the mirror), so there is nothing left running for Clear to stop then.
                         if inbox.lock().unwrap().is_some() { stop.store(true, Ordering::SeqCst); }
                         crate::store::Store::open(&db_path()).and_then(|s| s.forget_chat())
                     } {
