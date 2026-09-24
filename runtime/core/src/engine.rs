@@ -545,11 +545,60 @@ impl<M: Model> Engine<M> {
         Ok(v)
     }
 
-    /// Placeholders filled by Task 6; Task 5 ships them empty so the loop compiles and runs.
-    fn named_notes(&self, _words: &str) -> Result<String, EngineError> { Ok(String::new()) }
-    fn notes_on_first_touch(&mut self, _turn: &mut Job, _action: &Action) -> Result<String, EngineError> { Ok(String::new()) }
-    fn notes_not_updated(&self, _turn: &Job) -> Result<Option<String>, EngineError> { Ok(None) }
-    fn write_journal(&self, _turn: &Job, _how: &str, _text: &str) {}
+    /// The project a path is under, if any.
+    fn project_of(&self, path: &Path) -> Result<Option<ProjectRow>, EngineError> {
+        Ok(self.projects()?.into_iter().find(|p| path.starts_with(&p.folder)))
+    }
+
+    fn notes_of(p: &ProjectRow, cap: usize) -> String {
+        match std::fs::read_to_string(Path::new(&p.folder).join("BLUEPRINT.md")) {
+            Ok(t) if t.chars().count() > cap => format!("{}… (cut; read_file for the rest)", t.chars().take(cap).collect::<String>()),
+            Ok(t) => t,
+            Err(_) => "(no BLUEPRINT.md yet)".into(),
+        }
+    }
+
+    /// The notes of the projects the message names, for the context block (at most two).
+    fn named_notes(&self, words: &str) -> Result<String, EngineError> {
+        let named: Vec<ProjectRow> = self.projects()?.into_iter().filter(|p| prompt::named_in(p, words)).take(2).collect();
+        Ok(named.iter().map(|p| format!("Notes of the project {} ({}/BLUEPRINT.md):\n{}", p.name, p.folder, Self::notes_of(p, 1500))).collect::<Vec<_>>().join("\n"))
+    }
+
+    /// A project's notes, the first time in a turn an action reaches into its folder.
+    fn notes_on_first_touch(&mut self, turn: &mut Job, action: &Action) -> Result<String, EngineError> {
+        let mut out = String::new();
+        for path in paths_in(action, &turn.folder) {
+            let Some(p) = self.project_of(&path)? else { continue };
+            if turn.projects_seen.contains(&p.name) { continue; }
+            turn.projects_seen.push(p.name.clone());
+            out.push_str(&match std::fs::read_to_string(Path::new(&p.folder).join("BLUEPRINT.md")) {
+                Ok(_) => format!("\n[{} is a project; its notes, {}/BLUEPRINT.md:]\n{}", p.name, p.folder, Self::notes_of(&p, 2000)),
+                Err(_) => format!("\n[{} ({}) is a project with no BLUEPRINT.md yet: write one there — what it is, how it is built and run, where it stands.]", p.name, p.folder),
+            });
+        }
+        Ok(out)
+    }
+
+    /// A project the turn changed without touching its notes: one reminder before the reply.
+    fn notes_not_updated(&self, turn: &Job) -> Result<Option<String>, EngineError> {
+        let mut changed: Vec<ProjectRow> = vec![];
+        let mut noted: Vec<PathBuf> = vec![];
+        for s in turn.steps.iter().filter(|s| s.ok) {
+            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. }) = &s.action else { continue };
+            let p = Path::new(&turn.folder).join(path);
+            if p.file_name().is_some_and(|f| f == "BLUEPRINT.md") { if let Some(d) = p.parent() { noted.push(d.to_path_buf()); } continue; }
+            if let Some(proj) = self.project_of(&p)? { if changed.iter().all(|c| c.folder != proj.folder) { changed.push(proj); } }
+        }
+        Ok(changed.into_iter().find(|p| !noted.iter().any(|n| n == Path::new(&p.folder))).map(|p| format!(
+            "Before you finish: you changed {} ({}) but not its notes. Bring {}/BLUEPRINT.md up to date so the next conversation knows where it stands, then reply again.", p.name, p.folder, p.folder)))
+    }
+
+    fn write_journal(&self, turn: &Job, how: &str, text: &str) {
+        let line = journal_line(turn, how, text);
+        let wrote = std::fs::create_dir_all(&self.housekeeping_dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(self.journal_path()))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
+        if let Err(e) = wrote { eprintln!("engine: the journal was not written ({e})"); }
+    }
     fn wait(&mut self, seconds: u32) -> Outcome { Outcome::ok(format!("waited {seconds} s")) }
 
     /// The machine hand works in the user's home.
@@ -795,5 +844,73 @@ mod tests {
     fn keep_what_you_learned_is_answered_without_the_model() {
         let (mut e, _, _) = engine_with(vec![], "keep");
         assert_eq!(e.handle("keep what you learned").unwrap(), vec!["There is nothing waiting to be kept or discarded.".to_string()]);
+    }
+
+    #[test]
+    fn a_projects_notes_come_with_its_first_touch_only() {
+        let (mut e, _, root) = engine_with(vec![], "touch");
+        let p = root.join("projects").join("site");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("BLUEPRINT.md"), "a site for car rentals").unwrap();
+        let read = Action::ReadFile { path: p.join("index.html").display().to_string(), from_line: None, lines: None };
+        e.model = crate::model::FakeModel::new(vec![act(read.clone()), act(read), reply("read it")]);
+        e.handle("look at my page").unwrap();
+        let rows = e.store.all_messages().unwrap();
+        let results: Vec<&String> = rows.iter().filter(|(r, _)| r == "result").map(|(_, t)| t).collect();
+        assert!(results[0].contains("a site for car rentals"), "{results:?}");
+        assert!(!results[1].contains("a site for car rentals"), "once per turn");
+    }
+
+    #[test]
+    fn a_project_named_in_the_message_brings_its_notes() {
+        let (mut e, _, root) = engine_with(vec![reply("ok"), reply("hi")], "named");
+        let p = root.join("projects").join("car-rental");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("BLUEPRINT.md"), "rentals by the day").unwrap();
+        e.handle("carry on with the car rental site").unwrap();
+        e.handle("hi").unwrap();
+        let prompts = e.model.prompts.borrow();
+        assert!(prompts[0].user.contains("rentals by the day"));
+        assert!(!prompts[1].user.contains("rentals by the day"), "a greeting brings up no project");
+    }
+
+    #[test]
+    fn a_change_to_a_project_without_its_notes_gets_one_reminder() {
+        let (mut e, _, root) = engine_with(vec![], "remind");
+        let p = root.join("projects").join("game");
+        std::fs::create_dir_all(&p).unwrap();
+        e.model = crate::model::FakeModel::new(vec![
+            act(Action::WriteFile { path: p.join("game.js").display().to_string(), contents: "x".into() }),
+            reply("done"), reply("done, really"),
+        ]);
+        let ev = events_of(&mut e, "add birds");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Done { text, .. } if text == "done, really"), "{ev:?}");
+        assert!(e.store.all_messages().unwrap().iter().any(|(r, t)| r == "result" && t.contains("but not its notes")));
+    }
+
+    #[test]
+    fn a_turn_that_worked_leaves_a_journal_line_the_next_chat_about_it_reads() {
+        let (mut e, _, root) = engine_with(vec![], "journal");
+        let game = root.join("home").join("Projects").join("game.js");
+        e.model = crate::model::FakeModel::new(vec![
+            act(Action::WriteFile { path: game.display().to_string(), contents: "x".into() }), reply("made it"),
+            reply("found it"), reply("hello"),
+        ]);
+        e.handle("make a flappy bird game").unwrap();
+        e.store.forget_chat().unwrap();
+        e.handle("delete any flappy bird plans").unwrap();
+        e.handle("hi, what is new").unwrap();
+        let prompts = e.model.prompts.borrow();
+        let n = prompts.len();
+        assert!(prompts[n - 2].user.contains("What earlier jobs did") && prompts[n - 2].user.contains("game.js"), "{}", prompts[n - 2].user);
+        assert!(!prompts[n - 1].user.contains("What earlier jobs did"));
+    }
+
+    #[test]
+    fn journal_lines_are_found_by_telling_words_only() {
+        let j = "- done: asked \"make a flappy bird game\" → made it. Paths: /home/g/Projects/game.js.\n- done: asked \"a car rental site\" → built.\n";
+        assert!(journal_for(j, "delete the flappy files").contains("flappy bird game"));
+        assert!(!journal_for(j, "delete the flappy files").contains("car rental"));
+        assert_eq!(journal_for(j, "delete any project files"), "");
     }
 }
