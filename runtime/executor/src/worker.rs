@@ -170,6 +170,29 @@ impl Worker for MachineWorker {
                     Err(e) => Outcome::err(e),
                 }
             }
+            Action::WebRead { url, from_line } => match crate::web::fetch(url) {
+                Ok(html) => {
+                    let (title, text) = crate::web::text_of(&html);
+                    if text.is_empty() { return Outcome::err(format!("{url} came back with no text (a page built by script): look at it on the screen instead")); }
+                    let n = text.lines().count();
+                    Outcome::ok(format!("page: {title} ({n} lines; read on with from_line)\n{}", window(&text, Some(from_line.unwrap_or(1)), Some(120))))
+                }
+                Err(e) => Outcome::err(e),
+            },
+            Action::WebSearch { query } => match crate::web::fetch(&crate::web::search_url(query)) {
+                Ok(html) => {
+                    let r = crate::web::results(&html);
+                    if r.is_empty() { return Outcome::err("no results came back (the search page may have changed or refused): web_read a site you know instead"); }
+                    Outcome::ok(r.iter().enumerate().map(|(i, (t, u, s))| format!("{}. {t}\n   {u}\n   {s}", i + 1)).collect::<Vec<_>>().join("\n"))
+                }
+                Err(e) => Outcome::err(e),
+            },
+            Action::StartProgram { name, argv } => {
+                if needs_a_shell(argv) { return Outcome::err("not started: the program runs directly, with no shell, so *, ~, $VAR, |, > and && reach it as plain text. Start [\"bash\", \"-c\", \"<the line>\"] instead"); }
+                match crate::programs::start(name, argv, &self.workspace) { Ok(d) => Outcome::ok(d), Err(e) => Outcome::err(e) }
+            }
+            Action::ProgramOutput { name, lines } => match crate::programs::output(name, *lines) { Ok(d) => Outcome::ok(d), Err(e) => Outcome::err(e) },
+            Action::StopProgram { name } => match crate::programs::stop(name) { Ok(d) => Outcome::ok(d), Err(e) => Outcome::err(e) },
             _ => Outcome::err("commands and files have no hand for this action"),
         }
     }

@@ -1,60 +1,60 @@
 <big><b>Welcome to the AI OS</b></big>
 
-The AI OS is an assistant that does jobs on this computer for you. You tell it what you want in plain words, in the box at the bottom of the chat window. It writes and changes files, installs programs, changes settings, and can work the windows of your programs.
+The AI OS is an assistant that gets things done on this computer for you. You tell it what you want in plain words, in the box at the bottom of the chat window. It writes and changes files, installs programs, changes settings, and can work the windows of your programs.
 
-<b>It has full access to this computer</b>: every folder, the internet, and administrator (root) rights. It never stops to ask your OK, and there is no undo. Before a big job, take a snapshot of the virtual machine in VirtualBox: that is the way back if something goes wrong.
+<b>It has full access to this computer</b>: every folder, the internet, and administrator (root) rights. It never stops to ask your OK, and there is no undo. Before something big, take a snapshot of the virtual machine in VirtualBox: that is the way back if something goes wrong.
 
 
 <big><b>How to talk to it</b></big>
 
-• <b>Ask a question</b> and it answers.
-• <b>Ask for a job</b> ("make me a script that renames my photos by date") and it starts a project. It may ask you one to three questions first, then says what it understood and gets to work. If something comes up that only you can answer, it asks you then too.
+• <b>Say anything</b> — a question, or something to get done ("make me a script that renames my photos by date") — and it decides for itself what to do: answer you straight away, ask you something first if it needs to, or get to work. There are no separate kinds of request to learn; it works it out as it goes, and asks you again if something only you can answer comes up.
 • <b>Say "you decide"</b> when you don't want questions: it makes the choices itself.
-• <b>Tell it something to keep</b> ("always use Python 3", "from now on, my projects go under Work") and it remembers it for every job after, until you press Clear. It only keeps what you say is to hold (words like always, never, from now on, remember); it does not note things down on its own.
-• <b>"stop"</b> stops the job it is working on. So does the red <b>Stop</b> button at the top. The chat stays, so you can say what you want differently. To start clean instead, press <b>Clear</b>.
+• <b>Tell it something to keep</b> ("always use Python 3", "from now on, my projects go under Work") and it remembers it from then on, until you press Clear. It only keeps what you say is to hold (words like always, never, from now on, remember); it does not note things down on its own.
+• <b>While it works</b>, a card shows its to-do list, when it is keeping one, and a tick or cross for each thing it has done. You can keep typing — what you say joins the work at its next step, no need to wait for it to finish. Say <b>"stop"</b>, or press the red <b>Stop</b> button at the top, and it stops right there. The chat stays, so you can say what you want differently. To start clean instead, press <b>Clear</b>.
 
-The AI remembers only the last few messages of the chat. What is worth keeping it writes down: in each project's notes, and in the things you told it to keep (it shows these as "Noted for the future"). Clear forgets the chat and those notes; the AI cannot forget them itself, so asking it to just points you to Clear.
+The AI keeps the whole chat since your last Clear, as far as it has room for — how much that is depends on the model's <b>How much it can hold</b> setting (see Model, below); when there is more to the chat than it can hold at once, the oldest of it drops away first and the newest stays. What is worth keeping longer than that it writes down: in each project's notes, and in the things you told it to keep (it shows these as "Noted for the future"). Clear forgets the chat and those notes; the AI cannot forget them itself, so asking it to just points you to Clear.
 
 <b>What the AI knows about this computer.</b> Before every answer it looks at what is installed: the programs you can open, the usual tools, and whatever it installed itself. So it uses them rather than installing them again, and you never need to tell it "Blender is already installed". When it does install something, it installs it the standard way so it shows up next time. The list is at the top of <b>Skills</b>, under <b>Installed on this computer</b>. Clear does not touch it: it is what is on the computer, not something the AI remembers.
 
 
 <big><b>The cards</b></big>
 
-• <b>Building</b>: a job in progress, with a tick next to each step as it finishes.
+• <b>Working</b>: its to-do list, when it is keeping one, and each thing it has done so far with a tick or a cross next to it.
 • <b>A question</b> (blue): click one of the answers under it, or type your own in the box. When it asks several questions, your clicks gather in the box and go once each question has one.
-• <b>Done</b> (green): the job is finished and proved. The files it changed are listed with an Open button.
-• <b>Failed</b> (red): what went wrong, in plain words.
+• <b>Done</b> (green): finished. The files it changed are listed with an Open button.
+• <b>Could not finish</b> (red): what went wrong, in plain words.
 
-While the AI is working, the circle at the bottom turns and the line beside it says what it is doing right now: which step of how many, and the command or file it is working on — for example <tt>Step 2 of 4: running sudo apt-get install -y blender</tt>. After twenty seconds it also says how long that has been going, so you can tell a long job from a stuck one. When a job ends, it says it is thinking about what to remember; that is the last thing it does, and it can take a few minutes on a slow model.
+While the AI is working, the circle at the bottom turns and the line beside it says what it is doing right now, in a short sentence — for example <tt>installing blender</tt>. After twenty seconds it also says how long that has been going, so you can tell something long from something stuck. When it finishes, it says it is thinking about what to remember; that is the last thing it does, and it can take a few minutes on a slow model.
 
 
 <big><b>The buttons at the top</b></big>
 
-• <b>Clear</b> is a clean start: the AI forgets the chat and the things you told it to keep, and a job still running or waiting on a question is stopped. Your projects and skills stay; the AI brings a project up only when you name it ("carry on with the car rental site").
-• <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop a job first. Your cloud accounts are there too. The same card has a bar, <b>How much it can hold</b>: move it to the context length you loaded the model with, then press Set, or press a model and it switches with that size. The bar shows the size in use each time you open the card, and an update keeps it. The AI assumes 8k until you tell it otherwise, and on a bigger model that means it reads less of a window than it could. With Ollama the model is loaded at that size, so set it only as high as your graphics card's memory allows.
+• <b>Clear</b> is a clean start: the AI forgets the chat and the things you told it to keep, and stops whatever it is doing or waiting on you to answer. Your projects, their notes, the journal and skills stay; the AI brings a project up only when you name it ("carry on with the car rental site").
+• <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop what it is doing first. Your cloud accounts are there too. The same card has a bar, <b>How much it can hold</b>: move it to the context length you loaded the model with, then press Set, or press a model and it switches with that size. The bar shows the size in use each time you open the card, and an update keeps it. 8k is the least it can run on, but it then remembers only the last few steps of the chat; a model that can hold 16k or more does noticeably better as a full agent, so give it that much when this computer can. With Ollama the model is loaded at that size, so set it only as high as your graphics card's memory allows.
 • <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
 • <b>Skills</b> shows what is installed on this computer and what the AI has learned, with a way to delete a lesson (see Skills below).
 • <b>Help</b> opens this guide.
-• <b>Stop</b> shows up only while a job runs.
+• <b>Stop</b> shows up only while it is working.
 
 When a new version is out, a card at login says so. Press <b>Update now</b>, type your password in the window that opens, then restart the computer.
 
 
 <big><b>What it can do</b></big>
 
-• <b>Files and projects</b>: write, change and run code and documents anywhere. Projects live in <tt>/data/projects</tt> unless you say otherwise, and the AI always knows where they are. A project you already have somewhere else joins the list when you say where it is ("my site is in ~/work/site, fix its title"). Each project keeps a short notes file, BLUEPRINT.md, so the AI knows the project the next time. And every job, of any kind, adds one line to a journal (<tt>/data/housekeeping/JOURNAL.md</tt>): what you asked, how it ended, and the folders and files it touched. Each thing you say starts clean; the AI reads only the journal lines that share words with it, so "delete the flappy files" finds where Flappy was, and "hi" brings back nothing. Clear leaves the journal, like the projects' notes.
-• <b>Programs</b>: install and remove programs, start and stop services, change settings.
-• <b>Your windows</b>: open a program and press its buttons, type into it and read it, the way a person would. Say "take my Text Editor window" to hand it a window you have open.
-• <b>The screen</b>, as a last resort, for what it can't reach any other way (a web page, for example, or a program that draws its own buttons and tells the computer nothing about them, like Blender or a game). It switches to the screen by itself when it asks for a window it cannot read, so it never reports a program missing while you are looking at it. It looks at the screen, zooms in and clicks, using the real mouse. It keeps going if you move the mouse too, so leave it alone while it clicks, or the two of you pull the pointer from each other.
+• <b>Files and projects</b>: write, change and run code and documents anywhere. Projects live in <tt>/data/projects</tt> unless you say otherwise, and the AI always knows where they are. A project you already have somewhere else joins the list when you say where it is ("my site is in ~/work/site, fix its title"). Each project is a folder with a short notes file, BLUEPRINT.md: the AI reads it when you name the project, or the first time it opens that folder, and if it changes files there without writing the notes back up, it is reminded to. And every job, of any kind, adds one line to a journal (<tt>/data/housekeeping/JOURNAL.md</tt>): what you asked, how it ended, and the folders and files it touched. Each thing you say starts clean; the AI reads only the journal lines that share words with it, so "delete the flappy files" finds where Flappy was, and "hi" brings back nothing. Clear leaves the journal, like the projects' notes.
+• <b>The web</b>: it can open a page and read it as plain text, and search the web for you, without needing to look at a picture of it — this works even on a model that cannot see.
+• <b>Programs</b>: install and remove programs, start and stop services, change settings, and leave one running in the background — a web server, a long download — while it checks on it, or stops it when you ask.
+• <b>Your windows</b>: open a program, press its buttons and keyboard shortcuts, type into it, scroll and drag things inside it, and read it, the way a person would. Say "take my Text Editor window" to hand it a window you have open.
+• <b>The screen</b>, as a last resort, for what it can't reach any other way (a program that draws its own buttons and tells the computer nothing about them, like Blender or a game). It switches to the screen by itself when it asks for a window it cannot read, so it never reports a program missing while you are looking at it. It looks at the screen, zooms in and clicks, using the real mouse. It keeps going if you move the mouse too, so leave it alone while it clicks, or the two of you pull the pointer from each other. Only a model that can see pictures works this way; one that cannot skips the screen and does everything through commands, typing and keyboard shortcuts instead. With Cloud on, the AI does not use the screen either: it works programs with keys, their controls and the command line.
 
 
 <big><b>Skills: what it learns</b></big>
 
-After a job that worked, the AI writes down what it would want to know straight away next time. It keeps these in notebooks:
-• <b>This computer</b>: how your computer and its programs are used, like how to open a website. It reads this before every job.
-• <b>A notebook per craft</b>, like "blender" or "web design": ways of doing things that worked, mistakes and how they were fixed, and what you liked. It reads one when a job is in that area.
+After work that went well, the AI writes down what it would want to know straight away next time. It keeps these in notebooks:
+• <b>This computer</b>: how your computer and its programs are used, like how to open a website. It reads this before everything it does.
+• <b>A notebook per craft</b>, like "blender" or "web design": ways of doing things that worked, mistakes and how they were fixed, and what you liked. It reads one when what you asked is in that area.
 
-The Done card says what it learned ("Learned: open a website"). If it learned something that changes the computer, like installing a program, it asks first and shows what it would keep and the steps that did it: press <b>Keep</b> or <b>Discard</b>. Only the newest one waits: if you answer neither, the next job drops it.
+The Done card says what it learned ("Learned: open a website"). If it learned something that changes the computer, like installing a program, it asks first and shows what it would keep and the steps that did it: press <b>Keep</b> or <b>Discard</b>. Only the newest one waits: if you answer neither, the next thing it does drops it.
 Press <b>Skills</b> at the top to read the notebooks and delete anything with ✕. <b>Installed on this computer</b>, the first list, has no ✕: it shows what is on the computer, and changes when a program is installed or removed. A tip that stopped working is marked, and the AI fixes or removes it the next time.
 
 
@@ -100,6 +100,6 @@ Open a Terminal (Ctrl+Alt+T) and type:
 
 <tt>AI OS ready</tt> means everything is in place. Anything else is the first problem it found, in plain words.
 
-The AI's own log, for when a job fails:
+The AI's own log, for when something fails:
 
 <tt>journalctl --user -u ai-os-engine -n 40 --no-pager</tt>

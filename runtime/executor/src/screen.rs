@@ -66,6 +66,24 @@ pub fn keysym(c: char) -> u32 {
 }
 pub const RETURN: u32 = 0xff0d;
 
+/// A key or a combination as the model writes it ("ctrl+s", "alt+tab", "f5", "a") in keysyms,
+/// modifiers first.
+pub fn keysyms(keys: &str) -> Result<Vec<u32>, String> {
+    keys.split('+').map(|k| {
+        let k = k.trim().to_lowercase();
+        Ok(match k.as_str() {
+            "ctrl" | "control" => 0xffe3, "shift" => 0xffe1, "alt" => 0xffe9, "super" | "win" | "meta" => 0xffeb,
+            "enter" | "return" => RETURN, "escape" | "esc" => 0xff1b, "tab" => 0xff09, "backspace" => 0xff08,
+            "delete" | "del" => 0xffff, "insert" => 0xff63, "space" => 0x20,
+            "up" => 0xff52, "down" => 0xff54, "left" => 0xff51, "right" => 0xff53, "home" => 0xff50, "end" => 0xff57,
+            "pageup" | "page_up" => 0xff55, "pagedown" | "page_down" => 0xff56,
+            f if f.len() >= 2 && f.starts_with('f') && f[1..].parse::<u32>().is_ok_and(|n| (1..=12).contains(&n)) => 0xffbe + f[1..].parse::<u32>().unwrap() - 1,
+            c if c.chars().count() == 1 => keysym(c.chars().next().unwrap()),
+            other => return Err(format!("no key called {other}: use names like ctrl, alt, shift, super, enter, escape, tab, up, pagedown, f5, or one character")),
+        })
+    }).collect()
+}
+
 /// What the hand remembers between screen actions, for the life of the process.
 #[derive(Debug, Default)]
 pub struct Screen {
@@ -162,6 +180,53 @@ impl Session {
         }
         Ok(())
     }
+
+    /// Held in order, let go in reverse: ctrl+s is ctrl down, s down, s up, ctrl up. A press that
+    /// fails partway stops pressing there, but every key already down still gets its release —
+    /// ctrl must never stick on the real keyboard because s's press bounced off a bus hiccup.
+    fn keys(&self, syms: &[u32]) -> Result<(), String> {
+        let mut down = Vec::with_capacity(syms.len());
+        let mut press_err = None;
+        for k in syms {
+            match self.input("NotifyKeyboardKeysym", &(*k, true)) {
+                Ok(()) => down.push(*k),
+                Err(e) => { press_err = Some(e); break; }
+            }
+        }
+        let mut release_err = None;
+        for k in down.iter().rev() {
+            if let Err(e) = self.input("NotifyKeyboardKeysym", &(*k, false)) {
+                release_err.get_or_insert(e);
+            }
+        }
+        match press_err.or(release_err) { Some(e) => Err(e), None => Ok(()) }
+    }
+
+    /// Mutter's axis 0 is vertical, 1 horizontal; positive steps go down or right.
+    fn scroll(&self, x: f64, y: f64, axis: u32, steps: i32) -> Result<(), String> {
+        self.input("NotifyPointerMotionAbsolute", &(self.stream.as_str(), x, y))?;
+        std::thread::sleep(Duration::from_millis(60));
+        self.input("NotifyPointerAxisDiscrete", &(axis, steps))
+    }
+
+    /// Once the button is down it always comes back up, even if a motion in between fails: a
+    /// stuck button would leave every later click and drag dragging something instead.
+    fn drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
+        self.input("NotifyPointerMotionAbsolute", &(self.stream.as_str(), from.0, from.1))?;
+        std::thread::sleep(Duration::from_millis(60));
+        self.input("NotifyPointerButton", &(BTN_LEFT, true))?;
+        let mut move_err = None;
+        for i in 1..=10 {
+            let t = i as f64 / 10.0;
+            if let Err(e) = self.input("NotifyPointerMotionAbsolute", &(self.stream.as_str(), from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)) {
+                move_err = Some(e);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let up_err = self.input("NotifyPointerButton", &(BTN_LEFT, false)).err();
+        match move_err.or(up_err) { Some(e) => Err(e), None => Ok(()) }
+    }
 }
 
 impl Drop for Session {
@@ -240,6 +305,40 @@ pub fn run(st: &mut Screen, action: &crate::action::Action) -> Result<(String, O
             st.last_ai = Some(Instant::now());
             Ok((format!("typed {} characters{}; look again to see where they went", text.chars().count(), if *enter { " and pressed Enter" } else { "" }), None))
         }
+        // A key needs no look: a model that cannot see still saves with ctrl+s.
+        Action::Key { keys } => {
+            let syms = keysyms(keys)?;
+            let s = Session::open()?;
+            s.keys(&syms)?;
+            st.last_ai = Some(Instant::now());
+            st.last_zoom = None;
+            Ok((format!("pressed {keys}; look again to see what it did"), None))
+        }
+        // Scroll and drag aim by square and spot like a click, but need only a look at the whole
+        // screen: scrolling a page should not cost an enlarged look first.
+        Action::Scroll { cell, spot, direction, amount } => {
+            check_not_taken(st)?;
+            let (w, h) = st.size.ok_or("look at the screen first")?;
+            let (x, y) = click_point(*cell, *spot, w, h).ok_or_else(|| format!("there is no square {cell} with spot {spot}: squares go 1–{CELLS}, spots 1–{SPOTS}"))?;
+            let (axis, sign) = match direction.as_str() { "up" => (0, -1), "down" => (0, 1), "left" => (1, -1), "right" => (1, 1),
+                d => return Err(format!("scroll up, down, left or right, not {d}")) };
+            let s = Session::open()?;
+            s.scroll(x, y, axis, sign * (*amount).clamp(1, 20) as i32)?;
+            st.last_ai = Some(Instant::now());
+            st.last_zoom = None;
+            Ok((format!("scrolled {direction} {amount} at spot {spot} of square {cell}; look again to see what moved"), None))
+        }
+        Action::Drag { from_cell, from_spot, to_cell, to_spot } => {
+            check_not_taken(st)?;
+            let (w, h) = st.size.ok_or("look at the screen first")?;
+            let from = click_point(*from_cell, *from_spot, w, h).ok_or_else(|| format!("there is no square {from_cell} with spot {from_spot}: squares go 1–{CELLS}, spots 1–{SPOTS}"))?;
+            let to = click_point(*to_cell, *to_spot, w, h).ok_or_else(|| format!("there is no square {to_cell} with spot {to_spot}: squares go 1–{CELLS}, spots 1–{SPOTS}"))?;
+            let s = Session::open()?;
+            s.drag(from, to)?;
+            st.last_ai = Some(Instant::now());
+            st.last_zoom = None;
+            Ok((format!("dragged from square {from_cell} to square {to_cell}; look again to see what moved"), None))
+        }
         other => Err(format!("not a screen action: {other:?}")),
     }
 }
@@ -314,5 +413,27 @@ mod tests {
         let mut fresh = Screen::default();
         assert!(run(&mut fresh, &crate::action::Action::ScreenType { text: "x".into(), enter: false }).unwrap_err().contains("look at the screen first"));
         assert!(run(&mut fresh, &crate::action::Action::ScreenLook { cell: Some(49) }).unwrap_err().contains("no square 49"));
+    }
+
+    #[test]
+    fn key_names_become_keysyms() {
+        assert_eq!(keysyms("ctrl+shift+t").unwrap(), vec![0xffe3, 0xffe1, 0x74]);
+        assert_eq!(keysyms("Alt+Tab").unwrap(), vec![0xffe9, 0xff09]);
+        assert_eq!(keysyms("escape").unwrap(), vec![0xff1b]);
+        assert_eq!(keysyms("f5").unwrap(), vec![0xffc2]);
+        assert_eq!(keysyms("down").unwrap(), vec![0xff54]);
+        assert!(keysyms("ctrl+banana").unwrap_err().contains("no key called banana"));
+        assert!(keysyms("").is_err());
+    }
+
+    #[test]
+    fn scroll_and_drag_need_a_look_first_and_a_real_direction() {
+        let mut fresh = Screen::default();
+        let scroll = |d: &str| crate::action::Action::Scroll { cell: 1, spot: 1, direction: d.into(), amount: 3 };
+        assert!(run(&mut fresh, &scroll("down")).unwrap_err().contains("look at the screen first"));
+        let mut seen = Screen { last_zoom: None, last_ai: Some(Instant::now()), size: Some((1280, 800)) };
+        assert!(run(&mut seen, &scroll("sideways")).unwrap_err().contains("up, down, left or right"));
+        let drag = crate::action::Action::Drag { from_cell: 1, from_spot: 1, to_cell: 49, to_spot: 1 };
+        assert!(run(&mut seen, &drag).unwrap_err().contains("no square 49"));
     }
 }

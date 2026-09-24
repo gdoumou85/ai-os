@@ -143,7 +143,7 @@ const RELAUNCH_SECS: u64 = 120;
 /// takes the screen look itself and hands back the picture: no rule to remember, no list of which
 /// programs list their windows and which do not (the owner, 2026-09-20: "it will be the same issue
 /// with every app we install. The AI must just be able to understand").
-const SCREEN_INSTEAD: &str = "Here is the screen instead: work it with screen_look, screen_click and screen_type.";
+pub const SCREEN_INSTEAD: &str = "Here is the screen instead: work it with screen_look, screen_click and screen_type.";
 
 impl DesktopState {
     pub fn new(cap: usize, displays: Displays) -> Rc<RefCell<Self>> {
@@ -458,7 +458,7 @@ impl DesktopWorker {
 
 impl Worker for DesktopWorker {
     fn run(&self, action: &Action) -> Outcome {
-        if matches!(action, Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. }) {
+        if matches!(action, Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. } | Action::Key { .. } | Action::Scroll { .. } | Action::Drag { .. }) {
             return match crate::screen::run(&mut self.0.borrow_mut().screen, action) {
                 Ok((d, image)) => Outcome { image, ..Outcome::ok(d) },
                 Err(e) => Outcome::err(e),

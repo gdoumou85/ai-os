@@ -76,7 +76,9 @@ fn a_reconnect_refills_the_open_job_instead_of_opening_a_second_one() {
     assert_eq!(cards.list.iter().filter(|c| matches!(c.kind, CardKind::NeedsAnswer { .. })).count(), 1);
     let CardKind::Building { steps, .. } = &cards.list[0].kind else { panic!() };
     assert!(steps[0].done && steps[1].done, "the second step ticked in place");
-    assert_eq!(cards.list[0].buttons, vec![Button { label: "Stop".into(), say: "stop".into() }], "still stoppable");
+    // The pending question already ended this turn (one-loop §3): no Stop to reconnect to.
+    assert!(cards.list[0].buttons.is_empty());
+    assert!(!cards.running());
 }
 
 #[test]
@@ -89,24 +91,44 @@ fn clear_keeps_only_the_running_job_and_what_it_waits_on() {
 
     cards.apply(&Event::You { text: "make p".into() });
     cards.apply(&Event::Understood { job_id: j(), name: "p".into(), text: "Starting p".into(), housekeeping: false });
-    cards.apply(&Event::NeedsAnswer { job_id: j(), questions: vec!["which one?".into()], options: vec![] });
-    cards.apply(&Event::You { text: "the first".into() });
-    cards.apply(&Event::Said { text: "noted".into() });
-    cards.apply(&Event::NeedsAnswer { job_id: j(), questions: vec!["and then?".into()], options: vec![] });
     assert!(cards.running());
     cards.clear();
+    assert_eq!(cards.list.len(), 1, "just the running turn's own card");
     assert!(matches!(cards.list[0].kind, CardKind::Building { .. }));
-    assert!(matches!(cards.list[1].kind, CardKind::NeedsAnswer { .. }));
-    assert_eq!(cards.list.len(), 2);
-    // The job carries on in the cleared list: its steps and its end land on the kept card.
+    // The turn carries on in the cleared list: its steps and its end land on the kept card.
     assert_eq!(cards.apply(&Event::Plan { job_id: j(), steps: vec!["write".into()] }), vec![Change::Updated(0)]);
     cards.apply(&Event::Done { job_id: j(), text: "finished".into(), check: None, files: vec![], windows: vec![] });
     let CardKind::Building { collapsed, .. } = &cards.list[0].kind else { panic!() };
     assert!(collapsed);
-    assert!(!cards.running(), "the job ended: no Stop in the title bar");
+    assert!(!cards.running(), "the turn ended: no Stop in the title bar");
     cards.apply(&Event::You { text: "hi".into() });
     cards.clear();
     assert!(cards.list.is_empty(), "nothing running: everything goes");
+}
+
+#[test]
+fn a_turn_opens_its_card_on_its_first_action_and_lists_what_it_did() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::You { text: "make a game".into() });
+    cards.apply(&Event::Plan { job_id: "t1".into(), steps: vec!["[x] write it".into(), "[ ] run it".into()] });
+    cards.apply(&Event::Step { job_id: "t1".into(), plan_step: 0, text: "wrote game.js".into(), ok: true });
+    cards.apply(&Event::Step { job_id: "t1".into(), plan_step: 0, text: "ran node game.js".into(), ok: false });
+    assert!(cards.running());
+    let CardKind::Building { steps, actions, .. } = &cards.list[1].kind else { panic!("{:?}", cards.list) };
+    assert_eq!(steps.iter().map(|s| (s.text.as_str(), s.done)).collect::<Vec<_>>(), [("write it", true), ("run it", false)]);
+    assert_eq!(actions.iter().map(|s| (s.text.as_str(), s.ok)).collect::<Vec<_>>(), [("wrote game.js", true), ("ran node game.js", false)]);
+    cards.apply(&Event::NeedsAnswer { job_id: "t1".into(), questions: vec!["Which birds?".into()], options: vec![vec![]] });
+    assert!(!cards.running(), "a question ends the turn");
+}
+
+#[test]
+fn a_chat_reply_opens_no_card() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::You { text: "hi".into() });
+    cards.apply(&Event::Busy { job_id: "t2".into(), text: "Thinking…".into() });
+    cards.apply(&Event::Said { text: "hello".into() });
+    assert!(!cards.running());
+    assert_eq!(cards.list.len(), 2);
 }
 
 #[test]

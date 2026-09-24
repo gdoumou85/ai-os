@@ -10,7 +10,7 @@ pub struct StepLine { pub text: String, pub done: bool, pub ok: bool, pub detail
 #[derive(Debug, Clone, PartialEq)]
 pub enum CardKind {
     You, Said,
-    Building { name: String, understood: String, steps: Vec<StepLine>, collapsed: bool },
+    Building { name: String, understood: String, steps: Vec<StepLine>, actions: Vec<StepLine>, collapsed: bool },
     /// `options[i]`: buttons for `questions[i]`, maybe none.
     NeedsAnswer { questions: Vec<String>, options: Vec<Vec<String>> },
     Done { text: String, check: Option<String>, files: Vec<ChangedFile>, learned: Vec<String> },
@@ -79,7 +79,7 @@ impl Cards {
     fn push(&mut self, c: Card) -> Vec<Change> { self.list.push(c); vec![Change::Added(self.list.len() - 1)] }
 
     fn open_building(&mut self, job_id: &str, name: &str, understood: &str) -> usize {
-        self.list.push(Card { kind: CardKind::Building { name: name.into(), understood: understood.into(), steps: vec![], collapsed: false }, text: understood.into(), buttons: vec![btn("Stop", "stop")], opens: vec![], thumbnails: vec![], job_id: Some(job_id.into()) });
+        self.list.push(Card { kind: CardKind::Building { name: name.into(), understood: understood.into(), steps: vec![], actions: vec![], collapsed: false }, text: understood.into(), buttons: vec![btn("Stop", "stop")], opens: vec![], thumbnails: vec![], job_id: Some(job_id.into()) });
         let i = self.list.len() - 1; self.building = Some(i); i
     }
 
@@ -90,15 +90,39 @@ impl Cards {
         vec![Change::Updated(i)]
     }
 
+    /// The card of the turn `job_id`, opened on its first to-do list or action (one-loop §3).
+    /// The changes: an older card collapsed and this one added, or this one updated.
+    fn building_for(&mut self, job_id: &str) -> (usize, Vec<Change>) {
+        match self.building.filter(|&i| self.list[i].job_id.as_deref() == Some(job_id)) {
+            Some(i) => (i, vec![Change::Updated(i)]),
+            None => { let mut ch = self.close_building(); let i = self.open_building(job_id, "", ""); ch.push(Change::Added(i)); (i, ch) }
+        }
+    }
+
     pub fn apply(&mut self, ev: &Event) -> Vec<Change> {
         match ev {
             Event::You { text } => self.push(Card { kind: CardKind::You, text: text.clone(), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: None }),
             Event::Said { text } => self.push(Card { kind: CardKind::Said, text: text.clone(), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: None }),
             Event::Understood { job_id, name, text, .. } => { let i = self.open_building(job_id, name, text); vec![Change::Added(i)] }
-            Event::Plan { steps, .. } => match self.building {
-                Some(i) => { if let CardKind::Building { steps: s, .. } = &mut self.list[i].kind { *s = steps.iter().map(|t| StepLine { text: t.clone(), done: false, ok: false, detail: None }).collect(); } vec![Change::Updated(i)] }
-                None => vec![],
-            },
+            Event::Plan { job_id, steps } => {
+                let (i, ch) = self.building_for(job_id);
+                if let CardKind::Building { steps: s, .. } = &mut self.list[i].kind {
+                    *s = steps.iter().map(|t| {
+                        let done = t.starts_with("[x] ");
+                        let text = t.strip_prefix("[x] ").or_else(|| t.strip_prefix("[ ] ")).unwrap_or(t);
+                        StepLine { text: text.into(), done, ok: done, detail: None }
+                    }).collect();
+                }
+                ch
+            }
+            Event::Step { job_id, plan_step, text, ok } if *plan_step == 0 => {
+                let (i, ch) = self.building_for(job_id);
+                if let CardKind::Building { actions, .. } = &mut self.list[i].kind {
+                    actions.push(StepLine { text: text.clone(), done: true, ok: *ok, detail: None });
+                }
+                ch
+            }
+            // An older engine on a reconnect still numbers its steps from 1: today's behaviour.
             Event::Step { plan_step, text, ok, .. } => match self.building {
                 Some(i) => {
                     if let CardKind::Building { steps, .. } = &mut self.list[i].kind {
@@ -108,7 +132,11 @@ impl Cards {
                 }
                 None => vec![],
             },
-            Event::NeedsAnswer { job_id, questions, options } => self.push(Card { kind: CardKind::NeedsAnswer { questions: questions.clone(), options: options.clone() }, text: questions.join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }),
+            Event::NeedsAnswer { job_id, questions, options } => {
+                let mut ch = self.close_building();
+                ch.extend(self.push(Card { kind: CardKind::NeedsAnswer { questions: questions.clone(), options: options.clone() }, text: questions.join("\n"), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: Some(job_id.clone()) }));
+                ch
+            }
             Event::Done { job_id, text, check, files, .. } => {
                 let mut ch = self.close_building();
                 ch.extend(self.push(result_card(CardKind::Done { text: text.clone(), check: check.clone(), files: files.clone(), learned: vec![] }, text, files, job_id)));
@@ -177,19 +205,28 @@ impl Cards {
     /// A job is on screen and still running: the title bar's Stop shows.
     pub fn running(&self) -> bool { self.building.is_some() }
 
-    /// A reopened rail: the open job as one Building card (steps ticked so far) plus its
-    /// waiting card, if any. Earlier finished jobs are not replayed (1d §4.2).
+    /// A reopened rail: the open turn as one Building card (its to-do list and actions so far)
+    /// plus its waiting card, if any. Earlier finished turns are not replayed (1d §4.2).
     fn rebuild(&mut self, st: &JobState) -> Vec<Change> {
-        // A second State for the job already on screen is a reconnect, not a new job: refill that
-        // card. Opening another one would strand the first, Stop button and all.
-        let open = self.building.filter(|&i| self.list[i].job_id.as_deref() == Some(st.id.as_str()));
+        // A second State for a turn already on screen is a reconnect, not a new one: refill that
+        // card in place, even one a `NeedsAnswer` already closed while it waited — starting a
+        // fresh one every poll would duplicate the turn on screen.
+        let open = self.list.iter().position(|c| c.job_id.as_deref() == Some(st.id.as_str()) && matches!(c.kind, CardKind::Building { .. }));
         let (i, mut ch) = match open {
             Some(i) => (i, vec![Change::Updated(i)]),
             None => { let i = self.open_building(&st.id, &st.name, &st.understood); (i, vec![Change::Added(i)]) }
         };
-        if let CardKind::Building { steps, .. } = &mut self.list[i].kind {
-            *steps = st.plan.iter().map(|t| StepLine { text: t.clone(), done: false, ok: false, detail: None }).collect();
-            for s in &st.steps { if let Some(l) = steps.get_mut(s.plan_step.saturating_sub(1)) { l.done = true; l.ok = s.ok; l.detail = Some(s.text.clone()); } }
+        if let CardKind::Building { steps, actions, .. } = &mut self.list[i].kind {
+            *steps = st.plan.iter().map(|t| {
+                let done = t.starts_with("[x] ");
+                let text = t.strip_prefix("[x] ").or_else(|| t.strip_prefix("[ ] ")).unwrap_or(t);
+                StepLine { text: text.into(), done, ok: done, detail: None }
+            }).collect();
+            for s in &st.steps {
+                if s.plan_step == 0 { continue; }
+                if let Some(l) = steps.get_mut(s.plan_step - 1) { l.done = true; l.ok = s.ok; l.detail = Some(s.text.clone()); }
+            }
+            *actions = st.steps.iter().filter(|s| s.plan_step == 0).map(|s| StepLine { text: s.text.clone(), done: true, ok: s.ok, detail: None }).collect();
         }
         ch.extend(self.waiting_card(st));
         ch

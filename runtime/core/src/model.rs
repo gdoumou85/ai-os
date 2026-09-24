@@ -3,13 +3,22 @@ use crate::moves::Move;
 use crate::schema;
 use std::cell::RefCell;
 
-#[derive(Debug, Clone, PartialEq)]
+/// One message of the conversation before the newest one (one-loop design §1).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Msg { pub role: String, pub content: String }
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Prompt {
     pub system: String,
+    /// The newest user-side message; the screen picture, if any, rides on it.
     pub user: String,
     pub allowed: Vec<&'static str>,
     /// A PNG for the model to see with the user message: the screen hand's latest look (2b).
     pub image: Option<Vec<u8>>,
+    /// The chat before `user`, oldest first.
+    pub history: Vec<Msg>,
+    /// The model cannot see: the screen actions are left out of the grammar.
+    pub no_screen: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -27,15 +36,17 @@ pub trait Model {
     /// The context the model is run with, in tokens: what a step's evidence has to fit in. The
     /// desktop hand's look cap follows it (2a §4).
     fn context_tokens(&self) -> usize { 8192 }
+    /// Whether the model takes pictures (one-loop design §2): only then is the screen offered.
+    fn sees(&self) -> bool { false }
 }
 
 /// Scripted moves for tests; records every prompt it was given.
 /// `unreadable`: how many of the next answers come back as text that is not a move, the way a
 /// runner that does not enforce the grammar answers (LM Studio with a thinking Qwen, 2026-09-19).
-pub struct FakeModel { queue: RefCell<std::collections::VecDeque<Move>>, pub prompts: RefCell<Vec<Prompt>>, pub unreadable: std::cell::Cell<u32> }
+pub struct FakeModel { queue: RefCell<std::collections::VecDeque<Move>>, pub prompts: RefCell<Vec<Prompt>>, pub unreadable: std::cell::Cell<u32>, pub sees: std::cell::Cell<bool> }
 
 impl FakeModel {
-    pub fn new(moves: Vec<Move>) -> Self { Self { queue: RefCell::new(moves.into()), prompts: RefCell::new(vec![]), unreadable: Default::default() } }
+    pub fn new(moves: Vec<Move>) -> Self { Self { queue: RefCell::new(moves.into()), prompts: RefCell::new(vec![]), unreadable: Default::default(), sees: Default::default() } }
 }
 
 impl Model for FakeModel {
@@ -52,6 +63,7 @@ impl Model for FakeModel {
         }
         self.queue.borrow_mut().pop_front().ok_or(ModelError::Exhausted)
     }
+    fn sees(&self) -> bool { self.sees.get() }
 }
 
 /// The context assumed until the Model card says otherwise. Ollama is asked for `loaded_context()`,
@@ -80,12 +92,14 @@ pub struct RemoteModel {
     pub model: String,
     pub key: Option<String>,
     pub finder: Box<dyn Fn() -> Vec<Found>>,
+    /// Whether this runner sees, asked once per process and then kept (see `sees()`).
+    pub sees: std::cell::OnceCell<bool>,
 }
 
 impl RemoteModel {
     /// A runner at a known address that is never looked for elsewhere.
     pub fn at(kind: Kind, url: &str, model: &str) -> Self {
-        Self { kind, url: RefCell::new(url.into()), model: model.into(), key: None, finder: Box::new(Vec::new) }
+        Self { kind, url: RefCell::new(url.into()), model: model.into(), key: None, finder: Box::new(Vec::new), sees: std::cell::OnceCell::new() }
     }
     pub fn local(model: &str) -> Self { Self::at(Kind::Ollama, "http://127.0.0.1:11434", model) }
     /// What the installer wrote into the unit: `AI_OS_MODEL_URL` (else this machine),
@@ -145,9 +159,6 @@ fn runner_reason(body: &str) -> String {
 /// cannot answer out of turn. `$defs` (the action schema, shared by `act`/`done`) is untouched.
 /// Empty `allowed` keeps every move — used for calls with no state to narrow against.
 ///
-/// `pub(crate)` so `prompt.rs`'s tests can prove `allowed_moves`' hand-typed move names actually
-/// exist in `MOVE_SCHEMA` (a typo or a renamed move must never silently narrow to fewer moves, or
-/// to none) — see `prompt::tests::every_allowed_list_matches_a_real_move`.
 pub(crate) fn narrow_schema(mut schema: serde_json::Value, allowed: &[&'static str]) -> serde_json::Value {
     if allowed.is_empty() { return schema; }
     if let Some(one_of) = schema["oneOf"].as_array() {
@@ -179,6 +190,18 @@ pub fn base64(data: &[u8]) -> String {
     out
 }
 
+/// The schema narrowed to `allowed`, and with the screen actions dropped for a blind model.
+fn format_for(prompt: &Prompt) -> serde_json::Value {
+    let s = narrow_schema(schema::value(), &prompt.allowed);
+    if prompt.no_screen { schema::without_screen(s) } else { s }
+}
+
+/// `prompt.history` as chat messages, oldest first — the conversation between the system prompt
+/// and the newest `user` message.
+fn history(prompt: &Prompt) -> impl Iterator<Item = serde_json::Value> + '_ {
+    prompt.history.iter().map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+}
+
 pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
     let mut user = serde_json::json!({ "role": "user", "content": prompt.user });
     if let Some(png) = &prompt.image { user["images"] = serde_json::json!([base64(png)]); }
@@ -186,11 +209,12 @@ pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
         "model": model,
         "stream": false,
         "think": false,
-        "format": narrow_schema(schema::value(), &prompt.allowed),
+        "format": format_for(prompt),
         // Ollama loads the model at what each request asks for, so a fixed 8192 here undid the
         // Model card's bar on every question (the owner, 2026-09-23).
         "options": { "temperature": 0.0, "num_ctx": loaded_context() },
-        "messages": [ { "role": "system", "content": prompt.system }, user ]
+        "messages": std::iter::once(serde_json::json!({ "role": "system", "content": prompt.system }))
+            .chain(history(prompt)).chain(std::iter::once(user)).collect::<Vec<_>>()
     })
 }
 
@@ -215,8 +239,9 @@ pub fn openai_body(model: &str, prompt: &Prompt) -> serde_json::Value {
         "stream": false,
         "temperature": 0.0,
         "response_format": { "type": "json_schema", "json_schema": {
-            "name": "move", "strict": true, "schema": narrow_schema(schema::value(), &prompt.allowed) } },
-        "messages": [ { "role": "system", "content": prompt.system }, { "role": "user", "content": content } ]
+            "name": "move", "strict": true, "schema": format_for(prompt) } },
+        "messages": std::iter::once(serde_json::json!({ "role": "system", "content": prompt.system }))
+            .chain(history(prompt)).chain(std::iter::once(serde_json::json!({ "role": "user", "content": content }))).collect::<Vec<_>>()
     })
 }
 
@@ -250,13 +275,29 @@ impl Model for RemoteModel {
     }
 
     fn context_tokens(&self) -> usize { loaded_context() }
+
+    /// Ollama says so in `/api/show`; an OpenAI-style runner does not, so `AI_OS_MODEL_SEES=1`
+    /// is how one that can is marked. ponytail: asked once per process; a model swapped under a
+    /// running engine keeps the first answer until the engine restarts (the Model card restarts it).
+    fn sees(&self) -> bool {
+        *self.sees.get_or_init(|| match self.kind {
+            Kind::Ollama => {
+                let url = self.url.borrow().clone();
+                ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build()
+                    .post(&format!("{url}/api/show")).send_json(serde_json::json!({ "model": self.model }))
+                    .ok().and_then(|r| r.into_json::<serde_json::Value>().ok())
+                    .is_some_and(|v| v["capabilities"].as_array().is_some_and(|c| c.iter().any(|x| x == "vision")))
+            }
+            Kind::OpenAi => std::env::var("AI_OS_MODEL_SEES").is_ok_and(|v| v.trim() == "1"),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn p() -> Prompt { Prompt { system: "sys".into(), user: "hello".into(), allowed: vec![], image: None } }
+    fn p() -> Prompt { Prompt { system: "sys".into(), user: "hello".into(), allowed: vec![], image: None, ..Default::default() } }
 
     use crate::testing::{closed_port, json_response, serve};
 
@@ -287,7 +328,7 @@ mod tests {
 
     #[test]
     fn openai_request_is_grammar_forced_and_deterministic() {
-        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "start"], image: None });
+        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "ask"], image: None, ..Default::default() });
         assert_eq!(b["model"], "bonsai-8b");
         assert_eq!(b["stream"], false);
         assert_eq!(b["temperature"], 0.0);
@@ -308,7 +349,7 @@ mod tests {
 
     #[test]
     fn a_picture_rides_with_the_user_message_to_both_kinds_of_runner() {
-        let with = Prompt { system: "s".into(), user: "look".into(), allowed: vec![], image: Some(b"png".to_vec()) };
+        let with = Prompt { system: "s".into(), user: "look".into(), allowed: vec![], image: Some(b"png".to_vec()), ..Default::default() };
         let o = ollama_body("m", &with);
         assert_eq!(o["messages"][1]["images"], serde_json::json!(["cG5n"]));
         assert_eq!(o["messages"][1]["content"], "look");
@@ -371,8 +412,8 @@ mod tests {
     #[test]
     fn fake_returns_moves_in_order_then_errors() {
         let m = FakeModel::new(vec![
-            Move::Reply { text: "one".into(), remember: None },
-            Move::Reply { text: "two".into(), remember: None },
+            Move::Reply { thought: String::new(), text: "one".into(), outcome: crate::moves::Ending::Done },
+            Move::Reply { thought: String::new(), text: "two".into(), outcome: crate::moves::Ending::Done },
         ]);
         assert!(matches!(m.next_move(&p()).unwrap(), Move::Reply { text, .. } if text == "one"));
         assert!(matches!(m.next_move(&p()).unwrap(), Move::Reply { text, .. } if text == "two"));
@@ -383,8 +424,8 @@ mod tests {
 
     #[test]
     fn the_fake_never_spends_a_scripted_move_on_a_learning_turn_that_is_not_learn() {
-        let m = FakeModel::new(vec![Move::Reply { text: "next job's move".into(), remember: None }]);
-        let learn_only = Prompt { system: String::new(), user: String::new(), allowed: vec!["learn"], image: None };
+        let m = FakeModel::new(vec![Move::Reply { thought: String::new(), text: "next job's move".into(), outcome: crate::moves::Ending::Done }]);
+        let learn_only = Prompt { system: String::new(), user: String::new(), allowed: vec!["learn"], image: None, ..Default::default() };
         assert!(m.next_move(&learn_only).is_err());
         assert!(matches!(m.next_move(&learn_only.clone()), Err(_)));
         let any = Prompt { allowed: vec![], ..learn_only };
@@ -399,7 +440,7 @@ mod tests {
         assert_eq!(b["think"], false);
         assert_eq!(b["options"]["temperature"], 0.0);
         assert_eq!(b["options"]["num_ctx"], 8192);
-        assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 10);
+        assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 6);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
     }
@@ -417,24 +458,24 @@ mod tests {
     fn the_ollama_connection_says_its_context_and_sends_the_same_number() {
         let m = RemoteModel::local("x");
         assert_eq!(m.context_tokens(), 8192);
-        let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![], image: None });
+        let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![], image: None, ..Default::default() });
         assert_eq!(b["options"]["num_ctx"], m.context_tokens());
         assert_eq!(FakeModel::new(vec![]).context_tokens(), 8192, "the trait default");
     }
 
     #[test]
     fn ollama_body_narrows_the_schema_to_allowed_moves() {
-        let narrowed = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply", "start"], image: None };
+        let narrowed = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply", "ask"], image: None, ..Default::default() };
         let b = ollama_body("m", &narrowed);
         let one_of = b["format"]["oneOf"].as_array().unwrap();
         assert_eq!(one_of.len(), 2);
         let names: Vec<&str> = one_of.iter().map(|e| e["properties"]["move"]["enum"][0].as_str().unwrap()).collect();
-        assert_eq!(names, ["reply", "start"]);
+        assert_eq!(names, ["reply", "ask"]);
         assert!(b["format"]["$defs"].is_object(), "$defs must survive narrowing");
 
-        let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None };
+        let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None, ..Default::default() };
         let b2 = ollama_body("m", &all);
-        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 10);
+        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 6);
     }
 
     #[test]
@@ -444,6 +485,31 @@ mod tests {
         assert!(matches!(m, Move::Reply { text, .. } if text == "hi"));
         let bad = serde_json::json!({"message":{"content":"not json"}});
         assert!(matches!(parse_ollama(&bad), Err(ModelError::BadJson(_))));
+    }
+
+    #[test]
+    fn the_conversation_goes_between_the_system_and_the_newest_message() {
+        let p = Prompt { system: "s".into(), user: "now".into(), history: vec![
+            Msg { role: "user".into(), content: "show my projects".into() },
+            Msg { role: "assistant".into(), content: r#"{"move":"reply"}"#.into() },
+        ], ..Default::default() };
+        for b in [ollama_body("m", &p), openai_body("m", &p)] {
+            let m = b["messages"].as_array().unwrap();
+            let roles: Vec<&str> = m.iter().map(|x| x["role"].as_str().unwrap()).collect();
+            assert_eq!(roles, ["system", "user", "assistant", "user"]);
+            assert_eq!(m[1]["content"], "show my projects");
+        }
+    }
+
+    #[test]
+    fn a_model_that_cannot_see_is_offered_no_screen_actions() {
+        let p = Prompt { system: "s".into(), user: "u".into(), no_screen: true, ..Default::default() };
+        let b = ollama_body("m", &p);
+        let kinds: Vec<&str> = b["format"]["$defs"]["action"]["oneOf"].as_array().unwrap().iter().map(|o| o["properties"]["kind"]["enum"][0].as_str().unwrap()).collect();
+        for k in crate::schema::SCREEN_KINDS { assert!(!kinds.contains(&k), "{k} offered to a blind model"); }
+        assert!(kinds.contains(&"key") && kinds.contains(&"look"), "{kinds:?}");
+        let o = openai_body("m", &p);
+        assert!(o["response_format"]["json_schema"]["schema"]["$defs"]["action"]["oneOf"].as_array().unwrap().iter().all(|a| a["properties"]["kind"]["enum"][0] != "screen_look"));
     }
 
     /// Live: needs Ollama with the model pulled. AI_OS_LIVE=1 cargo test -p aios-core live_ollama -- --nocapture
@@ -456,6 +522,7 @@ mod tests {
             user: "hello, who are you?".into(),
             allowed: vec![],
             image: None,
+            ..Default::default()
         };
         let mv = m.next_move(&prompt).unwrap();
         eprintln!("{mv:?}");

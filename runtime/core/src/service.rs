@@ -1,5 +1,5 @@
 //! The engine as a service (1d design §3): one engine thread, one thread per client, JSON lines.
-use crate::engine::{is_stop, Engine};
+use crate::engine::{is_discard_learned, is_keep_learned, is_stop, Engine};
 use crate::model::Model;
 use aios_proto::{Event, JobState, Request, StepView, Waiting};
 use std::io::{BufRead, BufReader, Write};
@@ -10,17 +10,22 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
-enum Command { Say(String) }
+/// `Clear`: pressed while a turn worked. The screen was cleared at once; this waits behind that
+/// turn so its last rows are written first and then forgotten with the rest (final review,
+/// 2026-09-24).
+enum Command { Say(String), Clear }
 
 /// Everything the client threads need without touching the engine.
 struct Shared {
     clients: Mutex<Vec<(u64, Sender<String>)>>,
     seq: AtomicU64,
-    /// True while the engine is inside `handle_events`/`resume` — a job is being worked.
-    running: AtomicBool,
     /// The open job as the events described it: `hello` is answered from here, at once, even
     /// mid-job (the engine's own `state()` is only reachable between calls).
     mirror: Mutex<Option<JobState>>,
+}
+
+fn open(job_id: &str) -> JobState {
+    JobState { id: job_id.into(), name: String::new(), housekeeping: false, understood: String::new(), plan: vec![], steps: vec![], waiting: Waiting::None }
 }
 
 impl Shared {
@@ -47,11 +52,10 @@ impl Shared {
     fn update_mirror(&self, ev: &Event) {
         let mut m = self.mirror.lock().unwrap();
         match ev {
-            Event::Understood { job_id, name, text, housekeeping } => *m = Some(JobState { id: job_id.clone(), name: name.clone(), housekeeping: *housekeeping, understood: text.clone(), plan: vec![], steps: vec![], waiting: Waiting::None }),
-            Event::Plan { steps, .. } => if let Some(j) = m.as_mut() { j.plan = steps.clone(); j.waiting = Waiting::None; },
-            Event::Step { plan_step, text, ok, .. } => if let Some(j) = m.as_mut() { j.steps.push(StepView { plan_step: *plan_step, text: text.clone(), ok: *ok }); j.waiting = Waiting::None; },
-            Event::NeedsAnswer { questions, options, .. } => if let Some(j) = m.as_mut() { j.waiting = Waiting::Answer { questions: questions.clone(), options: options.clone() }; },
-            Event::Done { .. } | Event::Failed { .. } | Event::Stopped { .. } => *m = None,
+            // A turn's card opens on its first to-do list or action (one-loop design §3).
+            Event::Plan { job_id, steps } => { m.get_or_insert_with(|| open(job_id)).plan = steps.clone(); }
+            Event::Step { job_id, plan_step, text, ok } => { m.get_or_insert_with(|| open(job_id)).steps.push(StepView { plan_step: *plan_step, text: text.clone(), ok: *ok }); }
+            Event::NeedsAnswer { .. } | Event::Done { .. } | Event::Failed { .. } | Event::Stopped { .. } => *m = None,
             _ => {}
         }
     }
@@ -112,12 +116,12 @@ pub fn socket_path() -> std::path::PathBuf {
 
 /// Serve forever. `make` builds the engine on the engine thread and receives the broadcast sink.
 pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<dyn FnMut(&Event)>) -> Engine<M> + Send>) -> ! {
-    let shared = Arc::new(Shared { clients: Mutex::new(vec![]), seq: AtomicU64::new(1), running: AtomicBool::new(false), mirror: Mutex::new(None) });
+    let shared = Arc::new(Shared { clients: Mutex::new(vec![]), seq: AtomicU64::new(1), mirror: Mutex::new(None) });
     let (tx, rx) = channel::<Command>();
-    // The engine's stop flag, handed back once the engine exists. Nothing is accepted before it
-    // arrives: a client that could connect first would have nothing to raise, and its stop
-    // would be lost without a word.
-    let (ready, engine_ready) = channel::<Arc<AtomicBool>>();
+    // The engine's stop flag and inbox, handed back once the engine exists. Nothing is accepted
+    // before they arrive: a client that could connect first would have nothing to raise or fill,
+    // and its word would be lost without a trace.
+    let (ready, engine_ready) = channel::<(Arc<AtomicBool>, crate::engine::Inbox)>();
     let sh = shared.clone();
     std::thread::spawn(move || {
         // The engine thread IS the service. If it ever ends — a panic in the store, a poisoned
@@ -135,10 +139,9 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
             Ok(st) => *sh.mirror.lock().unwrap() = st,
             Err(e) => eprintln!("engine: reading the open job failed: {e}"),
         }
-        sh.running.store(true, Ordering::SeqCst);
         // Everything a client thread reads is now set: clients may arrive, and they watch the
         // resumed job go by like any other.
-        let _ = ready.send(engine.stop_flag());
+        let _ = ready.send((engine.stop_flag(), engine.inbox()));
         // At boot the engine starts before the network does (the owner's VM, 2026-09-19: "Network
         // is unreachable", and the open job left where it was). A resume the model runner could not
         // answer is tried again for a minute; anything else is reported once.
@@ -152,13 +155,18 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                 Ok(_) => break,
             }
         }
-        sh.running.store(false, Ordering::SeqCst);
         engine.stop_flag().swap(false, Ordering::SeqCst);
         for cmd in rx {
-            let Command::Say(text) = cmd;
-            sh.running.store(true, Ordering::SeqCst);
+            let text = match cmd {
+                Command::Say(text) => text,
+                // `Cleared` already went out from the client thread.
+                Command::Clear => {
+                    if let Err(e) = engine.clear() { sh.broadcast(&Event::Error { text: format!("could not clear the chat: {e}") }); }
+                    engine.stop_flag().swap(false, Ordering::SeqCst);
+                    continue;
+                }
+            };
             let r = engine.handle_events(&text);
-            sh.running.store(false, Ordering::SeqCst);
             // Silent: the queued word is what answers the user (the engine says "Nothing is
             // running now." itself, in every state). This only makes sure a flag nothing
             // consumed cannot survive into the next job.
@@ -169,7 +177,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         eprintln!("engine: the engine thread {} — exiting so the service is restarted", if ended.is_err() { "panicked" } else { "ended" });
         std::process::exit(1);
     });
-    let stop = engine_ready.recv().expect("the engine thread builds the engine");
+    let (stop, inbox) = engine_ready.recv().expect("the engine thread builds the engine");
     let mut next_id = 1u64;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -183,57 +191,62 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         let sh = shared.clone();
         let tx = tx.clone();
         let stop = stop.clone();
+        let inbox = inbox.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stream).lines() {
                 let Ok(line) = line else { break };
                 if line.trim().is_empty() { continue; }
                 match serde_json::from_str::<Request>(&line) {
                     Ok(Request::Hello(_)) => { let st = sh.mirror.lock().unwrap().clone(); sh.send_to(id, &Event::State { job: st }); }
-                    Ok(Request::Say(text)) => {
+                    // Keep/Discard answer the notes waiting on disk, never the turn at work: fed to
+                    // it as words, the model saw them and the turn's own learning then threw the
+                    // entry away (final review, 2026-09-24). Same answers as the engine's own branch.
+                    Ok(Request::Say(text)) if is_keep_learned(&text) || is_discard_learned(&text) => {
                         sh.broadcast(&Event::You { text: text.clone() });
-                        // Stop: arm the flag (lands between steps if a job is running) AND queue
-                        // it (a stop typed before the engine picked the request up must not sit
-                        // behind the whole job; an idle engine answers it as today). The
-                        // engine thread clears a flag nothing consumed.
+                        let keep = is_keep_learned(&text);
+                        let done = rusqlite::Connection::open(db_path()).map_err(crate::store::StoreError::from).and_then(|c| {
+                            c.busy_timeout(std::time::Duration::from_secs(5))?;
+                            crate::notes::init(&c)?;
+                            if keep { crate::notes::keep_pending(&c) } else { crate::notes::discard_pending(&c) }
+                        });
+                        match done {
+                            Ok(n) => sh.broadcast(&Event::Said { text: match (n, keep) { (0, _) => "There is nothing waiting to be kept or discarded.", (_, true) => "Kept what I learned.", (_, false) => "Discarded it." }.into() }),
+                            Err(e) => sh.send_to(id, &Event::Error { text: format!("could not reach the notes: {e}") }),
+                        }
+                    }
+                    Ok(Request::Say(text)) => {
+                        // Stop: the flag lands between actions; queued too, for a turn not yet begun.
                         if is_stop(&text) {
                             stop.store(true, Ordering::SeqCst);
+                            sh.broadcast(&Event::You { text: text.clone() });
                             if tx.send(Command::Say(text)).is_err() { break; }
                             continue;
                         }
-                        // Busy only while a JOB is being worked (§3.3): a chat reply in progress
-                        // just queues the next message behind it, and so does a job that is
-                        // waiting for an answer or an OK. `running` alone is not enough for
-                        // that second one: it only falls once `handle_events` returns, which is
-                        // after the `needs_ok` has already reached the client, so a question
-                        // typed the instant the Needs-your-OK card appears would race it and
-                        // come back "busy" — which is the one thing §2.1 promises it is not.
-                        // The mirror does not race: the sink updates it before it broadcasts.
-                        let job = sh.mirror.lock().unwrap().as_ref()
-                            .filter(|j| j.waiting == Waiting::None)
-                            .map(|j| (j.id.clone(), j.name.clone()));
-                        match job {
-                            Some((job_id, name)) if sh.running.load(Ordering::SeqCst) => {
-                                sh.send_to(id, &Event::Busy { job_id, text: format!("I'm working on {name}. Say stop if you want me to change course.") });
-                            }
-                            _ => if tx.send(Command::Say(text)).is_err() { break; },
-                        }
+                        // Decide before the echo goes out (as with the stop flag above): a test —
+                        // or the engine's own gate — that waits on `You` and then acts must already
+                        // find the word either in the inbox or on its way as a new turn, never in
+                        // the gap between the two.
+                        let joined = match inbox.lock().unwrap().as_mut() { Some(v) => { v.push(text.clone()); true } None => false };
+                        sh.broadcast(&Event::You { text: text.clone() });
+                        // While a turn works, the words join it at its next step (one-loop design §3);
+                        // otherwise they are the next turn.
+                        if !joined && tx.send(Command::Say(text)).is_err() { break; }
                     }
                     Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
                     Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
-                    // On this thread, like the Skills screen: a Clear during a job must not wait for it.
-                    // A job still open ends too, the way "stop" ends it: a question left waiting took
-                    // the next "Hi" as its answer and went on with the old project (the owner, 2026-09-23).
-                    Ok(Request::Clear {}) => match {
-                        // Being worked: the flag lands between steps. Idle (a question waiting): the
-                        // word ends it. Not both — the spare one says "Nothing is running now."
-                        let worked = sh.mirror.lock().unwrap().as_ref().map(|j| j.waiting == Waiting::None && sh.running.load(Ordering::SeqCst));
-                        match worked {
-                            Some(true) => stop.store(true, Ordering::SeqCst),
-                            Some(false) => if tx.send(Command::Say("stop".into())).is_err() { break; },
-                            None => {}
-                        }
-                        crate::store::Store::open(&db_path()).and_then(|s| s.forget_chat())
-                    } {
+                    // A turn open (the inbox exists): its inbox closes and the words in it go (the
+                    // user cleared them), the flag lands between its steps as "stop" would, and the
+                    // screen empties now; the engine forgets the rows once that turn has ended
+                    // (`Command::Clear`). Words typed after this find no inbox, so they queue behind
+                    // the Clear and run in the fresh chat. A question already ended its own turn,
+                    // so then nothing is running to stop.
+                    Ok(Request::Clear {}) if inbox.lock().unwrap().take().is_some() => {
+                        stop.store(true, Ordering::SeqCst);
+                        if tx.send(Command::Clear).is_err() { break; }
+                        sh.broadcast(&Event::Cleared {});
+                    }
+                    // Nothing running: on this thread at once, like the Skills screen.
+                    Ok(Request::Clear {}) => match crate::store::Store::open(&db_path()).and_then(|s| s.forget_chat()) {
                         Ok(()) => sh.broadcast(&Event::Cleared {}),
                         Err(e) => sh.send_to(id, &Event::Error { text: format!("could not clear the chat: {e}") }),
                     },

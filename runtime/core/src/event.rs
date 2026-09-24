@@ -26,6 +26,15 @@ pub fn describe(action: &Action) -> String {
         Action::ScreenLook { cell: Some(c) } => format!("looked closely at screen square {c}"),
         Action::ScreenClick { name, double, .. } => format!("{} {name} on the screen", if *double { "double-clicked" } else { "clicked" }),
         Action::ScreenType { text, enter } => format!("typed {} on the screen{}", plural(text.chars().count(), "character"), if *enter { " and pressed Enter" } else { "" }),
+        Action::WebRead { url, .. } => format!("read the page {url}"),
+        Action::WebSearch { query } => format!("searched the web for {query}"),
+        Action::StartProgram { name, argv } => format!("started {name} ({}) in the background", argv.join(" ")),
+        Action::ProgramOutput { name, .. } => format!("checked on {name}"),
+        Action::StopProgram { name } => format!("stopped {name}"),
+        Action::Key { keys } => format!("pressed {keys}"),
+        Action::Scroll { direction, .. } => format!("scrolled {direction}"),
+        Action::Drag { from_cell, to_cell, .. } => format!("dragged from square {from_cell} to square {to_cell}"),
+        Action::Wait { seconds } => format!("waited {seconds} s"),
     }
 }
 
@@ -51,6 +60,15 @@ pub fn doing(action: &Action) -> String {
         Action::ScreenLook { cell: Some(c) } => format!("looking closely at screen square {c}"),
         Action::ScreenClick { name, .. } => format!("clicking {name} on the screen"),
         Action::ScreenType { .. } => "typing on the screen".into(),
+        Action::WebRead { url, .. } => format!("reading the page {url}"),
+        Action::WebSearch { query } => format!("searching the web for {query}"),
+        Action::StartProgram { name, .. } => format!("starting {name}"),
+        Action::ProgramOutput { name, .. } => format!("checking on {name}"),
+        Action::StopProgram { name } => format!("stopping {name}"),
+        Action::Key { keys } => format!("pressing {keys}"),
+        Action::Scroll { direction, .. } => format!("scrolling {direction}"),
+        Action::Drag { .. } => "dragging".into(),
+        Action::Wait { seconds } => format!("waiting {seconds} s"),
     }
 }
 

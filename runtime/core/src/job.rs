@@ -103,6 +103,9 @@ pub struct Job {
     /// card's ticks afresh, since its step 2 is not the old step 2. `serde(default)`: I3.
     #[serde(default)]
     pub plan_from: usize,
+    /// The projects whose notes this turn has already been shown (one-loop design §2).
+    #[serde(default)]
+    pub projects_seen: Vec<String>,
 }
 
 impl Job {
@@ -120,7 +123,7 @@ impl Job {
             folder: folder.into(), new_project: false, request: String::new(),
             started_at: (millis / 1000) as u64,
             done_gated: 0,
-            skills: vec![], notes_block: String::new(), shown_notes: vec![], plan_from: 0,
+            skills: vec![], notes_block: String::new(), shown_notes: vec![], plan_from: 0, projects_seen: vec![],
         }
     }
 
@@ -131,6 +134,16 @@ impl Job {
         let mut job = Job::new("", folder, goal, false, understood);
         job.housekeeping = true;
         job
+    }
+
+    /// One user message's worth of work (one-loop design §1). The job record carries it because
+    /// the learning turn reads a job; `plan` holds the to-do list, `steps` the actions.
+    pub fn turn(folder: &str, request: &str) -> Job {
+        let mut j = Job::new("turn", folder, request, false, "");
+        j.housekeeping = true;
+        j.request = request.into();
+        j.state = State::Working;
+        j
     }
 
     pub fn is_open(&self) -> bool { !matches!(self.state, State::Done | State::Failed | State::Cancelled) }

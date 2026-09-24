@@ -143,6 +143,13 @@ impl Store {
         v.reverse();
         Ok(v)
     }
+
+    /// The chat since the last Clear, oldest first: what the model's conversation is built from.
+    pub fn all_messages(&self) -> Result<Vec<(String, String)>, StoreError> {
+        let mut st = self.conn.prepare("SELECT role, text FROM messages ORDER BY id")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
 }
 
 #[cfg(test)]

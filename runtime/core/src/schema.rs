@@ -22,25 +22,42 @@ pub const MOVE_SCHEMA: &str = r##"{
       { "type":"object", "properties": { "kind": {"enum":["open_app"]}, "name": {"type":"string"}, "visible": {"type":"boolean"} }, "required":["kind","name"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["screen_look"]}, "cell": {"type":"integer","minimum":1,"maximum":48} }, "required":["kind"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["screen_click"]}, "cell": {"type":"integer","minimum":1,"maximum":48}, "spot": {"type":"integer","minimum":1,"maximum":16}, "name": {"type":"string"}, "double": {"type":"boolean"} }, "required":["kind","cell","spot","name"], "additionalProperties": false },
-      { "type":"object", "properties": { "kind": {"enum":["screen_type"]}, "text": {"type":"string"}, "enter": {"type":"boolean"} }, "required":["kind","text"], "additionalProperties": false }
+      { "type":"object", "properties": { "kind": {"enum":["screen_type"]}, "text": {"type":"string"}, "enter": {"type":"boolean"} }, "required":["kind","text"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["web_read"]}, "url": {"type":"string"}, "from_line": {"type":"integer","minimum":1} }, "required":["kind","url"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["web_search"]}, "query": {"type":"string"} }, "required":["kind","query"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["start_program"]}, "name": {"type":"string"}, "argv": {"type":"array","items":{"type":"string"},"minItems":1} }, "required":["kind","name","argv"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["program_output"]}, "name": {"type":"string"}, "lines": {"type":"integer","minimum":1} }, "required":["kind","name"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["stop_program"]}, "name": {"type":"string"} }, "required":["kind","name"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["key"]}, "keys": {"type":"string"} }, "required":["kind","keys"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["scroll"]}, "cell": {"type":"integer","minimum":1,"maximum":48}, "spot": {"type":"integer","minimum":1,"maximum":16}, "direction": {"enum":["up","down","left","right"]}, "amount": {"type":"integer","minimum":1,"maximum":20} }, "required":["kind","cell","spot","direction","amount"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["drag"]}, "from_cell": {"type":"integer","minimum":1,"maximum":48}, "from_spot": {"type":"integer","minimum":1,"maximum":16}, "to_cell": {"type":"integer","minimum":1,"maximum":48}, "to_spot": {"type":"integer","minimum":1,"maximum":16} }, "required":["kind","from_cell","from_spot","to_cell","to_spot"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["wait"]}, "seconds": {"type":"integer","minimum":1,"maximum":300} }, "required":["kind","seconds"], "additionalProperties": false }
     ] }
   },
   "oneOf": [
-    { "type":"object", "properties": { "move": {"enum":["reply"]}, "text": {"type":"string"}, "remember": {"type":"string"} }, "required":["move","text"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["start"]}, "project": {"type":"string"}, "new_project": {"type":"boolean"}, "description": {"type":"string"}, "goal": {"type":"string"}, "creative": {"type":"boolean"}, "understood": {"type":"string"}, "skills": {"type":"array","items":{"type":"string"},"maxItems":3}, "remember": {"type":"string"}, "folder": {"type":"string"} }, "required":["move","project","new_project","description","goal","creative","understood","skills"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["housekeep"]}, "goal": {"type":"string"}, "understood": {"type":"string"}, "remember": {"type":"string"} }, "required":["move","goal","understood"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["ask"]}, "questions": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":3}, "options": {"type":"array","items":{"type":"array","items":{"type":"string"},"maxItems":5},"maxItems":3} }, "required":["move","questions","options"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["plan"]}, "steps": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8} }, "required":["move","steps"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["act"]}, "step": {"type":"integer","minimum":1}, "action": {"$ref":"#/$defs/action"} }, "required":["move","step","action"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["replan"]}, "steps": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}, "why": {"type":"string"} }, "required":["move","steps","why"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["done"]}, "summary": {"type":"string"}, "check": {"$ref":"#/$defs/action"} }, "required":["move","summary","check"], "additionalProperties": false },
-    { "type":"object", "properties": { "move": {"enum":["give_up"]}, "reason": {"type":"string"}, "missing": {"type":"string"} }, "required":["move","reason","missing"], "additionalProperties": false },
+    { "type":"object", "properties": { "move": {"enum":["reply"]}, "thought": {"type":"string"}, "text": {"type":"string"}, "outcome": {"enum":["done","could_not"]} }, "required":["move","thought","text","outcome"], "additionalProperties": false },
+    { "type":"object", "properties": { "move": {"enum":["ask"]}, "thought": {"type":"string"}, "question": {"type":"string"}, "options": {"type":"array","items":{"type":"string"},"maxItems":5} }, "required":["move","thought","question","options"], "additionalProperties": false },
+    { "type":"object", "properties": { "move": {"enum":["todo"]}, "thought": {"type":"string"}, "items": {"type":"array","minItems":1,"maxItems":12,"items":{"type":"object","properties":{"text":{"type":"string"},"done":{"type":"boolean"}},"required":["text","done"],"additionalProperties": false}} }, "required":["move","thought","items"], "additionalProperties": false },
+    { "type":"object", "properties": { "move": {"enum":["act"]}, "thought": {"type":"string"}, "action": {"$ref":"#/$defs/action"} }, "required":["move","thought","action"], "additionalProperties": false },
+    { "type":"object", "properties": { "move": {"enum":["remember"]}, "thought": {"type":"string"}, "text": {"type":"string"} }, "required":["move","thought","text"], "additionalProperties": false },
     { "type":"object", "properties": { "move": {"enum":["learn"]}, "entries": {"type":"array","maxItems":5,"items":{"type":"object","properties":{"notebook":{"type":"string"},"topic":{"type":"string"},"kind":{"enum":["technique","pitfall","taste"]},"text":{"type":"string"},"steps":{"type":"array","items":{"type":"integer","minimum":1},"maxItems":10},"links":{"type":"array","items":{"type":"string"},"maxItems":5}},"required":["notebook","topic","kind","text","steps","links"],"additionalProperties": false}}, "used": {"type":"array","items":{"type":"string"}}, "wrong": {"type":"array","items":{"type":"string"}}, "remove": {"type":"array","items":{"type":"string"}} }, "required":["move","entries","used","wrong","remove"], "additionalProperties": false }
   ]
 }"##;
 
 pub fn value() -> serde_json::Value {
     serde_json::from_str(MOVE_SCHEMA).expect("MOVE_SCHEMA is valid JSON")
+}
+
+/// The actions that need the model to see the screen (one-loop design §2).
+pub const SCREEN_KINDS: [&str; 5] = ["screen_look", "screen_click", "screen_type", "scroll", "drag"];
+
+/// The schema with the screen actions taken out, for a model that cannot see.
+pub fn without_screen(mut schema: serde_json::Value) -> serde_json::Value {
+    if let Some(a) = schema["$defs"]["action"]["oneOf"].as_array() {
+        let kept: Vec<serde_json::Value> = a.iter().filter(|o| !o["properties"]["kind"]["enum"][0].as_str().is_some_and(|k| SCREEN_KINDS.contains(&k))).cloned().collect();
+        schema["$defs"]["action"]["oneOf"] = serde_json::Value::Array(kept);
+    }
+    schema
 }
 
 #[cfg(test)]
@@ -59,6 +76,9 @@ mod tests {
             let props = entry["properties"].as_object().unwrap();
             let first = props.keys().next().unwrap();
             assert_eq!(first, "move", "discriminator must be written first: {entry}");
+            if first != "move" { continue }
+            let second = props.keys().nth(1).unwrap();
+            if entry["properties"]["move"]["enum"][0] != "learn" { assert_eq!(second, "thought", "{entry}"); }
         }
         for entry in schema["$defs"]["action"]["oneOf"].as_array().unwrap() {
             let props = entry["properties"].as_object().unwrap();
@@ -79,15 +99,22 @@ mod tests {
             "run_command", "read_file", "write_file", "edit_file", "set_setting",
             "look", "press", "type", "read", "open_app",
             "screen_look", "screen_click", "screen_type",
+            "web_read", "web_search",
+            "start_program", "program_output", "stop_program",
+            "key", "scroll", "drag", "wait",
         ]);
     }
 
     #[test]
-    fn start_offers_skills_and_learn_entries_have_the_three_kinds() {
-        let v = value();
-        assert_eq!(v["oneOf"][1]["properties"]["skills"]["maxItems"], 3);
-        let learn = &v["oneOf"][9];
+    fn learn_entries_have_the_three_kinds() {
+        let learn = &value()["oneOf"][5];
         assert_eq!(learn["properties"]["move"]["enum"][0], "learn");
         assert_eq!(learn["properties"]["entries"]["items"]["properties"]["kind"]["enum"], serde_json::json!(["technique", "pitfall", "taste"]));
+    }
+
+    #[test]
+    fn line_numbers_are_1_based() {
+        let v = value();
+        assert_eq!(v["$defs"]["action"]["oneOf"][1]["properties"]["from_line"]["minimum"], 1);
     }
 }
