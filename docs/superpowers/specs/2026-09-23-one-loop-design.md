@@ -59,6 +59,8 @@ loop:
                               to keep something (asks_to_keep, as today); continue.
 ```
 
+`ask` carries one question and up to five suggested answers.
+
 Every move starts with `thought`: one short sentence of reasoning before the choice (small
 models choose better after it). It is the card's live line while the move runs, and is kept in
 the conversation only for the newest move.
@@ -68,7 +70,7 @@ plan-step numbers, no blueprint gate, no done check, no rejection budget. `outco
 (default) or `could_not`, so the card never says Finished over a failure.
 
 **Answer format.** Moves stay grammar-constrained JSON (Ollama `format`, OpenAI
-`response_format`), one schema with the five moves; `act.action` is today's `Action` enum
+`response_format`), one schema with the five moves (plus `learn`, used only by the learning turn); `move` stays the first key of every move and `thought` the second — the runner's grammar commits to a move by its first key; `act.action` is today's `Action` enum
 with §1b's new actions. This is what keeps the 9B reliable, and every provider in the Model and Cloud cards
 already supports it. What changes is the transport: `Prompt` carries a message list
 (`system`, then `user`/`assistant` turns) instead of one system and one user string, with the
@@ -76,6 +78,8 @@ screen image, as today, on the newest user-side message.
 
 **Working folder.** Commands run in the user's home, as a terminal would open; the brief says to
 use absolute paths. `SetSetting projects_root` stays, as an action.
+
+A turn lives in memory only: a restart mid-turn leaves the chat as it was, and the user says it again. A job left open by v0.9.x is closed at start with a line in the chat.
 
 ### 1b. The hands: everything a person at this PC does
 
@@ -103,7 +107,7 @@ limit for things that finish; the brief says to `start` anything that keeps runn
 - **Project notes.** A project is a folder: every folder under the projects root, plus folders
   registered elsewhere (today's `projects` rows, and any folder where the model writes a
   BLUEPRINT.md, registered on that write). Its notes file stays BLUEPRINT.md. The notes are shown
-  (capped at 3000 chars) when the user's message names the project (today's `named_in`), and the
+  (capped at 1500 chars in the context block, 2000 on first touch) when the user's message names the project (today's `named_in`), and the
   first time in a turn an action touches that folder, appended to that action's result.
 - **Notes reminder.** A `reply` ending a turn that wrote files inside a project folder without
   writing its BLUEPRINT.md gets one note back ("you changed <project> but not its notes") and the
@@ -114,8 +118,7 @@ limit for things that finish; the brief says to `start` anything that keeps runn
 - **Skill tips.** `notes::for_job` picks tips by the message's words (skills = the notebooks
   whose name the message mentions); the learning turn after a turn with actions stays as it is,
   fed the turn's actions instead of a job's steps.
-- **Fitting 8k.** The brief is at most 2000 tokens and the context block at most 1500 (tests
-  hold both). The engine counts (chars/4) and fits the rest into the model's context less 1500
+- **Fitting 8k.** The brief is under 1800 tokens and the fullest context block under 3500 (tests hold both; tips and the request are cut to 1500 chars inside it); at 8k the worst case leaves about 1900 tokens of chat, which is why the Model card recommends 16k. The engine counts (chars/4) and fits the rest into the model's context less 1500
   tokens for the answer. Never dropped: the brief, the context block, the message that started
   this turn with anything the user added while it worked, and the newest to-do list. Then the
   newest messages, newest first; action results older than the newest six are cut to 300 chars;
@@ -126,8 +129,7 @@ limit for things that finish; the brief says to `start` anything that keeps runn
   `scroll`, `drag`) are offered only to a model that takes images: Ollama's `/api/show`
   `capabilities` has `vision`; a cloud model counts when its provider lists image input, else it
   does not. Without them the schema drops those actions and the brief says why: the desktop is
-  worked through `look`, `press`, `type`, `key` and the command line. The Model card's list stops
-  filtering out models named `vision`/`-vl`, and shows which models can see.
+  worked through `look`, `press`, `type`, `key` and the command line. The Model card's list stops filtering out models named `vision`/`-vl`/`vlm`, so one that can see can be chosen.
 
 ## 3. What the user sees
 
@@ -162,7 +164,7 @@ changed are the paths of the turn's successful writes and edits.
 
 | Stays | Replaced |
 |---|---|
-| executor (all hands, plus §1b's new ones), proto, rail (small card changes; Model card: who can see, the 16k note), model transport (message list), cloud, machine, notes/learn, store, service (turn in place of job; an inbox for mid-work messages), find | engine.rs (2600 lines) → a loop of a few hundred; prompt.rs → brief + context block; moves.rs/schema.rs → five moves; job.rs → a turn record (id, request, actions, todo, shown notes) |
+| executor (all hands, plus §1b's new ones), proto, rail (small card changes; Model card: who can see, the 16k note), model transport (message list), cloud, machine, notes/learn, store, service (turn in place of job; an inbox for mid-work messages), find | engine.rs (2600 lines) → a loop of a few hundred; prompt.rs → brief + context block; moves.rs/schema.rs → five moves; job.rs stays as the turn's record (`Job::turn`), since learn.rs reads it; its job-machine fields go unused and are removed in a follow-up |
 
 Kept helpers: `places`, `journal_line`/`journal_for`, `asks_to_keep`, `named_in`, `is_stop`,
 `sanitize_project_name`, the machine block, `describe`/`doing`. The old `core_jobs` rows are
