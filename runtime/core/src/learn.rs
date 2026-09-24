@@ -19,7 +19,7 @@ fn changes_machine(a: &Action, folder: &str) -> bool {
         Action::SetSetting { .. } => true,
         // Root is how software and services change (full-access spec).
         Action::RunCommand { argv } => argv.first().is_some_and(|p| p == "sudo"),
-        Action::WriteFile { path, .. } | Action::EditFile { path, .. } => outside(path),
+        Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. } => outside(path),
         _ => false,
     }
 }

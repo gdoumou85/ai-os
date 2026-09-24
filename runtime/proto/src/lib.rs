@@ -56,6 +56,11 @@ pub struct Notebook { pub name: String, pub entries: Vec<NoteView> }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectView { pub name: String, pub folder: String, pub summary: String, pub touched_at: i64 }
 
+/// One watcher as the rail's Watchers page shows it (watchers design §3). `last_fired_at`: seconds
+/// since the epoch, 0 for never.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WatcherView { pub name: String, pub reason: String, pub urgent: bool, pub made_by: String, pub when: String, pub paused: bool, pub last_fired_at: i64, pub last_text: String }
+
 /// One event, `kind` first (the same first-key rule the move grammar lives by).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -77,6 +82,10 @@ pub enum Event {
     Skills { notebooks: Vec<Notebook> },
     /// The Projects page's list, answered to the client that asked, newest first.
     Projects { projects: Vec<ProjectView> },
+    /// An alert woke the AI (watchers design §2): its turn's card, orange, filled by its steps.
+    Alert { job_id: String, watcher: String, text: String, reason: String, urgent: bool },
+    /// Every watcher, broadcast after any change so each Watchers page stays current.
+    Watchers { watchers: Vec<WatcherView> },
     Busy { job_id: String, text: String },
     State { job: Option<JobState> },
     /// The service could not read a client line. Sent to that client only.
@@ -92,7 +101,7 @@ impl Event {
             Event::Understood { job_id, .. } | Event::Plan { job_id, .. } | Event::Step { job_id, .. }
             | Event::NeedsAnswer { job_id, .. } | Event::Done { job_id, .. }
             | Event::Failed { job_id, .. } | Event::Stopped { job_id, .. }
-            | Event::Learned { job_id, .. } | Event::Busy { job_id, .. } => Some(job_id),
+            | Event::Learned { job_id, .. } | Event::Busy { job_id, .. } | Event::Alert { job_id, .. } => Some(job_id),
             _ => None,
         }
     }
@@ -107,6 +116,14 @@ pub enum Request {
     #[serde(rename = "skills")] Skills {},
     /// The Projects page asks for the projects.
     #[serde(rename = "projects")] Projects {},
+    /// The Watchers page asks for the watchers; answered to that client only.
+    #[serde(rename = "watchers")] Watchers {},
+    /// The Watchers page's Pause/Resume.
+    #[serde(rename = "watcher_pause")] WatcherPause { name: String, paused: bool },
+    /// The Watchers page's Delete.
+    #[serde(rename = "watcher_delete")] WatcherDelete { name: String },
+    /// `ai-os-alert`: a watcher's program says something happened.
+    #[serde(rename = "alert")] Alert { watcher: String, text: String },
     /// The Skills screen's ✕ on one entry.
     #[serde(rename = "forget")] Forget { notebook: String, topic: String },
     /// Clear: the AI forgets the chat, and every client empties its screen on `Cleared`.
@@ -184,6 +201,8 @@ mod tests {
             Event::Learned { job_id: "j".into(), lines: vec!["Learned: open a website (this computer)".into()], pending: false },
             Event::Skills { notebooks: vec![Notebook { name: "this computer".into(), entries: vec![NoteView { topic: "t".into(), kind: "technique".into(), text: "x".into(), uses: 2, failed: false, needs_check: true }] }] },
             Event::Projects { projects: vec![ProjectView { name: "game".into(), folder: "/p/game".into(), summary: "A pool table".into(), touched_at: 1 }] },
+            Event::Alert { job_id: "j".into(), watcher: "price".into(), text: "AAPL at 180".into(), reason: "buy then".into(), urgent: true },
+            Event::Watchers { watchers: vec![WatcherView { name: "price".into(), reason: "buy then".into(), urgent: true, made_by: "AI".into(), when: "live".into(), paused: false, last_fired_at: 0, last_text: String::new() }] },
             Event::Busy { job_id: "j".into(), text: "working".into() },
             Event::State { job: None },
             Event::Error { text: "bad".into() },
@@ -200,8 +219,16 @@ mod tests {
     fn skills_requests_have_the_wire_shape_the_service_reads() {
         assert_eq!(serde_json::to_string(&Request::Skills {}).unwrap(), r#"{"skills":{}}"#);
         assert_eq!(serde_json::to_string(&Request::Projects {}).unwrap(), r#"{"projects":{}}"#);
+        assert_eq!(serde_json::to_string(&Request::Watchers {}).unwrap(), r#"{"watchers":{}}"#);
         let f = Request::Forget { notebook: "blender".into(), topic: "bevel".into() };
         assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&f).unwrap()).unwrap(), f);
+        for r in [
+            Request::WatcherPause { name: "price".into(), paused: true },
+            Request::WatcherDelete { name: "price".into() },
+            Request::Alert { watcher: "price".into(), text: "AAPL at 180".into() },
+        ] {
+            assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&r).unwrap()).unwrap(), r);
+        }
         let e = Event::Skills { notebooks: vec![Notebook { name: "this computer".into(), entries: vec![NoteView { topic: "t".into(), kind: "technique".into(), text: "x".into(), uses: 2, failed: false, needs_check: true }] }] };
         assert!(serde_json::to_string(&e).unwrap().starts_with(r#"{"kind":"skills""#));
     }

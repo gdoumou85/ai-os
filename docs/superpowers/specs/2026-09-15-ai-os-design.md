@@ -581,3 +581,14 @@ Two things the owner hit on his first full-access run.
   project list lives in `core::projects`. Answers stream: the answer timeout is the silence
   allowed, not the whole answer; Stop drops the stream; the status line counts the words; the
   chat leaves a quarter of the window for the answer. (v0.11.0)
+- **2026-09-24**, watchers and alerts (spec `2026-09-24-watchers-and-sidebar-design.md` §1-2, §4):
+  timers, checks and live programs in a `watchers` table, each with its maker's reason; the
+  service's scheduler runs them every 15 s and `ai-os-alert` lets a program raise one. An alert
+  is a turn of its own in its own chat (`messages.chat`), taken between the owner's turns; an
+  urgent one parks the turn in hand, which then carries on. Pop-up, orange Alert card, and a
+  Watchers page with Pause/Resume/Delete. (v0.12.0)
+- **2026-09-25**, small steps (the owner's reports on v0.11.0): `append_file` adds to a file's end,
+  and the brief says a file over about 150 lines goes in parts and "small steps" means one per
+  turn. A project's top-level files come with its notes; a new file in a project is noted in its
+  BLUEPRINT.md at once, from the move's own thought; writing one file again and again counts as
+  the same action for the repeat guard. (v0.12.0)

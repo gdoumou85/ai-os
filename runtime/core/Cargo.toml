@@ -19,6 +19,10 @@ path = "src/bin/ai-os-engine.rs"
 name = "ai-os-find"
 path = "src/bin/ai-os-find.rs"
 
+[[bin]]
+name = "ai-os-alert"
+path = "src/bin/ai-os-alert.rs"
+
 [dependencies]
 executor = { path = "../executor" }
 aios-proto = { path = "../proto" }

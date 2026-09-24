@@ -60,6 +60,7 @@ mod tests {
             r#"{"move":"todo","thought":"t","items":[{"text":"write it","done":true},{"text":"run it","done":false}]}"#,
             r#"{"move":"act","thought":"t","action":{"kind":"run_command","argv":["ls"]}}"#,
             r#"{"move":"act","thought":"t","action":{"kind":"web_search","query":"flappy"}}"#,
+            r#"{"move":"act","thought":"t","action":{"kind":"watch","name":"price","reason":"why","urgent":true,"when":"live","command":["watch.sh"]}}"#,
             r#"{"move":"remember","thought":"t","text":"always use python3"}"#,
             r#"{"move":"learn","entries":[],"used":[],"wrong":[],"remove":[]}"#,
         ] {

@@ -10,7 +10,7 @@ pub struct StepLine { pub text: String, pub done: bool, pub ok: bool, pub detail
 #[derive(Debug, Clone, PartialEq)]
 pub enum CardKind {
     You, Said,
-    Building { name: String, understood: String, steps: Vec<StepLine>, actions: Vec<StepLine>, collapsed: bool },
+    Building { name: String, understood: String, steps: Vec<StepLine>, actions: Vec<StepLine>, collapsed: bool, alert: bool },
     /// `options[i]`: buttons for `questions[i]`, maybe none.
     NeedsAnswer { questions: Vec<String>, options: Vec<Vec<String>> },
     Done { text: String, check: Option<String>, files: Vec<ChangedFile>, learned: Vec<String> },
@@ -38,12 +38,12 @@ pub enum Change { Added(usize), Updated(usize), Line(String) }
 /// `None`: this event says nothing either way.
 pub fn busy_after(ev: &Event) -> Option<bool> {
     match ev {
-        Event::You { .. } | Event::Understood { .. } | Event::Plan { .. } | Event::Step { .. } => Some(true),
+        Event::You { .. } | Event::Understood { .. } | Event::Plan { .. } | Event::Step { .. } | Event::Alert { .. } => Some(true),
         Event::Said { .. } | Event::NeedsAnswer { .. } | Event::Stopped { .. }
         | Event::Error { .. } | Event::Learned { .. } => Some(false),
         // A slow local model can take minutes for the learning turn after Done/Failed, so the
         // spinner keeps turning until the Learned that always follows (engine.rs `learn`) stops it.
-        Event::Done { .. } | Event::Failed { .. } | Event::Busy { .. } | Event::State { .. } | Event::Skills { .. } | Event::Projects { .. } | Event::Cleared {} => None,
+        Event::Done { .. } | Event::Failed { .. } | Event::Busy { .. } | Event::State { .. } | Event::Skills { .. } | Event::Projects { .. } | Event::Watchers { .. } | Event::Cleared {} => None,
     }
 }
 
@@ -78,8 +78,8 @@ fn result_card(kind: CardKind, text: &str, files: &[ChangedFile], job_id: &str) 
 impl Cards {
     fn push(&mut self, c: Card) -> Vec<Change> { self.list.push(c); vec![Change::Added(self.list.len() - 1)] }
 
-    fn open_building(&mut self, job_id: &str, name: &str, understood: &str) -> usize {
-        self.list.push(Card { kind: CardKind::Building { name: name.into(), understood: understood.into(), steps: vec![], actions: vec![], collapsed: false }, text: understood.into(), buttons: vec![btn("Stop", "stop")], opens: vec![], thumbnails: vec![], job_id: Some(job_id.into()) });
+    fn open_building(&mut self, job_id: &str, name: &str, understood: &str, alert: bool) -> usize {
+        self.list.push(Card { kind: CardKind::Building { name: name.into(), understood: understood.into(), steps: vec![], actions: vec![], collapsed: false, alert }, text: understood.into(), buttons: vec![btn("Stop", "stop")], opens: vec![], thumbnails: vec![], job_id: Some(job_id.into()) });
         let i = self.list.len() - 1; self.building = Some(i); i
     }
 
@@ -95,7 +95,7 @@ impl Cards {
     fn building_for(&mut self, job_id: &str) -> (usize, Vec<Change>) {
         match self.building.filter(|&i| self.list[i].job_id.as_deref() == Some(job_id)) {
             Some(i) => (i, vec![Change::Updated(i)]),
-            None => { let mut ch = self.close_building(); let i = self.open_building(job_id, "", ""); ch.push(Change::Added(i)); (i, ch) }
+            None => { let mut ch = self.close_building(); let i = self.open_building(job_id, "", "", false); ch.push(Change::Added(i)); (i, ch) }
         }
     }
 
@@ -103,7 +103,16 @@ impl Cards {
         match ev {
             Event::You { text } => self.push(Card { kind: CardKind::You, text: text.clone(), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: None }),
             Event::Said { text } => self.push(Card { kind: CardKind::Said, text: text.clone(), buttons: vec![], opens: vec![], thumbnails: vec![], job_id: None }),
-            Event::Understood { job_id, name, text, .. } => { let i = self.open_building(job_id, name, text); vec![Change::Added(i)] }
+            Event::Understood { job_id, name, text, .. } => { let i = self.open_building(job_id, name, text, false); vec![Change::Added(i)] }
+            // An alert's turn opens its card at once: what happened and why the watcher was there,
+            // filled by its steps and closed by its end, like the Working card (watchers design §2).
+            Event::Alert { job_id, watcher, text, reason, urgent } => {
+                let mut ch = self.close_building();
+                let what = format!("{}{text}\nWhy it was set: {reason}", if *urgent { "Urgent. " } else { "" });
+                let i = self.open_building(job_id, watcher, &what, true);
+                ch.push(Change::Added(i));
+                ch
+            }
             Event::Plan { job_id, steps } => {
                 let (i, ch) = self.building_for(job_id);
                 if let CardKind::Building { steps: s, .. } = &mut self.list[i].kind {
@@ -181,7 +190,7 @@ impl Cards {
                 ch
             }
             // The Skills screen and the Projects page are their own windows (main.rs), not cards.
-            Event::Skills { .. } | Event::Projects { .. } => vec![],
+            Event::Skills { .. } | Event::Projects { .. } | Event::Watchers { .. } => vec![],
             // The whole column is redrawn (main.rs), not one card.
             Event::Cleared {} => { self.clear(); vec![] }
             Event::Busy { text, .. } | Event::Error { text } => vec![Change::Line(text.clone())],
@@ -214,7 +223,7 @@ impl Cards {
         let open = self.list.iter().position(|c| c.job_id.as_deref() == Some(st.id.as_str()) && matches!(c.kind, CardKind::Building { .. }));
         let (i, mut ch) = match open {
             Some(i) => (i, vec![Change::Updated(i)]),
-            None => { let i = self.open_building(&st.id, &st.name, &st.understood); (i, vec![Change::Added(i)]) }
+            None => { let i = self.open_building(&st.id, &st.name, &st.understood, false); (i, vec![Change::Added(i)]) }
         };
         if let CardKind::Building { steps, actions, .. } = &mut self.list[i].kind {
             *steps = st.plan.iter().map(|t| {

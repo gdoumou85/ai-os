@@ -136,9 +136,9 @@ fn render(card: &Card, say: &Sender<Request>, entry: &gtk::Entry) -> gtk::Widget
     match &card.kind {
         CardKind::You => { b.add_css_class("you"); b.append(&text(&card.text)); }
         CardKind::Said => { b.add_css_class("said"); b.append(&text(&card.text)); }
-        CardKind::Building { name, understood, steps, actions, collapsed } => {
-            b.add_css_class("building");
-            b.append(&title(&if name.is_empty() { "Working".to_string() } else { format!("Building: {name}") }));
+        CardKind::Building { name, understood, steps, actions, collapsed, alert } => {
+            b.add_css_class(if *alert { "alert" } else { "building" });
+            b.append(&title(&if *alert { format!("🔔 Alert: {name}") } else if name.is_empty() { "Working".to_string() } else { format!("Building: {name}") }));
             if !collapsed {
                 if !understood.is_empty() { b.append(&text(understood)); }
                 for s in steps {
@@ -207,6 +207,7 @@ const CSS: &str = "
 .you { background: alpha(@theme_selected_bg_color, 0.25); margin-left: 40px; }
 .said { margin-right: 40px; }
 .building { border-left: 3px solid @theme_selected_bg_color; }
+.alert { border-left: 3px solid #e08020; }
 .ask { border-left: 3px solid #4090e0; }
 .done { border-left: 3px solid #40b060; }
 .failed { border-left: 3px solid #d04040; }
@@ -216,6 +217,7 @@ const CSS: &str = "
 .sidebar { background: alpha(@theme_fg_color, 0.04); padding: 6px; }
 .nav { padding: 6px 10px; border-radius: 6px; }
 .nav:checked { background: alpha(@theme_selected_bg_color, 0.25); font-weight: bold; }
+.dot-on { color: #40b060; } .dot-urgent { color: #d04040; } .dot-off { color: alpha(@theme_fg_color, 0.4); }
 ";
 
 fn main() {
@@ -266,11 +268,13 @@ fn main() {
         stack.set_vexpand(true); stack.set_hexpand(true);
         stack.add_named(&scroll, Some("chat"));
         let projects_col = pages::page_column(); stack.add_named(&pages::scrolled(&projects_col), Some("projects"));
+        let watchers_col = pages::page_column(); stack.add_named(&pages::scrolled(&watchers_col), Some("watchers"));
         let skills_col = pages::page_column(); stack.add_named(&pages::scrolled(&skills_col), Some("skills"));
         let model_col = pages::page_column(); stack.add_named(&pages::scrolled(&model_col), Some("model"));
         stack.add_named(&pages::help::page(), Some("help"));
         let chat_nav = pages::nav("💬 Chat", "chat", &stack, None);
         let projects_nav = pages::nav("📁 Projects", "projects", &stack, Some(&chat_nav));
+        let watchers_nav = pages::nav(&aios_rail::sidebar::watchers_label(0), "watchers", &stack, Some(&chat_nav));
         let skills_nav = pages::nav("🧠 Skills", "skills", &stack, Some(&chat_nav));
         let model_nav = pages::nav("⚙ Model", "model", &stack, Some(&chat_nav));
         let help_nav = pages::nav("? Help", "help", &stack, Some(&chat_nav));
@@ -283,7 +287,7 @@ fn main() {
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
         menu.add_css_class("sidebar"); menu.set_size_request(150, -1);
         let gap = gtk::Box::new(gtk::Orientation::Vertical, 0); gap.set_vexpand(true);
-        for w in [&chat_nav, &projects_nav, &skills_nav] { menu.append(w); }
+        for w in [&chat_nav, &projects_nav, &watchers_nav, &skills_nav] { menu.append(w); }
         menu.append(&gap);
         menu.append(&model_nav); menu.append(&cloud); menu.append(&help_nav);
         // The message box belongs to the chat.
@@ -318,6 +322,14 @@ fn main() {
         skills_nav.connect_toggled(move |b| if b.is_active() { let _ = s_skills.send(Request::Skills {}); });
         let s_projects = say.clone();
         projects_nav.connect_toggled(move |b| if b.is_active() { let _ = s_projects.send(Request::Projects {}); });
+        // Alerts since the owner last looked at the Watchers page (watchers design §2).
+        let unseen = Rc::new(std::cell::Cell::new(0usize));
+        let (s_watchers, unseen_w) = (say.clone(), unseen.clone());
+        watchers_nav.connect_toggled(move |b| if b.is_active() {
+            unseen_w.set(0);
+            b.set_label(&aios_rail::sidebar::watchers_label(0));
+            let _ = s_watchers.send(Request::Watchers {});
+        });
         let (tx_m, cards_m, status_m, col_m, cloud_m) = (to_ui_models, cards.clone(), status.clone(), model_col.clone(), cloud.clone());
         model_nav.connect_toggled(move |b| {
             if !b.is_active() { return }
@@ -358,6 +370,7 @@ fn main() {
 
         let (cards2, widgets2, column2, status2, say2, spinner2, stop2, entry2, cloud2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone(), entry.clone(), cloud.clone());
         let (model_col2, projects_col2, skills_col2, chat_nav2) = (model_col.clone(), projects_col.clone(), skills_col.clone(), chat_nav.clone());
+        let (watchers_col2, watchers_nav2, unseen2) = (watchers_col.clone(), watchers_nav.clone(), unseen.clone());
         let live2 = live.clone();
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
@@ -382,6 +395,12 @@ fn main() {
                     FromNet::Event(ev) => {
                         if let Event::Skills { notebooks } = &ev { pages::skills::fill(&skills_col2, notebooks, &say2); continue; }
                         if let Event::Projects { projects } = &ev { pages::projects::fill(&projects_col2, projects, &entry2, &chat_nav2); continue; }
+                        if let Event::Watchers { watchers } = &ev { pages::watchers::fill(&watchers_col2, watchers, &say2); continue; }
+                        // Counted before the card brings the chat forward.
+                        if matches!(ev, Event::Alert { .. }) && !watchers_nav2.is_active() {
+                            unseen2.set(unseen2.get() + 1);
+                            watchers_nav2.set_label(&aios_rail::sidebar::watchers_label(unseen2.get()));
+                        }
                         match aios_rail::cards::busy_after(&ev) {
                             Some(true) => { spinner2.start(); set_status(&status2, &live2, "The AI is thinking…"); }
                             Some(false) => { spinner2.stop(); set_status(&status2, &live2, ""); }

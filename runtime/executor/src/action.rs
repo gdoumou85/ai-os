@@ -17,6 +17,8 @@ pub enum Action {
     WriteFile { path: String, contents: String },
     /// Replace one exact passage. `find` must occur exactly once (rule 9: edit in place).
     EditFile { path: String, find: String, replace: String },
+    /// Adds to a file's end, making it (and its folders) if need be: a big file is written in parts.
+    AppendFile { path: String, contents: String },
     SetSetting { key: String, value: String },
     // The desktop hand (2a design §3). Ids come from the worker's own table; `name` on a press is
     // the model echoing what `look` reported, verified by the worker before anything runs, so the
@@ -100,6 +102,18 @@ pub enum Action {
     Drag { from_cell: u32, from_spot: u32, to_cell: u32, to_spot: u32 },
     /// Waits, then says what changed (one-loop design §1b); the engine's own.
     Wait { seconds: u32 },
+    /// Wakes the AI later (watchers design §1): a timer, a check or a live program, with the
+    /// reason for whoever handles the alert. The engine's own.
+    Watch {
+        name: String,
+        reason: String,
+        #[serde(default)]
+        urgent: bool,
+        when: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        command: Vec<String>,
+    },
+    Unwatch { name: String },
 }
 
 fn one() -> u32 { 1 }
@@ -142,6 +156,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_append_file() {
+        let a: Action = serde_json::from_str(r#"{"kind":"append_file","path":"game.js","contents":"more"}"#).unwrap();
+        assert_eq!(a, Action::AppendFile { path: "game.js".into(), contents: "more".into() });
+    }
+
+    #[test]
     fn the_removed_kinds_no_longer_parse() {
         for k in ["install", "remove", "service", "make_dir", "fetch_packages", "http_post"] {
             assert!(serde_json::from_str::<Action>(&format!(r#"{{"kind":"{k}"}}"#)).is_err(), "{k}");
@@ -164,6 +184,14 @@ mod tests {
         assert_eq!(l, Action::Look { window: None, find: None });
         let r: Action = serde_json::from_str(r#"{"kind":"read","control":9,"from_line":5,"lines":20}"#).unwrap();
         assert_eq!(r, Action::Read { control: 9, from_line: Some(5), lines: Some(20) });
+    }
+
+    #[test]
+    fn a_watch_needs_no_command() {
+        let a: Action = serde_json::from_str(r#"{"kind":"watch","name":"time","reason":"say the time","urgent":false,"when":"every 2 minutes"}"#).unwrap();
+        assert_eq!(a, Action::Watch { name: "time".into(), reason: "say the time".into(), urgent: false, when: "every 2 minutes".into(), command: vec![] });
+        let u: Action = serde_json::from_str(r#"{"kind":"unwatch","name":"time"}"#).unwrap();
+        assert_eq!(u, Action::Unwatch { name: "time".into() });
     }
 
     #[test]

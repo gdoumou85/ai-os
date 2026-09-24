@@ -18,3 +18,4 @@ pub mod store;
 // Not `#[cfg(test)]`: the integration tests are their own crates and need the fakes too. They
 // ship inside the binaries, unused, which is harmless.
 pub mod testing;
+pub mod watchers;

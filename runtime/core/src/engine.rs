@@ -33,6 +33,9 @@ pub enum EngineError {
 /// the service then queues the words as a new turn instead.
 pub type Inbox = Arc<Mutex<Option<Vec<String>>>>;
 
+/// Alerts waiting for the engine thread (watchers design §2), urgent ones first.
+pub type Alerts = Arc<Mutex<std::collections::VecDeque<crate::watchers::Alert>>>;
+
 pub struct Engine<M: Model> {
     pub store: Store,
     pub model: M,
@@ -60,6 +63,13 @@ pub struct Engine<M: Model> {
     answered: bool,
     /// The project the chat is about: a message naming another starts a fresh chat.
     chat_project: Option<String>,
+    /// Alerts waiting: the service fills it, the engine thread takes one between turns, and a
+    /// turn takes an urgent one when `yield_` is up.
+    alerts: Alerts,
+    /// Raised with an urgent alert: the turn at work parks at its next step.
+    yield_: Arc<AtomicBool>,
+    /// The turn running is an alert's: no inbox, no question, nothing kept for later.
+    in_alert: bool,
 }
 
 /// The windows a job worked: those it looked into, in first-seen order, from the steps that
@@ -115,6 +125,12 @@ fn asks_to_keep(text: &str) -> bool {
      "in future", "in the future", "going forward", "by default"].iter().any(|w| t.contains(w))
 }
 
+/// The owner's own words asking to be warned (watchers design §1): a watcher made for them is theirs.
+fn asks_to_watch(text: &str) -> bool {
+    let t = text.to_lowercase();
+    ["watch", "warn", "remind", "alert", "notify", "tell me when", "every"].iter().any(|w| t.contains(w))
+}
+
 /// Where the user's things are, as the user would know it. Never told, a 9B clearing "all
 /// project work" guessed /home/user/projects and worked on a folder that was not there
 /// (the owner's run, 2026-09-23).
@@ -149,7 +165,7 @@ fn journal_for(journal: &str, words: &str) -> String {
 /// The paths an action touches: the file it reads or writes, and absolute paths in a command.
 fn paths_in(action: &Action, folder: &str) -> Vec<PathBuf> {
     match action {
-        Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::ReadFile { path, .. } => vec![Path::new(folder).join(path)],
+        Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. } | Action::ReadFile { path, .. } => vec![Path::new(folder).join(path)],
         Action::RunCommand { argv } | Action::StartProgram { argv, .. } => argv.iter().flat_map(|a| a.split_whitespace())
             .map(|w| w.trim_matches(|c: char| "'\";&|()".contains(c)).to_string())
             .filter(|w| w.len() > 1 && w.starts_with('/') && !["/usr/", "/bin/", "/dev/", "/proc/", "/tmp/"].iter().any(|p| w.starts_with(p)))
@@ -172,6 +188,25 @@ fn journal_line(turn: &Job, how: &str, text: &str) -> String {
     // ponytail: the first eight; a turn that touched more is summed up by its own words.
     if !paths.is_empty() { line.push_str(&format!(" Paths: {}.", paths.iter().take(8).cloned().collect::<Vec<_>>().join(", "))); }
     line
+}
+
+/// What is at the top of a project's folder, so a new chat builds on the files already there
+/// instead of writing them again: a stopped run left index.html and style.css, its notes never
+/// said so, and the next run made both anew (the owner, 2026-09-25).
+fn files_of(folder: &str) -> String {
+    let Ok(rd) = std::fs::read_dir(folder) else { return String::new() };
+    let mut v: Vec<String> = rd.flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') { return None }
+        let m = e.metadata().ok()?;
+        Some(if m.is_dir() { format!("{name}/") } else { format!("{name} ({} bytes)", m.len()) })
+    }).collect();
+    if v.is_empty() { return "Files there: none yet.".into() }
+    v.sort();
+    // ponytail: the top level, first 30; ls for the rest.
+    let more = if v.len() > 30 { format!(" and {} more", v.len() - 30) } else { String::new() };
+    v.truncate(30);
+    format!("Files there: {}{more}.", v.join(", "))
 }
 
 fn not_a_move(error: &str) -> String {
@@ -199,7 +234,8 @@ impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf) -> Self {
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         Self { store, model, default_root, log_path, workers, housekeeping_dir, home, sink: Box::new(|_| {}), out: vec![],
-            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![], asked: None, answered: false, chat_project: None }
+            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![], asked: None, answered: false, chat_project: None,
+            alerts: Default::default(), yield_: Arc::new(AtomicBool::new(false)), in_alert: false }
     }
 
     /// Where commands run (tests point it at a temp folder).
@@ -207,6 +243,12 @@ impl<M: Model> Engine<M> {
 
     /// The service's handle on words sent while a turn works.
     pub fn inbox(&self) -> Inbox { self.inbox.clone() }
+
+    /// The service's handle on the alerts waiting (watchers design §2).
+    pub fn alerts(&self) -> Alerts { self.alerts.clone() }
+
+    /// Raised by the service with an urgent alert.
+    pub fn yield_flag(&self) -> Arc<AtomicBool> { self.yield_.clone() }
 
     /// What this machine has, ahead of every prompt (machine-map spec §2). Programs and installs
     /// are scanned each time, so something installed shows on the very next turn.
@@ -275,6 +317,44 @@ impl<M: Model> Engine<M> {
         Ok(Outcome::ok(format!("setting {key} = {value}")))
     }
 
+    /// `watch` (watchers design §1): creates the watcher or replaces the one of that name.
+    fn watch(&mut self, turn: &Job, name: &str, reason: &str, urgent: bool, when: &str, command: &[String]) -> Result<Outcome, EngineError> {
+        let who = if !self.in_alert && asks_to_watch(&turn.request) { "you" } else { "AI" };
+        let words: String = turn.request.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
+        let mut w = match crate::watchers::build(name, reason, urgent, &format!("{who} (\"{words}\")"), when, command.to_vec()) {
+            Ok(w) => w,
+            Err(e) => return Ok(Outcome::err(e)),
+        };
+        let old = crate::watchers::get(self.store.conn(), &w.name)?;
+        // Every alert brings its watcher's reason up to date: that does not make it the AI's.
+        if let Some(old) = old.as_ref().filter(|_| self.in_alert) { w.made_by = old.made_by.clone(); }
+        // A live program runs its new command from the scheduler's next tick.
+        if old.is_some_and(|old| crate::watchers::needs_restart(&old, &w)) {
+            let _ = executor::programs::stop(&crate::watchers::program_name(&w.name));
+        }
+        crate::watchers::put(self.store.conn(), &w, crate::store::now_ms())?;
+        self.watchers_changed()?;
+        let what = match w.kind { crate::watchers::Kind::Timer => "a timer", crate::watchers::Kind::Check => "a check", crate::watchers::Kind::Push => "a live program" };
+        Ok(Outcome::ok(format!("watching {}: {}, {what}", w.name, crate::watchers::when_text(&w))))
+    }
+
+    fn unwatch(&mut self, name: &str) -> Result<Outcome, EngineError> {
+        if !crate::watchers::delete(self.store.conn(), name)? {
+            let names: Vec<String> = crate::watchers::list(self.store.conn())?.into_iter().map(|w| w.name).collect();
+            return Ok(Outcome::err(format!("no watcher is called {name}; there are: {}", if names.is_empty() { "none".to_string() } else { names.join(", ") })));
+        }
+        let _ = executor::programs::stop(&crate::watchers::program_name(name));
+        self.watchers_changed()?;
+        Ok(Outcome::ok(format!("stopped watching {name}")))
+    }
+
+    /// Every rail's Watchers page redrawn.
+    fn watchers_changed(&mut self) -> Result<(), EngineError> {
+        let watchers = crate::watchers::views(self.store.conn())?;
+        self.emit(Event::Watchers { watchers });
+        Ok(())
+    }
+
     /// One model call after a job, never fatal (Phase 3 §4): the job is already over and said so.
     ///
     /// A `Learned` always follows, even with nothing kept: the rail's spinner keeps turning
@@ -285,7 +365,10 @@ impl<M: Model> Engine<M> {
         let nothing = Event::Learned { job_id: job_id.clone(), lines: vec![], pending: false };
         // What an earlier job left waiting for Keep/Discard and nobody answered goes now (spec §5),
         // whatever this turn comes to: the rail takes the older card's Keep away on this Learned.
-        if let Err(e) = crate::notes::discard_pending(self.store.conn()) { eprintln!("engine: an old proposal could not be discarded ({e})"); }
+        // An alert is not the owner moving on: what waits for their Keep still waits.
+        if !self.in_alert {
+            if let Err(e) = crate::notes::discard_pending(self.store.conn()) { eprintln!("engine: an old proposal could not be discarded ({e})"); }
+        }
         // A job that did not pass can only mark the tips it was shown; with none, there is nothing
         // to ask the model.
         if !passed && job.shown_notes.is_empty() { self.emit(nothing); return }
@@ -310,7 +393,7 @@ impl<M: Model> Engine<M> {
         // A restart shows an empty screen, so the AI starts with an empty chat too: an update left
         // twenty old to-do lists behind a fresh "Hi AI" (the owner, 2026-09-24). What is kept
         // lives in the projects' notes, the journal and the standing instructions.
-        self.store.forget_messages()?;
+        self.store.forget_all_messages()?;
         if let Some(mut old) = self.store.open_job()? {
             old.state = State::Cancelled;
             self.store.save_job(&old)?;
@@ -331,6 +414,42 @@ impl<M: Model> Engine<M> {
         r?;
         Ok(out)
     }
+
+    /// An alert the service took off the queue between turns (watchers design §2).
+    pub fn handle_alert(&mut self, a: &crate::watchers::Alert) -> Result<Vec<Event>, EngineError> {
+        self.out.clear();
+        let r = self.alert_turn(a);
+        let out = std::mem::take(&mut self.out);
+        r?;
+        Ok(out)
+    }
+
+    /// One alert as a turn of its own, in a chat of its own that goes when it ends; the owner's
+    /// chat, and a turn of theirs parked under this one, are left as they were. How it ended.
+    fn alert_turn(&mut self, a: &crate::watchers::Alert) -> Result<State, EngineError> {
+        let mut turn = Job::turn(&self.home.display().to_string(), &prompt::alert_request(a));
+        let main = self.store.chat().to_string();
+        let (answered, image, project) = (std::mem::take(&mut self.answered), self.image.take(), self.chat_project.clone());
+        self.store.set_chat(&format!("alert-{}", turn.id));
+        self.in_alert = true;
+        self.give_tips(&mut turn);
+        self.emit(Event::Alert { job_id: turn.id.clone(), watcher: a.watcher.clone(), text: a.text.clone(), reason: a.reason.clone(), urgent: a.urgent });
+        let r = self.store.push_message("user", &turn.request).map_err(EngineError::from).and_then(|_| self.run_turn(&mut turn));
+        // Its card is up from the start, so an error closes it like work that could not go on.
+        let r = match r { Err(e) if turn.is_open() => self.end(&mut turn, State::Failed, format!("I could not go on: {e}")), r => r };
+        let forgot = self.store.forget_messages();
+        self.store.set_chat(&main);
+        self.in_alert = false;
+        // A project the alert reached into is not what the owner's chat is about.
+        (self.answered, self.image, self.chat_project) = (answered, image, project);
+        r?;
+        forgot?;
+        Ok(turn.state)
+    }
+
+    /// Whether the turn has its card up: from its first to-do list or action, or from the start
+    /// for an alert.
+    fn has_card(&self, turn: &Job) -> bool { self.in_alert || !turn.steps.is_empty() || !turn.plan.is_empty() }
 
     fn handle_inner(&mut self, text: &str) -> Result<(), EngineError> {
         if is_keep_learned(text) || is_discard_learned(text) {
@@ -439,13 +558,28 @@ impl<M: Model> Engine<M> {
                 self.just_stopped = true;
                 return self.end(turn, State::Cancelled, "Stopped.".into());
             }
-            for w in self.take_inbox(false) { self.heard(turn, &w)?; }
+            // An urgent alert parks this turn where it stands (watchers design §2): the alert's
+            // turn runs, then this one carries on with its request, to-do list and steps.
+            if !self.in_alert && self.yield_.swap(false, Ordering::SeqCst) {
+                let urgent = { let mut q = self.alerts.lock().unwrap(); q.iter().position(|a| a.urgent).and_then(|i| q.remove(i)) };
+                if let Some(a) = urgent {
+                    // A Stop during the alert ends the parked turn too.
+                    if self.alert_turn(&a)? == State::Cancelled { return self.end(turn, State::Cancelled, "Stopped.".into()); }
+                    self.store.push_message("result", &format!("(an urgent alert was handled in between: {}; carry on)", a.watcher))?;
+                    // The alert's card took this one's place on the rail: it comes back with its
+                    // list, its spinner and its Stop.
+                    if self.has_card(turn) { self.emit(Event::Plan { job_id: turn.id.clone(), steps: turn.plan.clone() }); }
+                    continue;
+                }
+            }
+            // An alert's turn hears nobody: the owner's words wait for their own chat.
+            if !self.in_alert { for w in self.take_inbox(false) { self.heard(turn, &w)?; } }
             if turn.steps.len() >= Self::MAX_ACTIONS {
                 return self.end(turn, State::Failed, format!("I stopped after {} actions without finishing.", Self::MAX_ACTIONS));
             }
             if moves >= Self::MAX_MOVES {
                 let text = Self::WENT_ROUND.to_string();
-                if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                if !self.has_card(turn) { self.emit(Event::Said { text }); return Ok(()); }
                 return self.end(turn, State::Failed, text);
             }
             moves += 1;
@@ -465,7 +599,7 @@ impl<M: Model> Engine<M> {
                 // A whole file past the runner's length limit: not a bad format, so said as what it is.
                 Err(ModelError::CutOff(words)) if unreadable == 0 => {
                     unreadable = 1;
-                    self.store.push_message("result", &format!("your answer was cut off at the model's length limit after {words} words, so nothing was done. Write a big file in parts: write_file the first part, then edit_file to add each next part at its end."))?;
+                    self.store.push_message("result", &format!("your answer was cut off at the model's length limit after {words} words, so nothing was done. Write a big file in parts: write_file the first part, then append_file each next part."))?;
                     continue;
                 }
                 Err(ModelError::BadJson(e)) if unreadable == 0 => {
@@ -475,7 +609,7 @@ impl<M: Model> Engine<M> {
                 }
                 Err(ModelError::BadJson(_)) => {
                     let text = "(I could not read my own answer twice — the model is not answering in the required format. Please say that again, or switch the model.)".to_string();
-                    if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                    if !self.has_card(turn) { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, State::Failed, text);
                 }
                 Err(ModelError::Stopped) => {
@@ -505,17 +639,17 @@ impl<M: Model> Engine<M> {
                             continue;
                         }
                     }
-                    let more = self.take_inbox(true);
+                    let more = if self.in_alert { vec![] } else { self.take_inbox(true) };
                     if !more.is_empty() { for w in more { self.heard(turn, &w)?; } continue; }
                     // A to-do list already put a card up: it closes like work did.
-                    if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                    if !self.has_card(turn) { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, if outcome == Ending::CouldNot { State::Failed } else { State::Done }, text);
                 }
-                Move::Ask { .. } if self.answered => {
-                    self.store.push_message("result", "the user already answered your question: work with that answer, or reply")?;
+                Move::Ask { .. } if self.answered || self.in_alert => {
+                    self.store.push_message("result", if self.in_alert { "nobody is here to answer during an alert: decide yourself, act, or reply" } else { "the user already answered your question: work with that answer, or reply" })?;
                 }
                 Move::Ask { question, options, .. } => {
-                    let more = self.take_inbox(true);
+                    let more = if self.in_alert { vec![] } else { self.take_inbox(true) };
                     if !more.is_empty() { for w in more { self.heard(turn, &w)?; } continue; }
                     self.image = None;
                     if !turn.steps.is_empty() { self.write_journal(turn, "asked a question", &question); }
@@ -536,7 +670,7 @@ impl<M: Model> Engine<M> {
                     if self.act(turn, action, &thought)? { return Ok(()); }
                 }
                 Move::Remember { text, .. } => {
-                    let note = if asks_to_keep(&turn.request) {
+                    let note = if asks_to_keep(&turn.request) && !self.in_alert {
                         self.store.add_instruction(&text)?;
                         self.emit(Event::Said { text: format!("(Noted for the future: {text})") });
                         format!("kept for every later conversation: {text}")
@@ -556,23 +690,27 @@ impl<M: Model> Engine<M> {
         let (machine, places) = (self.machine_block(), self.places()?);
         let (instructions, journal, notes) = (self.store.instructions()?, self.journal(&turn.request), self.named_notes(&turn.request)?);
         let programs = executor::programs::running();
+        let watchers = crate::watchers::line(self.store.conn())?;
         let ctx = prompt::context_block(&prompt::Context { machine: &machine, places: &places, programs: &programs, instructions: &instructions,
-            journal: &journal, notes: &notes, tips: &turn.notes_block, request: &turn.request, todo: &turn.plan });
+            journal: &journal, notes: &notes, tips: &turn.notes_block, request: &turn.request, todo: &turn.plan, watchers: &watchers });
         // The answer needs room too, and a whole file is one answer: a quarter of the window, at
         // least the 1500 tokens it always had.
         let window = self.model.context_tokens();
         let budget = window.saturating_sub((window / 4).max(1500) + (system.len() + ctx.len()) / 4);
         let mut chat = prompt::fit(&self.store.all_messages()?, budget);
         let last = chat.pop().map(|m| m.content).unwrap_or_default();
-        Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: if self.answered { vec!["reply", "todo", "act", "remember"] } else { vec!["reply", "ask", "todo", "act", "remember"] }, image: self.image.take(), no_screen: !sees })
+        Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: if self.answered || self.in_alert { vec!["reply", "todo", "act", "remember"] } else { vec!["reply", "ask", "todo", "act", "remember"] }, image: self.image.take(), no_screen: !sees })
     }
 
     /// Runs one action and puts its result in the conversation. `true`: the turn ended here.
     fn act(&mut self, turn: &mut Job, action: Action, thought: &str) -> Result<bool, EngineError> {
         self.tick(&turn.id, if thought.trim().is_empty() { crate::event::doing(&action) } else { short(thought) });
+        let new_file = matches!(&action, Action::WriteFile { path, .. } if !Path::new(&turn.folder).join(path).exists());
         let mut outcome = match &action {
             Action::Wait { seconds } => self.wait(*seconds),
             Action::SetSetting { key, value } => self.apply_setting(key, value)?,
+            Action::Watch { name, reason, urgent, when, command } => self.watch(turn, name, reason, *urgent, when, command)?,
+            Action::Unwatch { name } => self.unwatch(name)?,
             _ => {
                 let exec = self.executor_for(turn)?;
                 let mut o = exec.execute(&turn.id, &action)?;
@@ -586,19 +724,22 @@ impl<M: Model> Engine<M> {
             }
         };
         if outcome.ok { self.after_ok(turn, &action)?; }
+        if outcome.ok && new_file { self.note_new_file(turn, &action, thought)?; }
         let key = serde_json::to_string(&action).unwrap_or_default();
         let same = 1 + turn.steps.iter().rev()
             // `starts_with`: a stored detail may carry the warning or a project's notes after it.
             .take_while(|s| !s.ok && s.detail.starts_with(&outcome.detail) && serde_json::to_string(&s.action).unwrap_or_default() == key).count();
-        // The same action over and over, whatever it gives: a 27B enlarged one screen square 20
-        // times and never clicked (the owner, 2026-09-24). Keys, scrolls, waits and a program's
-        // output are fine to repeat.
+        // The same file written again and again counts as the same action whatever it says: a 27B
+        // rewrote style.css until the owner stopped it (2026-09-25). append_file parts are fine.
+        let key_of = |a: &Action| match a { Action::WriteFile { path, .. } => format!("write_file {path}"), a => serde_json::to_string(a).unwrap_or_default() };
         let again = if matches!(action, Action::Key { .. } | Action::Scroll { .. } | Action::Wait { .. } | Action::ProgramOutput { .. }) { 0 }
-            else { 1 + turn.steps.iter().rev().take_while(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).count() };
+            else { 1 + turn.steps.iter().rev().take_while(|s| key_of(&s.action) == key_of(&action)).count() };
         let n = again.max(if outcome.ok { 0 } else { same });
         if n >= Self::SAME_FAIL_WARN {
-            outcome.detail.push_str(&if outcome.ok { format!(" (you have done exactly this {n} times in a row: it shows nothing new, do something different)") }
-                else { format!(" (this has failed {n} times in a row: do something different)") });
+            outcome.detail.push_str(&if outcome.ok {
+                if matches!(action, Action::WriteFile { .. }) { format!(" (you have written this file {n} times in a row: read it or run it to see what is wrong, then change it with edit_file)") }
+                else { format!(" (you have done exactly this {n} times in a row: it shows nothing new, do something different)") }
+            } else { format!(" (this has failed {n} times in a row: do something different)") });
         }
         outcome.detail.push_str(&self.notes_on_first_touch(turn, &action)?);
         turn.steps.push(StepRecord { plan_step: 0, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
@@ -619,7 +760,7 @@ impl<M: Model> Engine<M> {
         if let Action::RunCommand { argv } = action {
             if let Err(e) = crate::machine::record(self.store.conn(), argv) { eprintln!("engine: install not recorded ({e})"); }
         }
-        if let Action::WriteFile { path, .. } | Action::EditFile { path, .. } = action {
+        if let Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. } = action {
             let p = Path::new(&turn.folder).join(path);
             if p.file_name().is_some_and(|f| f == "BLUEPRINT.md") {
                 if let Some(folder) = p.parent() {
@@ -630,6 +771,26 @@ impl<M: Model> Engine<M> {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// A new file in a project goes into its notes at once, in the AI's own words for it, so a run
+    /// that is stopped still leaves them current (the owner, 2026-09-25). A project with no notes
+    /// yet is left to write its own.
+    fn note_new_file(&self, turn: &Job, action: &Action, thought: &str) -> Result<(), EngineError> {
+        let Action::WriteFile { path, .. } = action else { return Ok(()) };
+        let file = Path::new(&turn.folder).join(path);
+        if file.file_name().is_some_and(|f| f == "BLUEPRINT.md") { return Ok(()) }
+        let Some(p) = self.project_of(&file)? else { return Ok(()) };
+        let bp = Path::new(&p.folder).join("BLUEPRINT.md");
+        let Ok(mut notes) = std::fs::read_to_string(&bp) else { return Ok(()) };
+        if !notes.is_empty() && !notes.ends_with('\n') { notes.push('\n'); }
+        if !notes.lines().any(|l| l.trim() == "## Files") { notes.push_str("\n## Files\n"); }
+        let rel = file.strip_prefix(&p.folder).unwrap_or(&file).display().to_string();
+        // One line, so a thought of several cannot break the list.
+        let why = thought.split_whitespace().collect::<Vec<_>>().join(" ");
+        notes.push_str(&format!("- {rel}{}\n", if why.is_empty() { String::new() } else { format!(": {why}") }));
+        if let Err(e) = std::fs::write(&bp, notes) { eprintln!("engine: the new file was not noted in {} ({e})", bp.display()); }
         Ok(())
     }
 
@@ -654,7 +815,7 @@ impl<M: Model> Engine<M> {
     /// The notes of the projects the message names, for the context block (at most two).
     fn named_notes(&self, words: &str) -> Result<String, EngineError> {
         let named: Vec<ProjectRow> = self.projects()?.into_iter().filter(|p| prompt::named_in(p, words)).take(2).collect();
-        Ok(named.iter().map(|p| format!("Notes of the project {} ({}/BLUEPRINT.md):\n{}", p.name, p.folder, Self::notes_of(p, 1500))).collect::<Vec<_>>().join("\n"))
+        Ok(named.iter().map(|p| format!("Notes of the project {} ({}/BLUEPRINT.md):\n{}\n{}", p.name, p.folder, Self::notes_of(p, 1500), files_of(&p.folder))).collect::<Vec<_>>().join("\n"))
     }
 
     /// A project's notes, the first time in a turn an action reaches into its folder.
@@ -666,8 +827,8 @@ impl<M: Model> Engine<M> {
             turn.projects_seen.push(p.name.clone());
             if self.chat_project.is_none() { self.chat_project = Some(p.folder.clone()); }
             out.push_str(&match std::fs::read_to_string(Path::new(&p.folder).join("BLUEPRINT.md")) {
-                Ok(_) => format!("\n[{} is a project; its notes, {}/BLUEPRINT.md:]\n{}", p.name, p.folder, Self::notes_of(&p, 2000)),
-                Err(_) => format!("\n[{} ({}) is a project with no BLUEPRINT.md yet: write one there — what it is, how it is built and run, where it stands.]", p.name, p.folder),
+                Ok(_) => format!("\n[{} is a project; its notes, {}/BLUEPRINT.md:]\n{}\n{}", p.name, p.folder, Self::notes_of(&p, 2000), files_of(&p.folder)),
+                Err(_) => format!("\n[{} ({}) is a project with no BLUEPRINT.md yet: write one there — what it is, how it is built and run, where it stands.]\n{}", p.name, p.folder, files_of(&p.folder)),
             });
         }
         Ok(out)
@@ -679,7 +840,7 @@ impl<M: Model> Engine<M> {
         let mut noted: Vec<PathBuf> = vec![];
         let all = self.projects()?;
         for s in turn.steps.iter().filter(|s| s.ok) {
-            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. }) = &s.action else { continue };
+            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. }) = &s.action else { continue };
             let p = Path::new(&turn.folder).join(path);
             if p.file_name().is_some_and(|f| f == "BLUEPRINT.md") { if let Some(d) = p.parent() { noted.push(d.to_path_buf()); } continue; }
             if let Some(proj) = all.iter().find(|r| p.starts_with(&r.folder)) { if changed.iter().all(|c| c.folder != proj.folder) { changed.push(proj.clone()); } }
@@ -700,7 +861,8 @@ impl<M: Model> Engine<M> {
         let n = seconds.clamp(1, 300);
         let mut waited = 0;
         while waited < n {
-            if self.stop.load(Ordering::SeqCst) || self.inbox.lock().unwrap().as_ref().is_some_and(|v| !v.is_empty()) { break; }
+            if self.stop.load(Ordering::SeqCst) { break; }
+            if !self.in_alert && (self.yield_.load(Ordering::SeqCst) || self.inbox.lock().unwrap().as_ref().is_some_and(|v| !v.is_empty())) { break; }
             std::thread::sleep(std::time::Duration::from_secs(1));
             waited += 1;
         }
@@ -721,7 +883,7 @@ impl<M: Model> Engine<M> {
     fn files_written(turn: &Job) -> Vec<ChangedFile> {
         let mut v: Vec<ChangedFile> = vec![];
         for s in turn.steps.iter().filter(|s| s.ok) {
-            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. }) = &s.action else { continue };
+            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. }) = &s.action else { continue };
             let p = Path::new(&turn.folder).join(path).display().to_string();
             if v.iter().any(|f| f.path == p) { continue; }
             let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
@@ -735,9 +897,9 @@ impl<M: Model> Engine<M> {
     /// finished or failed turn gets its learning turn.
     fn end(&mut self, turn: &mut Job, state: State, text: String) -> Result<(), EngineError> {
         // The inbox shuts before the learning turn (it can take minutes): what came in is kept
-        // for the next turn, and a word sent after this is a new turn of its own.
-        let left = self.inbox.lock().unwrap().take().unwrap_or_default();
-        self.pending.extend(left);
+        // for the next turn, and a word sent after this is a new turn of its own. A parked turn's
+        // inbox stays open under an alert.
+        if !self.in_alert { let left = self.inbox.lock().unwrap().take().unwrap_or_default(); self.pending.extend(left); }
         self.image = None;
         turn.state = state;
         turn.outcome_text = text.clone();
@@ -1129,6 +1291,41 @@ mod tests {
     }
 
     #[test]
+    fn a_projects_files_come_with_its_notes() {
+        let (mut e, _, root) = engine_with(vec![reply("ok")], "files-listed");
+        let p = root.join("projects").join("pool-game");
+        std::fs::create_dir_all(p.join("assets")).unwrap();
+        std::fs::write(p.join("BLUEPRINT.md"), "a pool table").unwrap();
+        std::fs::write(p.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(p.join("style.css"), "body{}").unwrap();
+        e.handle("lets continue working with the pool game").unwrap();
+        let user = &e.model.prompts.borrow()[0].user;
+        assert!(user.contains("Files there: BLUEPRINT.md (12 bytes), assets/, index.html (13 bytes), style.css (6 bytes)."), "{user}");
+    }
+
+    #[test]
+    fn the_same_file_written_again_and_again_warns_at_three_and_ends_at_five() {
+        let w = |i: usize| act(Action::WriteFile { path: "style.css".into(), contents: format!("body {{ margin: {i}px }}") });
+        let (mut e, _, _) = engine_with((0..5).map(w).collect(), "rewrite");
+        let ev = events_of(&mut e, "style the page");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { text, .. } if text.contains("5 times")), "{ev:?}");
+        let rows = e.store.all_messages().unwrap();
+        assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("written this file 3 times in a row")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_new_file_in_a_project_goes_into_its_notes_at_once() {
+        let (mut e, _, root) = engine_with(vec![], "noted-at-once");
+        let p = root.join("projects").join("pool-game");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("BLUEPRINT.md"), "# Pool game\n").unwrap();
+        let write = |f: &str, why: &str| Move::Act { thought: why.into(), action: Action::WriteFile { path: p.join(f).display().to_string(), contents: "x".into() } };
+        e.model = crate::model::FakeModel::new(vec![write("game.js", "The rules and the shots."), write("game.js", "Fix the shot."), write("style.css", " "), reply("done"), reply("done")]);
+        e.handle("make the pool game").unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("BLUEPRINT.md")).unwrap(), "# Pool game\n\n## Files\n- game.js: The rules and the shots.\n- style.css\n");
+    }
+
+    #[test]
     fn a_project_in_a_group_folder_is_found_by_its_notes() {
         let (mut e, _, root) = engine_with(vec![reply("ok")], "nested");
         let p = root.join("projects").join("WEb Games").join("Pool Game");
@@ -1240,5 +1437,155 @@ mod tests {
         assert!(journal_for(j, "delete the flappy files").contains("flappy bird game"));
         assert!(!journal_for(j, "delete the flappy files").contains("car rental"));
         assert_eq!(journal_for(j, "delete any project files"), "");
+    }
+
+    #[test]
+    fn watch_makes_the_watcher_the_owner_asked_for_and_unwatch_removes_it() {
+        let w = |when: &str| act(Action::Watch { name: "time".into(), reason: "say the time".into(), urgent: false, when: when.into(), command: vec![] });
+        let (mut e, _, _) = engine_with(vec![w("every 30 seconds"), w("every 2 minutes"), reply("I will tell you the time.")], "watch");
+        let ev = events_of(&mut e, "every 2 minutes tell me the time");
+        let rows = e.store.all_messages().unwrap();
+        assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("failed") && t.contains("every N minutes")), "{rows:?}");
+        let got = crate::watchers::get(e.store.conn(), "time").unwrap().unwrap();
+        assert!(got.made_by.starts_with("you (\"every 2 minutes") && got.every_s == 120, "{got:?}");
+        assert!(ev.iter().any(|v| matches!(v, Event::Watchers { watchers } if watchers.len() == 1 && watchers[0].when == "every 2 min")), "{ev:?}");
+        e.model = crate::model::FakeModel::new(vec![act(Action::Unwatch { name: "time".into() }), reply("Stopped.")]);
+        e.handle("stop telling me the time").unwrap();
+        assert!(crate::watchers::list(e.store.conn()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_watcher_the_ai_sets_itself_is_the_ais_and_every_prompt_lists_them() {
+        let (mut e, _, _) = engine_with(vec![
+            act(Action::Watch { name: "site".into(), reason: "the build ends; check it".into(), urgent: false, when: "every 5 minutes".into(), command: vec!["ls".into()] }),
+            reply("ok"), reply("hi"),
+        ], "watch-ai");
+        e.handle("build the site").unwrap();
+        assert!(crate::watchers::get(e.store.conn(), "site").unwrap().unwrap().made_by.starts_with("AI"));
+        e.handle("hello").unwrap();
+        assert!(e.model.prompts.borrow().last().unwrap().user.contains("Your watchers: site (every 5 min)."));
+    }
+
+    fn alert(w: &str, urgent: bool) -> crate::watchers::Alert {
+        crate::watchers::Alert { watcher: w.into(), text: "AAPL is at 180".into(), reason: "I expect it to drop; tell the user".into(), urgent, made_by: "AI".into() }
+    }
+
+    /// Runs its next hook before each call, then answers from `inner`.
+    struct Staged { inner: crate::model::FakeModel, hooks: std::cell::RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>> }
+    impl Model for Staged {
+        fn next_move(&self, p: &Prompt) -> Result<Move, ModelError> {
+            if let Some(h) = self.hooks.borrow_mut().pop_front() { h() }
+            self.inner.next_move(p)
+        }
+    }
+
+    #[test]
+    fn an_alert_is_a_turn_in_its_own_chat_and_the_owners_chat_is_left_as_it_was() {
+        let (mut e, _, _) = engine_with(vec![reply("hi"), reply("Told them."), reply("still here")], "alert-chat");
+        e.handle("hello").unwrap();
+        let before = e.store.all_messages().unwrap();
+        let ev = e.handle_alert(&alert("price", false)).unwrap();
+        assert!(matches!(&ev[0], Event::Alert { watcher, urgent: false, .. } if watcher == "price"), "{ev:?}");
+        assert!(ev.iter().any(|v| matches!(v, Event::Done { text, .. } if text == "Told them.")), "the alert's card closes: {ev:?}");
+        {
+            let ps = e.model.prompts.borrow();
+            assert!(ps[1].user.contains("An alert woke you. Watcher: price (made by AI; not urgent)") && ps[1].user.contains("I expect it to drop"), "{}", ps[1].user);
+            assert!(!ps[1].history.iter().any(|m| m.content == "hello") && !ps[1].allowed.contains(&"ask"), "{:?}", ps[1]);
+        }
+        assert_eq!(e.store.all_messages().unwrap(), before);
+        let left: i64 = e.store.conn().query_row("SELECT COUNT(*) FROM messages WHERE chat != 'main'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "an alert's chat goes when its turn ends");
+        e.handle("are you there").unwrap();
+        assert!(e.model.prompts.borrow()[2].history.iter().any(|m| m.content == "hello"));
+    }
+
+    #[test]
+    fn an_urgent_alert_parks_the_turn_and_it_carries_on_with_its_list_and_steps() {
+        let todo = Move::Todo { thought: String::new(), items: vec![TodoItem { text: "build it".into(), done: false }] };
+        let model = Staged { inner: crate::model::FakeModel::new(vec![todo, act(run("true")), reply("Told them."), reply("built")]), hooks: Default::default() };
+        let (mut e, _, _) = crate::testing::engine_with_model(model, "urgent");
+        let (q, y) = (e.alerts(), e.yield_flag());
+        let raise: Box<dyn FnOnce()> = Box::new(move || { crate::watchers::enqueue(&mut q.lock().unwrap(), alert("price", true)); y.store(true, Ordering::SeqCst); });
+        e.model.hooks.borrow_mut().extend([Box::new(|| {}) as Box<dyn FnOnce()>, raise]);
+        let ev = e.handle_events("build it").unwrap();
+        let at = |f: &dyn Fn(&Event) -> bool| ev.iter().position(f).unwrap_or_else(|| panic!("{ev:?}"));
+        let step = at(&|v| matches!(v, Event::Step { .. }));
+        let alerted = at(&|v| matches!(v, Event::Alert { urgent: true, .. }));
+        let done = at(&|v| matches!(v, Event::Done { text, .. } if text == "built"));
+        assert!(step < alerted && alerted < done, "{ev:?}");
+        // The parked turn's card comes back with its list after the alert's closed.
+        let Event::Plan { job_id: parked, steps: list } = &ev[at(&|v| matches!(v, Event::Plan { .. }))] else { unreachable!() };
+        let told = at(&|v| matches!(v, Event::Done { text, .. } if text == "Told them."));
+        let back = ev.iter().rposition(|v| matches!(v, Event::Plan { job_id, steps } if job_id == parked && steps == list)).unwrap();
+        assert!(alerted < told && told < back && back < done, "{ev:?}");
+        let ps = e.model.inner.prompts.borrow();
+        let last = ps.iter().rev().find(|p| p.allowed != ["learn"]).unwrap();
+        assert!(last.user.contains("Your to-do list: [ ] build it") && last.user.contains("urgent alert was handled in between: price"), "{}", last.user);
+        assert!(last.history.iter().any(|m| m.content.contains("run_command")), "its steps are still in its chat");
+        assert!(e.alerts().lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_during_an_urgent_alert_ends_the_parked_turn_too() {
+        let model = Staged { inner: crate::model::FakeModel::new(vec![act(run("true")), act(run("ls")), reply("never")]), hooks: Default::default() };
+        let (mut e, _, _) = crate::testing::engine_with_model(model, "urgent-stop");
+        let (q, y, stop) = (e.alerts(), e.yield_flag(), e.stop_flag());
+        let raise: Box<dyn FnOnce()> = Box::new(move || { crate::watchers::enqueue(&mut q.lock().unwrap(), alert("price", true)); y.store(true, Ordering::SeqCst); });
+        let press: Box<dyn FnOnce()> = Box::new(move || stop.store(true, Ordering::SeqCst));
+        e.model.hooks.borrow_mut().extend([raise, press]);
+        let ev = e.handle_events("build it").unwrap();
+        assert_eq!(ev.iter().filter(|v| matches!(v, Event::Stopped { .. })).count(), 2, "{ev:?}");
+        assert_eq!(e.model.inner.prompts.borrow().len(), 2);
+        assert!(e.handle_events("stop").unwrap().is_empty(), "one Stop answered both");
+    }
+
+    #[test]
+    fn a_watcher_set_during_an_alert_is_the_ais() {
+        let (mut e, _, _) = engine_with(vec![
+            act(Action::Watch { name: "price".into(), reason: "keep an eye on it".into(), urgent: false, when: "every 5 minutes".into(), command: vec![] }),
+            reply("Updated."),
+        ], "alert-watch");
+        e.handle_alert(&alert("price", false)).unwrap();
+        assert!(crate::watchers::get(e.store.conn(), "price").unwrap().unwrap().made_by.starts_with("AI"));
+    }
+
+    #[test]
+    fn an_alert_bringing_the_owners_watcher_up_to_date_leaves_it_the_owners() {
+        let (mut e, _, _) = engine_with(vec![
+            act(Action::Watch { name: "time".into(), reason: "say the time; they liked it".into(), urgent: false, when: "every 2 minutes".into(), command: vec![] }),
+            reply("Told them."),
+        ], "alert-rewatch");
+        let mine = crate::watchers::build("time", "say the time", false, "you (\"every 2 minutes tell me the time\")", "every 2 minutes", vec![]).unwrap();
+        crate::watchers::put(e.store.conn(), &mine, 0).unwrap();
+        e.handle_alert(&alert("time", false)).unwrap();
+        let got = crate::watchers::get(e.store.conn(), "time").unwrap().unwrap();
+        assert!(got.made_by.starts_with("you (") && got.reason == "say the time; they liked it", "{got:?}");
+    }
+
+    #[test]
+    fn an_alert_leaves_what_waits_for_the_owners_keep() {
+        let (mut e, _, _) = engine_with(vec![act(run("true")), reply("Told them.")], "alert-keep");
+        let n = crate::notes::Note { notebook: "this computer".into(), topic: "open a website".into(), kind: "technique".into(), text: "open_app firefox".into(), ..Default::default() };
+        crate::notes::put(e.store.conn(), &n, Some("an-older-job")).unwrap();
+        e.handle_alert(&alert("price", false)).unwrap();
+        let waiting: i64 = e.store.conn().query_row("SELECT COUNT(*) FROM notes_pending", [], |r| r.get(0)).unwrap();
+        assert_eq!(waiting, 1, "the alert did an action and learned, and the owner's entry still waits");
+    }
+
+    #[test]
+    fn a_project_an_alert_reaches_into_is_not_the_owners_chat_project() {
+        let (mut e, _, root) = engine_with(vec![], "alert-project");
+        for n in ["pool-game", "car-rental"] {
+            let p = root.join("projects").join(n);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("BLUEPRINT.md"), format!("notes of {n}")).unwrap();
+        }
+        let page = root.join("projects/pool-game/index.html").display().to_string();
+        e.model = crate::model::FakeModel::new(vec![reply("a"), act(Action::ReadFile { path: page, from_line: None, lines: None }), reply("Told them."), reply("c")]);
+        e.handle("hi").unwrap();
+        e.handle_alert(&alert("price", false)).unwrap();
+        let ev = events_of(&mut e, "now the car rental site");
+        assert!(!ev.iter().any(|v| matches!(v, Event::Said { text } if text.contains("fresh chat"))), "{ev:?}");
+        assert!(e.store.all_messages().unwrap().iter().any(|(r, t)| r == "user" && t == "hi"), "the owner's chat keeps its words");
     }
 }
