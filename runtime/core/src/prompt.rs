@@ -30,6 +30,7 @@ How to work:
 - Find out rather than guess: ls, cat, --help, web_search. Look before you change something and check after: prove it worked before you say it did.
 - A project is a folder with a BLUEPRINT.md: what it is, how it is built and run, where it stands. Read it before working on a project and bring it up to date when you change the project. New projects go in the projects folder named under Where things are, unless the user says where.
 - When an action fails, read why and do something different: the same action again fails again.
+- A program you can script or run from the command line is worked that way, not through its screen: blender --background --python, libreoffice --headless, gimp -b, inkscape --actions, ffmpeg. Write the script, run it, check what it made, then open the result in the program when the user asked for the program or to see it. The screen is for what nothing else reaches.
 - Never install what This machine already lists.
 
 Actions (act):
@@ -204,7 +205,7 @@ mod tests {
     #[test]
     fn the_brief_fits_and_says_what_the_model_can_see() {
         assert!(brief(true).len() / 4 < 1800, "about {} tokens", brief(true).len() / 4);
-        assert!(brief(true).contains("screen_look"));
+        assert!(brief(true).contains("screen_look") && brief(false).contains("blender --background --python"));
         let blind = brief(false);
         assert!(blind.contains("cannot see pictures") && !blind.contains("screen_click"));
     }
