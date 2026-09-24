@@ -287,9 +287,9 @@ fn clear_during_work_empties_the_screen_at_once_and_the_next_word_starts_fresh()
     let db = test_db();
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let reply = |t: &str| Move::Reply { thought: String::new(), text: t.into(), outcome: aios_core::moves::Ending::Done };
-    // The Act, the Reply the Stop swallows, then the answer to the word said after the Clear.
-    let mut moves = job();
-    moves.push(reply("hello, fresh start"));
+    // The Act, then the same reply twice: the Stop lands either before the next model call (the
+    // first reply is the fresh turn's answer) or during it (that reply is swallowed).
+    let moves = vec![Move::Act { thought: String::new(), action: write("a.txt") }, reply("hello, fresh start"), reply("hello, fresh start")];
     let sock = start_with(&dir, moves, Arc::new(Mutex::new(Some(grx))), true);
     let (mut r, mut w) = connect(&sock).split();
     w.say("make p").unwrap();
@@ -301,7 +301,7 @@ fn clear_during_work_empties_the_screen_at_once_and_the_next_word_starts_fresh()
     assert!(matches!(got.last(), Some(Event::Cleared {})), "Cleared comes before Stopped: {got:?}");
     w.say("hello again").unwrap();
     until_r(&mut r, |e| matches!(e, Event::You { text } if text == "hello again"));
-    gtx.send(()).unwrap(); // the Reply the Stop swallows
+    gtx.send(()).unwrap(); // the Reply the Stop swallows, if the call had begun
     gtx.send(()).unwrap(); // the answer to "hello again"
     let got = until_r(&mut r, |e| matches!(e, Event::Said { .. }));
     assert!(got.iter().any(|e| matches!(e, Event::Stopped { .. })), "{got:?}");
