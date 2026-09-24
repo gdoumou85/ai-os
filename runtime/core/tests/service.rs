@@ -7,7 +7,7 @@ use aios_core::store::Store;
 use aios_core::testing::{scripted_workers, Recorder};
 use aios_proto::{Client, Event, Waiting};
 use executor::action::Action;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,10 +48,18 @@ fn start(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc
     sock
 }
 
-/// A mismatch fails in 30s instead of hanging CI: a read that waits longer than that closes the
-/// connection, so `next_event` gives `None` and this panics with whatever it got.
+/// Every test connects through here: a read that waits longer than 30s closes the connection
+/// instead of hanging CI on a mismatch. The option is on the socket (SO_RCVTIMEO), which the
+/// cloned fd a `Reader` uses shares — set once here, before a possible `split()`, it bounds both
+/// halves, not just `Client::next_event`.
+fn connect(sock: &Path) -> Client {
+    let c = Client::connect(sock).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    c
+}
+
+/// A mismatch fails in 30s instead of hanging CI (the timeout is set once, in `connect` above).
 fn until(c: &mut Client, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
-    let _ = c.set_read_timeout(Some(Duration::from_secs(30)));
     let mut got = vec![];
     while let Some(e) = c.next_event() { let stop = pred(&e); got.push(e); if stop { return got; } }
     panic!("connection closed before the event: {got:?}");
@@ -67,8 +75,8 @@ fn job() -> Vec<Move> { vec![
 fn both_clients_see_every_event_in_order_with_contiguous_seq() {
     let dir = temp("two");
     let sock = start(&dir, job(), Arc::new(Mutex::new(None)));
-    let mut a = Client::connect(&sock).unwrap();
-    let mut b = Client::connect(&sock).unwrap();
+    let mut a = connect(&sock);
+    let mut b = connect(&sock);
     // `connect` returns before the service has registered the client: a hello/state round trip
     // on each proves both are registered before anything is broadcast.
     a.hello().unwrap(); assert!(matches!(a.next_event(), Some(Event::State { .. })));
@@ -90,6 +98,7 @@ fn seq_is_contiguous_on_the_wire() {
     let dir = temp("seq");
     let sock = start(&dir, job(), Arc::new(Mutex::new(None)));
     let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let mut r = BufReader::new(s.try_clone().unwrap());
     s.write_all(b"{\"say\":\"make p\"}\n").unwrap();
     let mut seqs = vec![];
@@ -111,7 +120,7 @@ fn hello_answers_state_and_busy_is_answered_during_a_job() {
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let gate = Arc::new(Mutex::new(Some(grx)));
     let sock = start(&dir, job(), gate.clone());
-    let mut a = Client::connect(&sock).unwrap();
+    let mut a = connect(&sock);
     a.hello().unwrap();
     assert_eq!(a.next_event(), Some(Event::State { job: None }));
     a.say("make p").unwrap();
@@ -119,7 +128,7 @@ fn hello_answers_state_and_busy_is_answered_during_a_job() {
     gtx.send(()).unwrap(); // Plan
     until(&mut a, |e| matches!(e, Event::Plan { .. }));
     // The engine is now blocked inside the job (waiting for the gate before Act).
-    let mut b = Client::connect(&sock).unwrap();
+    let mut b = connect(&sock);
     b.hello().unwrap();
     // b is registered on connect, so the engine's status line (a busy tick) can beat the state.
     let got = until(&mut b, |e| matches!(e, Event::State { .. }));
@@ -141,11 +150,11 @@ fn stop_during_a_job_lands_and_a_dropped_client_changes_nothing() {
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let gate = Arc::new(Mutex::new(Some(grx)));
     let sock = start(&dir, job(), gate);
-    let mut a = Client::connect(&sock).unwrap();
+    let mut a = connect(&sock);
     a.say("make p").unwrap();
     gtx.send(()).unwrap(); // Act
     until(&mut a, |e| matches!(e, Event::Step { .. }));
-    let mut b = Client::connect(&sock).unwrap();
+    let mut b = connect(&sock);
     b.say("stop").unwrap();
     drop(b);
     // The stop must have reached the service before the model answers: with nothing left to run
@@ -162,6 +171,7 @@ fn a_bad_line_gets_error_and_nothing_else() {
     let dir = temp("bad");
     let sock = start(&dir, vec![], Arc::new(Mutex::new(None)));
     let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     s.write_all(b"not json\n").unwrap();
     let mut line = String::new();
     BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
@@ -177,7 +187,7 @@ fn stop_typed_right_after_a_request_still_stops_it() {
     let dir = temp("early-stop");
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let sock = start(&dir, job(), Arc::new(Mutex::new(Some(grx))));
-    let mut a = Client::connect(&sock).unwrap();
+    let mut a = connect(&sock);
     a.hello().unwrap(); a.next_event();
     a.say("make p").unwrap();
     a.say("stop").unwrap();
@@ -214,7 +224,7 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
         aios_core::notes::put(&c, &aios_core::notes::Note { notebook: "this computer".into(), topic: "open a website".into(), kind: "technique".into(), text: "open_app firefox".into(), ..Default::default() }, None).unwrap();
     }
     let sock = start(&dir, vec![], Arc::new(Mutex::new(None)));
-    let (mut r, mut w) = Client::connect(&sock).unwrap().split();
+    let (mut r, mut w) = connect(&sock).split();
     w.request(&aios_proto::Request::Skills {}).unwrap();
     let Some(Event::Skills { notebooks }) = r.next_event() else { panic!("no skills event") };
     // What is on disk comes first, read-only (machine-map spec §4).
@@ -244,7 +254,7 @@ fn clear_ends_a_job_waiting_on_a_question() {
     let sock = start(&dir, vec![
         Move::Ask { thought: String::new(), question: "Which stack?".into(), options: vec![] },
     ], Arc::new(Mutex::new(None)));
-    let (mut r, mut w) = Client::connect(&sock).unwrap().split();
+    let (mut r, mut w) = connect(&sock).split();
     w.request(&aios_proto::Request::Say("make p".into())).unwrap();
     while !matches!(r.next_event(), Some(Event::NeedsAnswer { .. }) | None) {}
     w.request(&aios_proto::Request::Clear {}).unwrap();
@@ -258,7 +268,7 @@ fn a_message_while_only_a_chat_reply_is_in_progress_is_queued_not_busy() {
     let dir = temp("chat-queue");
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let sock = start(&dir, vec![Move::Reply { thought: String::new(), text: "one".into(), outcome: aios_core::moves::Ending::Done }, Move::Reply { thought: String::new(), text: "two".into(), outcome: aios_core::moves::Ending::Done }], Arc::new(Mutex::new(Some(grx))));
-    let mut a = Client::connect(&sock).unwrap();
+    let mut a = connect(&sock);
     a.hello().unwrap(); a.next_event();
     a.say("hi").unwrap();
     a.say("hi again").unwrap(); // the engine is inside the first reply (gated) — no job, so no busy
