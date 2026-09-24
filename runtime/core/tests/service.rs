@@ -258,9 +258,13 @@ fn clear_during_work_stops_it() {
     while !matches!(r.next_event(), Some(Event::Step { .. }) | None) {}
     w.request(&aios_proto::Request::Clear {}).unwrap();
     gtx.send(()).unwrap();
+    // Cleared (the on-disk chat, its own thread, its own file I/O) and Stopped (the turn, on the
+    // engine thread) land in either order: wait for both rather than the first terminal event.
     let mut got = vec![];
-    while let Some(e) = r.next_event() { let end = matches!(e, Event::Stopped { .. } | Event::Done { .. }); got.push(e); if end { break; } }
-    assert!(got.iter().any(|e| matches!(e, Event::Cleared {})) && matches!(got.last(), Some(Event::Stopped { .. })), "{got:?}");
+    while got.iter().filter(|e| matches!(e, Event::Cleared {} | Event::Stopped { .. })).count() < 2 {
+        match r.next_event() { Some(e) => got.push(e), None => break }
+    }
+    assert!(got.iter().any(|e| matches!(e, Event::Cleared {})) && got.iter().any(|e| matches!(e, Event::Stopped { .. })), "{got:?}");
 }
 
 #[test]
