@@ -34,6 +34,7 @@ pub fn describe(action: &Action) -> String {
         Action::Key { keys } => format!("pressed {keys}"),
         Action::Scroll { direction, .. } => format!("scrolled {direction}"),
         Action::Drag { from_cell, to_cell, .. } => format!("dragged from square {from_cell} to square {to_cell}"),
+        Action::Wait { seconds } => format!("waited {seconds} s"),
     }
 }
 
@@ -67,6 +68,7 @@ pub fn doing(action: &Action) -> String {
         Action::Key { keys } => format!("pressing {keys}"),
         Action::Scroll { direction, .. } => format!("scrolling {direction}"),
         Action::Drag { .. } => "dragging".into(),
+        Action::Wait { seconds } => format!("waiting {seconds} s"),
     }
 }
 

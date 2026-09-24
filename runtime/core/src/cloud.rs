@@ -88,7 +88,7 @@ mod tests {
         let content = serde_json::json!({ "move": "reply", "text": text }).to_string();
         json_response("200 OK", &serde_json::json!({ "message": { "content": content } }).to_string())
     }
-    fn local() -> FakeModel { FakeModel::new(vec![Move::Reply { text: "local".into(), remember: None }]) }
+    fn local() -> FakeModel { FakeModel::new(vec![Move::Reply { thought: String::new(), text: "local".into(), outcome: crate::moves::Ending::Done }]) }
     fn prompt() -> Prompt { Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None, ..Default::default() } }
     fn text(m: Move) -> String { match m { Move::Reply { text, .. } => text, m => panic!("{m:?}") } }
 

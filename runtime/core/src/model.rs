@@ -159,9 +159,6 @@ fn runner_reason(body: &str) -> String {
 /// cannot answer out of turn. `$defs` (the action schema, shared by `act`/`done`) is untouched.
 /// Empty `allowed` keeps every move — used for calls with no state to narrow against.
 ///
-/// `pub(crate)` so `prompt.rs`'s tests can prove `allowed_moves`' hand-typed move names actually
-/// exist in `MOVE_SCHEMA` (a typo or a renamed move must never silently narrow to fewer moves, or
-/// to none) — see `prompt::tests::every_allowed_list_matches_a_real_move`.
 pub(crate) fn narrow_schema(mut schema: serde_json::Value, allowed: &[&'static str]) -> serde_json::Value {
     if allowed.is_empty() { return schema; }
     if let Some(one_of) = schema["oneOf"].as_array() {
@@ -331,7 +328,7 @@ mod tests {
 
     #[test]
     fn openai_request_is_grammar_forced_and_deterministic() {
-        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "start"], image: None, ..Default::default() });
+        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "ask"], image: None, ..Default::default() });
         assert_eq!(b["model"], "bonsai-8b");
         assert_eq!(b["stream"], false);
         assert_eq!(b["temperature"], 0.0);
@@ -415,8 +412,8 @@ mod tests {
     #[test]
     fn fake_returns_moves_in_order_then_errors() {
         let m = FakeModel::new(vec![
-            Move::Reply { text: "one".into(), remember: None },
-            Move::Reply { text: "two".into(), remember: None },
+            Move::Reply { thought: String::new(), text: "one".into(), outcome: crate::moves::Ending::Done },
+            Move::Reply { thought: String::new(), text: "two".into(), outcome: crate::moves::Ending::Done },
         ]);
         assert!(matches!(m.next_move(&p()).unwrap(), Move::Reply { text, .. } if text == "one"));
         assert!(matches!(m.next_move(&p()).unwrap(), Move::Reply { text, .. } if text == "two"));
@@ -427,7 +424,7 @@ mod tests {
 
     #[test]
     fn the_fake_never_spends_a_scripted_move_on_a_learning_turn_that_is_not_learn() {
-        let m = FakeModel::new(vec![Move::Reply { text: "next job's move".into(), remember: None }]);
+        let m = FakeModel::new(vec![Move::Reply { thought: String::new(), text: "next job's move".into(), outcome: crate::moves::Ending::Done }]);
         let learn_only = Prompt { system: String::new(), user: String::new(), allowed: vec!["learn"], image: None, ..Default::default() };
         assert!(m.next_move(&learn_only).is_err());
         assert!(matches!(m.next_move(&learn_only.clone()), Err(_)));
@@ -443,7 +440,7 @@ mod tests {
         assert_eq!(b["think"], false);
         assert_eq!(b["options"]["temperature"], 0.0);
         assert_eq!(b["options"]["num_ctx"], 8192);
-        assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 10);
+        assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 6);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
     }
@@ -468,17 +465,17 @@ mod tests {
 
     #[test]
     fn ollama_body_narrows_the_schema_to_allowed_moves() {
-        let narrowed = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply", "start"], image: None, ..Default::default() };
+        let narrowed = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply", "ask"], image: None, ..Default::default() };
         let b = ollama_body("m", &narrowed);
         let one_of = b["format"]["oneOf"].as_array().unwrap();
         assert_eq!(one_of.len(), 2);
         let names: Vec<&str> = one_of.iter().map(|e| e["properties"]["move"]["enum"][0].as_str().unwrap()).collect();
-        assert_eq!(names, ["reply", "start"]);
+        assert_eq!(names, ["reply", "ask"]);
         assert!(b["format"]["$defs"].is_object(), "$defs must survive narrowing");
 
         let all = Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None, ..Default::default() };
         let b2 = ollama_body("m", &all);
-        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 10);
+        assert_eq!(b2["format"]["oneOf"].as_array().unwrap().len(), 6);
     }
 
     #[test]

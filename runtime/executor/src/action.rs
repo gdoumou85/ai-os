@@ -98,6 +98,8 @@ pub enum Action {
         amount: u32,
     },
     Drag { from_cell: u32, from_spot: u32, to_cell: u32, to_spot: u32 },
+    /// Waits, then says what changed (one-loop design §1b); the engine's own.
+    Wait { seconds: u32 },
 }
 
 fn one() -> u32 { 1 }

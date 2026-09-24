@@ -18,7 +18,7 @@ pub fn lane(action: &Action) -> Lane {
         Action::RunCommand { .. } | Action::ReadFile { .. } | Action::WriteFile { .. } | Action::EditFile { .. }
         | Action::WebRead { .. } | Action::WebSearch { .. }
         | Action::StartProgram { .. } | Action::ProgramOutput { .. } | Action::StopProgram { .. } => Lane::Machine,
-        Action::SetSetting { .. } => Lane::Engine,
+        Action::SetSetting { .. } | Action::Wait { .. } => Lane::Engine,
         // Listed, not `_`: a new action kind must fail to compile here rather than land
         // silently on the wrong hand.
         Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. }

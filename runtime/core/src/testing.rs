@@ -94,16 +94,15 @@ pub fn temp_root(tag: &str) -> PathBuf {
 pub fn engine_with(moves: Vec<crate::moves::Move>, tag: &str) -> (crate::engine::Engine<crate::model::FakeModel>, Recorder, PathBuf) {
     let rec = Recorder::default();
     let root = temp_root(tag);
-    let housekeeping = root.join("housekeeping");
-    std::fs::create_dir_all(&housekeeping).unwrap();
+    for d in ["housekeeping", "projects", "home"] { std::fs::create_dir_all(root.join(d)).unwrap(); }
     let e = crate::engine::Engine::new(
         crate::store::Store::open_in_memory().unwrap(),
         crate::model::FakeModel::new(moves),
-        root.clone(),
+        root.join("projects"),
         None,
         scripted_workers(&rec),
-        housekeeping,
-    );
+        root.join("housekeeping"),
+    ).with_home(root.join("home"));
     (e, rec, root)
 }
 
