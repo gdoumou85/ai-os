@@ -587,3 +587,8 @@ Two things the owner hit on his first full-access run.
   is a turn of its own in its own chat (`messages.chat`), taken between the owner's turns; an
   urgent one parks the turn in hand, which then carries on. Pop-up, orange Alert card, and a
   Watchers page with Pause/Resume/Delete. (v0.12.0)
+- **2026-09-25**, small steps (the owner's reports on v0.11.0): `append_file` adds to a file's end,
+  and the brief says a file over about 150 lines goes in parts and "small steps" means one per
+  turn. A project's top-level files come with its notes; a new file in a project is noted in its
+  BLUEPRINT.md at once, from the move's own thought; writing one file again and again counts as
+  the same action for the repeat guard. (v0.12.0)
