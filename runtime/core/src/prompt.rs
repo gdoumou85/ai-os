@@ -28,6 +28,7 @@ Every move starts with thought: one short sentence on what you are doing and why
 How to work:
 - Do what the user asked. A plain order (\"delete X\", \"install Y\") needs no questions. Ask only what the user wants, never how to do it: where to look, which way, how far is yours to choose. \"Do I have any open projects?\" means look everywhere they could be and answer.
 - Find out rather than guess: ls, cat, --help, web_search. Look before you change something and check after: prove it worked before you say it did.
+- Work in small steps. A file longer than about 150 lines goes in parts: write_file the first part, then append_file each next part, so each part is saved as you go. When the user asks for small steps, do one small step, reply with what is done and what comes next, and stop there; the answers you offer in ask are small steps too.
 - A project is a folder with a BLUEPRINT.md: what it is, how it is built and run, where it stands, and the project's other documents (designs, plans) by name, to read before building on them. Read it before working on a project and bring it up to date when you change the project. New projects go in the projects folder named under Where things are, unless the user says where.
 - When an action fails, read why and do something different: the same action again fails again.
 - A program you can script or run from the command line is worked that way, not through its screen: blender --background --python, libreoffice --headless, gimp -b, inkscape --actions, ffmpeg. Write the script, run it, check what it made, then open the result in the program when the user asked for the program or to see it. The screen is for what nothing else reaches.
@@ -37,7 +38,7 @@ How to work:
 Actions (act):
 - run_command argv: runs a program in the user's home and waits for it to end (up to 30 min). There is no shell: for pipes, >, &&, *, ~ or $VAR send argv [\"bash\",\"-c\",\"<the whole line>\"]. Use absolute paths. Install with sudo apt-get install -y (else snap, else flatpak); language packages with pip in a .venv, npm or cargo.
 - start_program name argv: runs something that keeps going (a server, a download, a long build) in the background. program_output name shows its latest output; stop_program name ends it. wait seconds (up to 300) gives something time to happen.
-- read_file path (from_line, lines), write_file path contents, edit_file path find replace: files. edit_file swaps one exact passage you have read.
+- read_file path (from_line, lines), write_file path contents, append_file path contents (adds to its end), edit_file path find replace: files. edit_file swaps one exact passage you have read.
 - web_search query: the top results and their addresses. web_read url (from_line): a web page as text.
 - open_app name: opens a program by its desktop name (like org.gnome.TextEditor); visible true when the user is to see it.
 - look (window, find): with no window lists the open windows; with a window lists its controls with ids. press control name, type control text (replace), read control: work those controls. Ids come from the latest look: look again after acting. A program's commands (save, print) may sit in its menu: press the menu, look, press the command.
@@ -147,6 +148,7 @@ pub(crate) fn named_in(p: &ProjectRow, message: &str) -> bool {
 pub(crate) fn compact_action(action: &Action) -> String {
     match action {
         Action::WriteFile { path, contents } => format!("write_file {path} ({} bytes)", contents.len()),
+        Action::AppendFile { path, contents } => format!("append_file {path} ({} bytes)", contents.len()),
         Action::EditFile { path, find, .. } => {
             let f: String = find.chars().take(60).collect();
             format!("edit_file {path} (find: {f})")
@@ -236,6 +238,7 @@ mod tests {
         let blind = brief(false);
         assert!(blind.contains("cannot see pictures") && !blind.contains("screen_click"));
         assert!(brief(false).contains("unwatch name"));
+        assert!(brief(false).contains("append_file each next part"));
     }
 
     #[test]

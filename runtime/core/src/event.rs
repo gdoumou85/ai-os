@@ -7,6 +7,7 @@ pub fn describe(action: &Action) -> String {
     match action {
         Action::WriteFile { path, .. } => format!("wrote {path}"),
         Action::EditFile { path, .. } => format!("edited {path}"),
+        Action::AppendFile { path, .. } => format!("added to {path}"),
         Action::ReadFile { path, .. } => format!("read {path}"),
         Action::RunCommand { argv } => format!("ran {}", argv.join(" ")),
         Action::SetSetting { key, value } => format!("set {key} = {value}"),
@@ -47,6 +48,7 @@ pub fn doing(action: &Action) -> String {
     match action {
         Action::WriteFile { path, .. } => format!("writing {path}"),
         Action::EditFile { path, .. } => format!("editing {path}"),
+        Action::AppendFile { path, .. } => format!("adding to {path}"),
         Action::ReadFile { path, .. } => format!("reading {path}"),
         Action::RunCommand { argv } => format!("running {}", argv.join(" ")),
         Action::SetSetting { key, value } => format!("setting {key} = {value}"),

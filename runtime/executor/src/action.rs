@@ -17,6 +17,8 @@ pub enum Action {
     WriteFile { path: String, contents: String },
     /// Replace one exact passage. `find` must occur exactly once (rule 9: edit in place).
     EditFile { path: String, find: String, replace: String },
+    /// Adds to a file's end, making it (and its folders) if need be: a big file is written in parts.
+    AppendFile { path: String, contents: String },
     SetSetting { key: String, value: String },
     // The desktop hand (2a design §3). Ids come from the worker's own table; `name` on a press is
     // the model echoing what `look` reported, verified by the worker before anything runs, so the
@@ -151,6 +153,12 @@ mod tests {
     fn parses_edit_file() {
         let a: Action = serde_json::from_str(r#"{"kind":"edit_file","path":"a.py","find":"x = 1","replace":"x = 2"}"#).unwrap();
         assert_eq!(a, Action::EditFile { path: "a.py".into(), find: "x = 1".into(), replace: "x = 2".into() });
+    }
+
+    #[test]
+    fn parses_append_file() {
+        let a: Action = serde_json::from_str(r#"{"kind":"append_file","path":"game.js","contents":"more"}"#).unwrap();
+        assert_eq!(a, Action::AppendFile { path: "game.js".into(), contents: "more".into() });
     }
 
     #[test]

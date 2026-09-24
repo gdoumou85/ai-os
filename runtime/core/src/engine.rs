@@ -165,7 +165,7 @@ fn journal_for(journal: &str, words: &str) -> String {
 /// The paths an action touches: the file it reads or writes, and absolute paths in a command.
 fn paths_in(action: &Action, folder: &str) -> Vec<PathBuf> {
     match action {
-        Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::ReadFile { path, .. } => vec![Path::new(folder).join(path)],
+        Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. } | Action::ReadFile { path, .. } => vec![Path::new(folder).join(path)],
         Action::RunCommand { argv } | Action::StartProgram { argv, .. } => argv.iter().flat_map(|a| a.split_whitespace())
             .map(|w| w.trim_matches(|c: char| "'\";&|()".contains(c)).to_string())
             .filter(|w| w.len() > 1 && w.starts_with('/') && !["/usr/", "/bin/", "/dev/", "/proc/", "/tmp/"].iter().any(|p| w.starts_with(p)))
@@ -571,7 +571,7 @@ impl<M: Model> Engine<M> {
                 // A whole file past the runner's length limit: not a bad format, so said as what it is.
                 Err(ModelError::CutOff(words)) if unreadable == 0 => {
                     unreadable = 1;
-                    self.store.push_message("result", &format!("your answer was cut off at the model's length limit after {words} words, so nothing was done. Write a big file in parts: write_file the first part, then edit_file to add each next part at its end."))?;
+                    self.store.push_message("result", &format!("your answer was cut off at the model's length limit after {words} words, so nothing was done. Write a big file in parts: write_file the first part, then append_file each next part."))?;
                     continue;
                 }
                 Err(ModelError::BadJson(e)) if unreadable == 0 => {
@@ -728,7 +728,7 @@ impl<M: Model> Engine<M> {
         if let Action::RunCommand { argv } = action {
             if let Err(e) = crate::machine::record(self.store.conn(), argv) { eprintln!("engine: install not recorded ({e})"); }
         }
-        if let Action::WriteFile { path, .. } | Action::EditFile { path, .. } = action {
+        if let Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. } = action {
             let p = Path::new(&turn.folder).join(path);
             if p.file_name().is_some_and(|f| f == "BLUEPRINT.md") {
                 if let Some(folder) = p.parent() {
@@ -788,7 +788,7 @@ impl<M: Model> Engine<M> {
         let mut noted: Vec<PathBuf> = vec![];
         let all = self.projects()?;
         for s in turn.steps.iter().filter(|s| s.ok) {
-            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. }) = &s.action else { continue };
+            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. }) = &s.action else { continue };
             let p = Path::new(&turn.folder).join(path);
             if p.file_name().is_some_and(|f| f == "BLUEPRINT.md") { if let Some(d) = p.parent() { noted.push(d.to_path_buf()); } continue; }
             if let Some(proj) = all.iter().find(|r| p.starts_with(&r.folder)) { if changed.iter().all(|c| c.folder != proj.folder) { changed.push(proj.clone()); } }
@@ -831,7 +831,7 @@ impl<M: Model> Engine<M> {
     fn files_written(turn: &Job) -> Vec<ChangedFile> {
         let mut v: Vec<ChangedFile> = vec![];
         for s in turn.steps.iter().filter(|s| s.ok) {
-            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. }) = &s.action else { continue };
+            let (Action::WriteFile { path, .. } | Action::EditFile { path, .. } | Action::AppendFile { path, .. }) = &s.action else { continue };
             let p = Path::new(&turn.folder).join(path).display().to_string();
             if v.iter().any(|f| f.path == p) { continue; }
             let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);

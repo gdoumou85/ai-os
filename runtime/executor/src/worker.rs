@@ -170,6 +170,15 @@ impl Worker for MachineWorker {
                     Err(e) => Outcome::err(e),
                 }
             }
+            // A big file in parts (the owner, 2026-09-25): each part lands on disk as it comes.
+            Action::AppendFile { path, contents } => {
+                let p = self.path(path);
+                let before = if p.exists() { match self.read(&p) { Ok(t) => t, Err(e) => return Outcome::err(e) } } else { String::new() };
+                match self.write(&p, &format!("{before}{contents}")) {
+                    Ok(()) => Outcome::ok(format!("added {} bytes to {}, now {} bytes", contents.len(), p.display(), before.len() + contents.len())),
+                    Err(e) => Outcome::err(e),
+                }
+            }
             Action::WebRead { url, from_line } => match crate::web::fetch(url) {
                 Ok(html) => {
                     let (title, text) = crate::web::text_of(&html);
@@ -351,6 +360,17 @@ mod tests {
         assert_eq!(w.run(&Action::ReadFile { path: abs, from_line: None, lines: None }).detail, "hi");
         assert!(w.run(&Action::EditFile { path: "a/b.txt".into(), find: "x = 1".into(), replace: "x = 2".into() }).ok);
         assert_eq!(fs::read_to_string(ws.join("a/b.txt")).unwrap(), "x = 2\n");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn append_file_adds_to_the_end_and_makes_a_missing_file() {
+        let ws = temp_ws("append");
+        let w = MachineWorker { workspace: ws.clone() };
+        assert!(w.run(&Action::AppendFile { path: "parts/a.js".into(), contents: "one\n".into() }).ok, "missing file and folder are made");
+        let o = w.run(&Action::AppendFile { path: "parts/a.js".into(), contents: "two\n".into() });
+        assert!(o.ok && o.detail.contains("now 8 bytes"), "{}", o.detail);
+        assert_eq!(std::fs::read_to_string(ws.join("parts/a.js")).unwrap(), "one\ntwo\n");
         let _ = fs::remove_dir_all(&ws);
     }
 

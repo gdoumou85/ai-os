@@ -14,6 +14,7 @@ pub const MOVE_SCHEMA: &str = r##"{
       { "type":"object", "properties": { "kind": {"enum":["read_file"]}, "path": {"type":"string"}, "from_line": {"type":"integer","minimum":1}, "lines": {"type":"integer","minimum":1} }, "required":["kind","path"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["write_file"]}, "path": {"type":"string"}, "contents": {"type":"string"} }, "required":["kind","path","contents"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["edit_file"]}, "path": {"type":"string"}, "find": {"type":"string"}, "replace": {"type":"string"} }, "required":["kind","path","find","replace"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["append_file"]}, "path": {"type":"string"}, "contents": {"type":"string"} }, "required":["kind","path","contents"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["set_setting"]}, "key": {"enum":["projects_root"]}, "value": {"type":"string"} }, "required":["kind","key","value"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["look"]}, "window": {"type":"string"}, "find": {"type":"string"} }, "required":["kind"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["press"]}, "control": {"type":"integer","minimum":1}, "name": {"type":"string"} }, "required":["kind","control","name"], "additionalProperties": false },
@@ -98,7 +99,7 @@ mod tests {
         let kinds: Vec<String> = v["$defs"]["action"]["oneOf"].as_array().unwrap().iter()
             .map(|o| o["properties"]["kind"]["enum"][0].as_str().unwrap().to_string()).collect();
         assert_eq!(kinds, [
-            "run_command", "read_file", "write_file", "edit_file", "set_setting",
+            "run_command", "read_file", "write_file", "edit_file", "append_file", "set_setting",
             "look", "press", "type", "read", "open_app",
             "screen_look", "screen_click", "screen_type",
             "web_read", "web_search",

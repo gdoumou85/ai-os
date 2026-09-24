@@ -52,6 +52,13 @@ impl Worker for ScriptedWorker {
                     if let Ok(old) = std::fs::read_to_string(&t) { let _ = std::fs::write(&t, old.replace(find, replace)); }
                 }
             }
+            Action::AppendFile { path, contents } => {
+                if let Some(t) = self.target(path) {
+                    if let Some(parent) = t.parent() { let _ = std::fs::create_dir_all(parent); }
+                    let old = std::fs::read_to_string(&t).unwrap_or_default();
+                    let _ = std::fs::write(&t, old + contents);
+                }
+            }
             _ => {}
         }
         self.rec.calls.borrow_mut().push(action.clone());

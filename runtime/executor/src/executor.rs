@@ -16,6 +16,7 @@ pub enum Lane {
 pub fn lane(action: &Action) -> Lane {
     match action {
         Action::RunCommand { .. } | Action::ReadFile { .. } | Action::WriteFile { .. } | Action::EditFile { .. }
+        | Action::AppendFile { .. }
         | Action::WebRead { .. } | Action::WebSearch { .. }
         | Action::StartProgram { .. } | Action::ProgramOutput { .. } | Action::StopProgram { .. } => Lane::Machine,
         Action::SetSetting { .. } | Action::Wait { .. } | Action::Watch { .. } | Action::Unwatch { .. } => Lane::Engine,
