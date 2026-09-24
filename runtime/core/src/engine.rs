@@ -56,8 +56,10 @@ pub struct Engine<M: Model> {
     /// them. Alone, "search the whole system" read as a new vague request and a 9B asked again,
     /// round after round (the owner, 2026-09-24).
     asked: Option<String>,
-    /// This turn answers a question: no second one, the model works with the answer.
+    /// This turn answers a question: no second one before the model has acted on the answer.
     answered: bool,
+    /// The project the chat is about: a message naming another starts a fresh chat.
+    chat_project: Option<String>,
 }
 
 /// The windows a job worked: those it looked into, in first-seen order, from the steps that
@@ -144,6 +146,23 @@ fn journal_for(journal: &str, words: &str) -> String {
     format!("What earlier jobs did (the journal, lines about this request only):\n{}\n", lines[lines.len().saturating_sub(5)..].join("\n"))
 }
 
+/// A folder's folders, hidden ones left out.
+fn subfolders(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir).map(|rd| rd.flatten().map(|d| d.path())
+        .filter(|p| p.is_dir() && !p.file_name().is_some_and(|f| f.to_string_lossy().starts_with('.'))).collect()).unwrap_or_default()
+}
+
+/// The projects in a folder of projects, `depth` levels of groups down at most: each folder in it
+/// with a BLUEPRINT.md, or with none anywhere below it. A folder with some below is a group
+/// ("WEb Games"), looked into the same way, so a sibling with no notes yet still counts.
+fn projects_in(dir: &Path, depth: u32) -> Vec<PathBuf> {
+    subfolders(dir).into_iter().flat_map(|d| {
+        if depth == 0 || d.join("BLUEPRINT.md").is_file() { return vec![d] }
+        let inner = projects_in(&d, depth - 1);
+        if inner.iter().any(|p| p.join("BLUEPRINT.md").is_file()) { inner } else { vec![d] }
+    }).collect()
+}
+
 /// The paths an action touches: the file it reads or writes, and absolute paths in a command.
 fn paths_in(action: &Action, folder: &str) -> Vec<PathBuf> {
     match action {
@@ -197,7 +216,7 @@ impl<M: Model> Engine<M> {
     pub fn new(store: Store, model: M, default_root: PathBuf, log_path: Option<String>, workers: WorkerFactory, housekeeping_dir: PathBuf) -> Self {
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         Self { store, model, default_root, log_path, workers, housekeeping_dir, home, sink: Box::new(|_| {}), out: vec![],
-            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![], asked: None, answered: false }
+            stop: Arc::new(AtomicBool::new(false)), image: None, system: std::cell::OnceCell::new(), inbox: Arc::new(Mutex::new(None)), just_stopped: false, pending: vec![], asked: None, answered: false, chat_project: None }
     }
 
     /// Where commands run (tests point it at a temp folder).
@@ -305,6 +324,10 @@ impl<M: Model> Engine<M> {
     /// At start: a job left open by v0.9.x is closed, and the chat says so.
     pub fn resume(&mut self) -> Result<Vec<Event>, EngineError> {
         self.out.clear();
+        // A restart shows an empty screen, so the AI starts with an empty chat too: an update left
+        // twenty old to-do lists behind a fresh "Hi AI" (the owner, 2026-09-24). What is kept
+        // lives in the projects' notes, the journal and the standing instructions.
+        self.store.forget_messages()?;
         if let Some(mut old) = self.store.open_job()? {
             old.state = State::Cancelled;
             self.store.save_job(&old)?;
@@ -347,6 +370,7 @@ impl<M: Model> Engine<M> {
             let last_ask = self.store.recent_messages(1)?.first().is_some_and(|(r, t)| r == "assistant" && t.contains(r#""move":"ask""#));
             let answer_to = self.asked.take().filter(|_| last_ask);
             self.answered = answer_to.is_some();
+            if answer_to.is_none() { self.switch_project(&text)?; }
             self.store.push_message("user", &text)?;
             let request = answer_to.map_or(text.clone(), |a| format!("{a}{text}"));
             let mut turn = Job::turn(&self.home.display().to_string(), &request);
@@ -372,6 +396,22 @@ impl<M: Model> Engine<M> {
             // Already echoed to the chat by the service when they were sent.
             text = std::mem::take(&mut self.pending).join("\n");
         }
+    }
+
+    /// A message naming another project than the chat's starts the chat afresh: that project's
+    /// notes carry the work, and the other project's talk would only mix in (the owner, 2026-09-24).
+    fn switch_project(&mut self, text: &str) -> Result<(), EngineError> {
+        // A Clear on the rail's own thread emptied the chat without telling the engine.
+        if self.store.recent_messages(1)?.is_empty() { self.chat_project = None; }
+        let named: Vec<ProjectRow> = self.projects()?.into_iter().filter(|p| prompt::named_in(p, text)).collect();
+        let Some(first) = named.first() else { return Ok(()) };
+        if named.iter().any(|p| self.chat_project.as_ref() == Some(&p.folder)) { return Ok(()) }
+        if self.chat_project.is_some() {
+            self.store.forget_messages()?;
+            self.emit(Event::Said { text: format!("(A fresh chat for {}: I go by its notes, and the chat about the other project is set aside.)", first.name) });
+        }
+        self.chat_project = Some(first.folder.clone());
+        Ok(())
     }
 
     /// Skill tips by the message's words; notebooks the message names count as its skills.
@@ -407,9 +447,10 @@ impl<M: Model> Engine<M> {
         let mut unreadable = 0;
         let mut reminded = false;
         let mut moves = 0;
-        // The last move was the to-do list: the next one works it. A 27B re-sent the same list
-        // every 20 seconds and never acted on it (the owner, 2026-09-24).
-        let mut listed = false;
+        // The last move, when it changes nothing done twice (todo, remember): the next may not be
+        // the same. A 27B re-sent one to-do list every 20 seconds and never acted (the owner,
+        // 2026-09-24).
+        let mut last: Option<&'static str> = None;
         loop {
             if self.stop.swap(false, Ordering::SeqCst) {
                 self.just_stopped = true;
@@ -426,7 +467,7 @@ impl<M: Model> Engine<M> {
             }
             moves += 1;
             let mut p = self.prompt_for(turn)?;
-            if listed { p.allowed.retain(|m| *m != "todo"); }
+            if let Some(m) = last { p.allowed.retain(|a| *a != m); }
             self.tick(&turn.id, "Thinking…".into());
             let mv = match self.model.next_move(&p) {
                 Ok(m) => { unreadable = 0; m }
@@ -448,8 +489,12 @@ impl<M: Model> Engine<M> {
                 return self.end(turn, State::Cancelled, "Stopped.".into());
             }
             self.store.push_message("assistant", &serde_json::to_string(&mv).unwrap_or_default())?;
-            let was_listed = std::mem::replace(&mut listed, matches!(mv, Move::Todo { .. }));
+            let before = std::mem::replace(&mut last, match mv { Move::Todo { .. } => Some("todo"), Move::Remember { .. } => Some("remember"), _ => None });
             match mv {
+                // For a runner that does not hold the model to the narrowed moves.
+                Move::Todo { .. } | Move::Remember { .. } if before.is_some() && before == last => {
+                    self.store.push_message("result", "you just did that: now act on the first open item of your to-do list, or reply")?;
+                }
                 Move::Reply { text, outcome, .. } => {
                     if !reminded {
                         if let Some(note) = self.notes_not_updated(turn)? {
@@ -478,16 +523,16 @@ impl<M: Model> Engine<M> {
                     self.emit(Event::NeedsAnswer { job_id: turn.id.clone(), questions: vec![question], options: vec![options] });
                     return Ok(());
                 }
-                // For a runner that does not hold the model to the narrowed moves.
-                Move::Todo { .. } if was_listed => {
-                    self.store.push_message("result", "you just sent your to-do list: now act on its first open item")?;
-                }
                 Move::Todo { items, .. } => {
                     turn.plan = prompt::todo_lines(&items);
                     self.emit(Event::Plan { job_id: turn.id.clone(), steps: turn.plan.clone() });
                     self.store.push_message("result", "your to-do list is on the user's screen: now act on its first open item")?;
                 }
-                Move::Act { thought, action } => { if self.act(turn, action, &thought)? { return Ok(()); } }
+                Move::Act { thought, action } => {
+                    // Acting on the answer: a new question may come up now.
+                    self.answered = false;
+                    if self.act(turn, action, &thought)? { return Ok(()); }
+                }
                 Move::Remember { text, .. } => {
                     let note = if asks_to_keep(&turn.request) {
                         self.store.add_instruction(&text)?;
@@ -548,7 +593,7 @@ impl<M: Model> Engine<M> {
         let n = again.max(if outcome.ok { 0 } else { same });
         if n >= Self::SAME_FAIL_WARN {
             outcome.detail.push_str(&if outcome.ok { format!(" (you have done exactly this {n} times in a row: it shows nothing new, do something different)") }
-                else { format!(" (this has failed the same way {n} times in a row: do something different)") });
+                else { format!(" (this has failed {n} times in a row: do something different)") });
         }
         outcome.detail.push_str(&self.notes_on_first_touch(turn, &action)?);
         turn.steps.push(StepRecord { plan_step: 0, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
@@ -556,7 +601,7 @@ impl<M: Model> Engine<M> {
         self.store.push_message("result", &format!("{} -> {}: {}", prompt::compact_action(&action), if outcome.ok { "ok" } else { "failed" }, outcome.detail))?;
         if n >= Self::SAME_FAIL_END {
             let text = if outcome.ok { format!("I stopped: \"{}\" {n} times in a row, without getting anywhere.", describe(&action)) }
-                else { format!("I stopped: {} failed the same way {n} times in a row. {}", describe(&action), short(&outcome.detail)) };
+                else { format!("I stopped: {} failed {n} times in a row. {}", describe(&action), short(&outcome.detail)) };
             self.end(turn, State::Failed, text)?;
             return Ok(true);
         }
@@ -583,14 +628,14 @@ impl<M: Model> Engine<M> {
         Ok(())
     }
 
-    /// Every project: the folders under the projects root, and folders registered elsewhere that
-    /// still exist (one-loop design §2).
+    /// Every project: under the projects root, as `projects_in` finds them, and folders registered
+    /// elsewhere that still exist (one-loop design §2). The owner's "WEb Games/Pool Game" read as a
+    /// project called "WEb Games" with no notes (2026-09-24).
     fn projects(&self) -> Result<Vec<ProjectRow>, EngineError> {
         let root = self.projects_root()?;
-        let mut v: Vec<ProjectRow> = std::fs::read_dir(&root).map(|rd| rd.flatten()
-            .filter(|d| d.path().is_dir() && !d.file_name().to_string_lossy().starts_with('.'))
-            .map(|d| ProjectRow { name: d.file_name().to_string_lossy().into_owned(), folder: d.path().display().to_string(), description: String::new(), touched_at: 0 })
-            .collect()).unwrap_or_default();
+        let mut v: Vec<ProjectRow> = projects_in(&root, 2).iter().map(|p| ProjectRow {
+            name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+            folder: p.display().to_string(), description: String::new(), touched_at: 0 }).collect();
         v.sort_by(|a, b| a.name.cmp(&b.name));
         for r in self.store.list_projects()? {
             if Path::new(&r.folder).is_dir() && !Path::new(&r.folder).starts_with(&root) && v.iter().all(|p| p.folder != r.folder) { v.push(r); }
@@ -624,6 +669,7 @@ impl<M: Model> Engine<M> {
             let Some(p) = self.project_of(&path)? else { continue };
             if turn.projects_seen.contains(&p.name) { continue; }
             turn.projects_seen.push(p.name.clone());
+            if self.chat_project.is_none() { self.chat_project = Some(p.folder.clone()); }
             out.push_str(&match std::fs::read_to_string(Path::new(&p.folder).join("BLUEPRINT.md")) {
                 Ok(_) => format!("\n[{} is a project; its notes, {}/BLUEPRINT.md:]\n{}", p.name, p.folder, Self::notes_of(&p, 2000)),
                 Err(_) => format!("\n[{} ({}) is a project with no BLUEPRINT.md yet: write one there — what it is, how it is built and run, where it stands.]", p.name, p.folder),
@@ -636,11 +682,12 @@ impl<M: Model> Engine<M> {
     fn notes_not_updated(&self, turn: &Job) -> Result<Option<String>, EngineError> {
         let mut changed: Vec<ProjectRow> = vec![];
         let mut noted: Vec<PathBuf> = vec![];
+        let all = self.projects()?;
         for s in turn.steps.iter().filter(|s| s.ok) {
             let (Action::WriteFile { path, .. } | Action::EditFile { path, .. }) = &s.action else { continue };
             let p = Path::new(&turn.folder).join(path);
             if p.file_name().is_some_and(|f| f == "BLUEPRINT.md") { if let Some(d) = p.parent() { noted.push(d.to_path_buf()); } continue; }
-            if let Some(proj) = self.project_of(&p)? { if changed.iter().all(|c| c.folder != proj.folder) { changed.push(proj); } }
+            if let Some(proj) = all.iter().find(|r| p.starts_with(&r.folder)) { if changed.iter().all(|c| c.folder != proj.folder) { changed.push(proj.clone()); } }
         }
         Ok(changed.into_iter().find(|p| !noted.iter().any(|n| n == Path::new(&p.folder))).map(|p| format!(
             "Before you finish: you changed {} ({}) but not its notes. Bring {}/BLUEPRINT.md up to date so the next conversation knows where it stands, then reply again.", p.name, p.folder, p.folder)))
@@ -728,6 +775,7 @@ impl<M: Model> Engine<M> {
     /// and nothing said before the Clear may run after it.
     pub fn clear(&mut self) -> Result<(), EngineError> {
         self.just_stopped = false;
+        self.chat_project = None;
         self.pending.clear();
         Ok(self.store.forget_chat()?)
     }
@@ -816,6 +864,27 @@ mod tests {
         assert_eq!(ev.iter().filter(|v| matches!(v, Event::Plan { .. })).count(), 1, "{ev:?}");
         let ps = e.model.prompts.borrow();
         assert!(ps[0].allowed.contains(&"todo") && !ps[1].allowed.contains(&"todo") && !ps[2].allowed.contains(&"todo") && ps[3].allowed.contains(&"todo"));
+    }
+
+    #[test]
+    fn a_remember_is_not_sent_twice_in_a_row() {
+        let rem = || Move::Remember { thought: String::new(), text: "use Python".into() };
+        let (mut e, _, _) = engine_with(vec![rem(), rem(), reply("ok")], "remember twice");
+        e.handle("hello").unwrap();
+        let ps = e.model.prompts.borrow();
+        assert!(!ps[1].allowed.contains(&"remember") && !ps[2].allowed.contains(&"remember"));
+        assert!(e.store.all_messages().unwrap().iter().any(|(r, t)| r == "result" && t.contains("you just did that")));
+    }
+
+    #[test]
+    fn after_acting_on_an_answer_a_new_question_may_come() {
+        let q = || Move::Ask { thought: String::new(), question: "Which scope?".into(), options: vec!["All".into()] };
+        let (mut e, _, _) = engine_with(vec![q(), act(run("true")), q()], "ask after act");
+        e.handle("list my projects").unwrap();
+        let ev = events_of(&mut e, "All");
+        assert!(matches!(ev.last(), Some(Event::NeedsAnswer { .. })), "{ev:?}");
+        let ps = e.model.prompts.borrow();
+        assert!(!ps[1].allowed.contains(&"ask") && ps[2].allowed.contains(&"ask"));
     }
 
     #[test]
@@ -1016,6 +1085,48 @@ mod tests {
         let prompts = e.model.prompts.borrow();
         assert!(prompts[0].user.contains("rentals by the day"));
         assert!(!prompts[1].user.contains("rentals by the day"), "a greeting brings up no project");
+    }
+
+    #[test]
+    fn a_project_in_a_group_folder_is_found_by_its_notes() {
+        let (mut e, _, root) = engine_with(vec![reply("ok")], "nested");
+        let p = root.join("projects").join("WEb Games").join("Pool Game");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("BLUEPRINT.md"), "a pool table in the browser").unwrap();
+        std::fs::create_dir_all(root.join("projects").join("loose").join("src")).unwrap();
+        std::fs::create_dir_all(root.join("projects").join("WEb Games").join("Chess")).unwrap();
+        let names: Vec<String> = e.projects().unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Chess", "Pool Game", "loose"], "a group's sibling with no notes yet still counts");
+        e.handle("lets continue our work with the pool web game").unwrap();
+        assert!(e.model.prompts.borrow()[0].user.contains("a pool table in the browser"));
+    }
+
+    #[test]
+    fn naming_another_project_starts_a_fresh_chat() {
+        let (mut e, _, root) = engine_with(vec![reply("a"), reply("b"), reply("c")], "switch");
+        for n in ["pool-game", "car-rental"] {
+            let p = root.join("projects").join(n);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("BLUEPRINT.md"), format!("notes of {n}")).unwrap();
+        }
+        e.handle("continue the pool game").unwrap();
+        e.handle("hi").unwrap();
+        let ev = events_of(&mut e, "now the car rental site");
+        assert!(ev.iter().any(|v| matches!(v, Event::Said { text } if text.contains("fresh chat for car-rental"))), "{ev:?}");
+        let ps = e.model.prompts.borrow();
+        assert!(ps[1].history.iter().any(|m| m.content.contains("continue the pool game")), "a greeting keeps the chat");
+        assert!(!ps[2].history.iter().any(|m| m.content.contains("continue the pool game")) && !ps[2].user.contains("continue the pool game"));
+        assert!(ps[2].user.contains("notes of car-rental"));
+    }
+
+    #[test]
+    fn a_restart_starts_a_fresh_chat_and_keeps_the_standing_instructions() {
+        let (mut e, _, _) = engine_with(vec![], "restart");
+        e.store.push_message("user", "old talk").unwrap();
+        e.store.add_instruction("always use Python").unwrap();
+        e.resume().unwrap();
+        assert!(e.store.all_messages().unwrap().is_empty());
+        assert_eq!(e.store.instructions().unwrap(), ["always use Python"]);
     }
 
     #[test]
