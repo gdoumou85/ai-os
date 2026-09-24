@@ -1,9 +1,12 @@
 //! The rail (1d design §4): a tall window of cards and a text box; a client of ai-os-engine.
-use aios_proto::{ChangedFile, Client, Event, Notebook, Request};
+mod pages;
+
+use aios_proto::{ChangedFile, Client, Event, Request};
 use aios_rail::cards::{Card, CardKind, Cards, Change};
 use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
+use pages::model::{cloud_accounts, cloud_card, cloud_models_card, cloud_on, config_dir, engine_env, models_card, run, write_private};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -32,7 +35,7 @@ fn socket_path() -> PathBuf {
     PathBuf::from(dir).join("ai-os.sock")
 }
 
-enum FromNet {
+pub(crate) enum FromNet {
     Event(Event), Down, Up, Update(String),
     /// The finder's lines and the engine's current environment, for the Model card.
     Models { found: String, env: String },
@@ -40,97 +43,6 @@ enum FromNet {
     Keyed { url: String, key: String, found: String },
     /// The cloud models an account's key opened, for the card that adds one.
     Cloud { provider: aios_rail::models::Provider, key: String, found: String },
-}
-
-/// Where the chat window and the engine's cloud pool share the switch and the accounts (core::cloud).
-fn config_dir() -> String { format!("{}/.config/ai-os", std::env::var("HOME").unwrap_or_default()) }
-fn cloud_on() -> bool { std::path::Path::new(&format!("{}/cloud-on", config_dir())).exists() }
-fn cloud_accounts() -> String { std::fs::read_to_string(format!("{}/cloud.tsv", config_dir())).unwrap_or_default() }
-
-/// A file only its owner can read: the keys are in it.
-fn write_private(path: &str, text: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path).map_err(|e| e.to_string())?;
-    f.write_all(text.as_bytes()).map_err(|e| e.to_string())
-}
-
-/// The cloud accounts card: each account with Remove, and a key box with a button per provider.
-/// ponytail: NVIDIA, OpenRouter and Ollama; the other OpenAI-style providers (Groq, Mistral…) get a button
-/// each once someone has a key to test them with.
-fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gtk::Label) -> gtk::Widget {
-    let tsv = cloud_accounts();
-    let list = aios_rail::models::accounts(&tsv);
-    let text = if list.is_empty() { "No cloud accounts yet. While Cloud is on, they are tried in order, and the next takes over when one's free allowance runs out.".to_string() }
-        else { "Tried in this order while Cloud is on; the next takes over when one's free allowance runs out.".to_string() };
-    let b = plain_card("Cloud accounts", &text);
-    let w: gtk::Widget = b.clone().upcast();
-    for (i, (name, model)) in list.into_iter().enumerate() {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let l = gtk::Label::new(Some(&format!("{}. {name}: {model}", i + 1))); l.set_xalign(0.0); l.set_hexpand(true); l.set_wrap(true);
-        let rm = gtk::Button::with_label("Remove");
-        let (col, me, st, tx, stt) = (column.clone(), w.clone(), status.clone(), to_ui.clone(), status.clone());
-        rm.connect_clicked(move |_| {
-            let _ = write_private(&format!("{}/cloud.tsv", config_dir()), &aios_rail::models::without(&cloud_accounts(), i));
-            st.set_text(&format!("Removed {name}."));
-            col.remove(&me);
-            col.append(&cloud_card(&col, &tx, &stt));
-        });
-        row.append(&l); row.append(&rm);
-        b.append(&row);
-    }
-    let add = gtk::Label::new(Some("Add an account: paste its key here and press its provider.
-• NVIDIA: make a key at build.nvidia.com (sign in, then Get API Key).
-• OpenRouter: openrouter.ai → Keys (its free models end in \":free\").
-• Ollama: ollama.com → Settings → Keys."));
-    add.set_xalign(0.0); add.set_wrap(true);
-    let entry = gtk::PasswordEntry::new(); entry.set_show_peek_icon(true);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let close = gtk::Button::with_label("Close"); close.set_halign(gtk::Align::Start);
-    b.append(&add); b.append(&entry); b.append(&row); b.append(&close);
-    for provider in [aios_rail::models::NVIDIA, aios_rail::models::OPENROUTER, aios_rail::models::OLLAMA] {
-        let go = gtk::Button::with_label(&format!("{} key", provider.name));
-        row.append(&go);
-        let (col, me, tx, st, entry) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), entry.clone());
-        go.connect_clicked(move |_| {
-            let key = entry.text().to_string();
-            if !aios_rail::models::safe_key(&key) { st.set_text("That key has spaces or odd characters in it; paste just the key."); return; }
-            col.remove(&me);
-            st.set_text(&format!("Asking {} which models your key opens…", provider.name));
-            let tx = tx.clone();
-            std::thread::spawn(move || { let found = run("ai-os-find", &["--url", provider.url], Some(&key)); let _ = tx.send(FromNet::Cloud { provider, key, found }); });
-        });
-    }
-    let (col, me) = (column.clone(), w.clone());
-    close.connect_clicked(move |_| col.remove(&me));
-    w
-}
-
-/// The models a provider's key opens, a button each: a click adds the account and turns Cloud on.
-fn cloud_models_card(provider: aios_rail::models::Provider, found: &str, key: String, column: &gtk::Box, status: &gtk::Label, switch: &gtk::ToggleButton) -> gtk::Widget {
-    let choices = aios_rail::models::chat_models(provider, aios_rail::models::parse_found(found).into_iter().filter_map(|c| c.model).collect());
-    let empty = format!("{} did not list any models for that key. Check the key and try again.", provider.name);
-    let b = plain_card("Pick a cloud model", if choices.is_empty() { &empty } else { "The bigger the model, the better it works, and the sooner its free allowance runs out." });
-    let w: gtk::Widget = b.clone().upcast();
-    for m in choices {
-        let btn = gtk::Button::with_label(&m); btn.set_halign(gtk::Align::Start);
-        let (col, me, st, sw, key) = (column.clone(), w.clone(), status.clone(), switch.clone(), key.clone());
-        btn.connect_clicked(move |_| {
-            col.remove(&me);
-            let Some(line) = aios_rail::models::account_line(provider.name, provider.kind, provider.url, &m, &key) else { st.set_text("That model's name has characters it may not."); return };
-            match write_private(&format!("{}/cloud.tsv", config_dir()), &(cloud_accounts() + &line)) {
-                Ok(()) => { sw.set_active(true); st.set_text(&format!("Added {} {m}. Cloud is on.", provider.name)); }
-                Err(e) => st.set_text(&format!("Could not save the account: {e}")),
-            }
-        });
-        b.append(&btn);
-    }
-    let close = gtk::Button::with_label("Close"); close.set_halign(gtk::Align::Start);
-    let (col, me) = (column.clone(), w.clone());
-    close.connect_clicked(move |_| col.remove(&me));
-    b.append(&close);
-    w
 }
 
 /// The socket on its own thread: reconnects every 3 s; every event goes to a plain std channel
@@ -196,162 +108,6 @@ fn update_card(version: &str, column: &gtk::Box) -> gtk::Widget {
     now.connect_clicked(move |_| { run_in_terminal(&aios_rail::update::update_command()); c1.remove(&w1); });
     let (c2, w2) = (column.clone(), w.clone());
     later.connect_clicked(move |_| c2.remove(&w2));
-    w
-}
-
-fn run(prog: &str, args: &[&str], key: Option<&str>) -> String {
-    let mut c = std::process::Command::new(prog);
-    c.args(args);
-    // The key rides in the environment, never on a command line anyone can read with ps.
-    if let Some(k) = key { c.env("AI_OS_MODEL_KEY", k); }
-    c.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
-}
-
-fn engine_env() -> String { run("systemctl", &["--user", "show", "ai-os-engine.service", "-p", "Environment", "--value"], None) }
-
-/// Makes the engine use a choice: the drop-in, the key file, a restart. The service restarts under
-/// the rail, which reconnects on its own.
-fn apply_model(kind: &str, url: &str, model: &str, key: Option<&str>, context: Option<usize>) -> Result<(), String> {
-    let text = aios_rail::models::dropin(kind, url, model, context).ok_or("that model's name or address has characters it may not")?;
-    let home = std::env::var("HOME").map_err(|_| "no home folder")?;
-    let dir = format!("{home}/.config/systemd/user/ai-os-engine.service.d");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(format!("{dir}/model.conf"), text).map_err(|e| e.to_string())?;
-    let env_file = format!("{home}/.config/ai-os/model.env");
-    match key {
-        Some(k) => {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::create_dir_all(format!("{home}/.config/ai-os")).map_err(|e| e.to_string())?;
-            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&env_file).map_err(|e| e.to_string())?;
-            writeln!(f, "AI_OS_MODEL_KEY={k}").map_err(|e| e.to_string())?;
-        }
-        None if kind == "ollama" => { let _ = std::fs::remove_file(&env_file); }
-        None => {}
-    }
-    for args in [&["--user", "daemon-reload"][..], &["--user", "restart", "ai-os-engine.service"][..]] {
-        let ok = std::process::Command::new("systemctl").args(args).status().map(|s| s.success()).unwrap_or(false);
-        if !ok { return Err(format!("systemctl {} failed", args.join(" "))); }
-    }
-    Ok(())
-}
-
-/// A card with a title and a line of text, for the Model card and the key box.
-fn plain_card(title: &str, text: &str) -> gtk::Box {
-    let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    b.add_css_class("card"); b.add_css_class("ask");
-    let t = gtk::Label::new(Some(title)); t.add_css_class("title"); t.set_xalign(0.0);
-    let l = gtk::Label::new(Some(text)); l.set_xalign(0.0); l.set_wrap(true);
-    b.append(&t); b.append(&l);
-    b
-}
-
-/// The Model card: what the engine uses now, and a button per model the finder saw.
-fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gtk::Label) -> gtk::Widget {
-    let now = match aios_rail::models::current(env) {
-        (Some(m), Some(u)) => format!("Now using {m} at {u}."),
-        (Some(m), None) => format!("Now using {m} on this machine."),
-        _ => "No model set yet.".into(),
-    };
-    let choices = aios_rail::models::parse_found(found);
-    let held = aios_rail::models::env_value(env, "AI_OS_CONTEXT=").and_then(|v| aios_rail::models::safe_context(&v));
-    let text = if choices.is_empty() { format!("{now} No models answered on your network.") } else { format!("{now} Pick one to switch; the AI restarts with it.") };
-    let b = plain_card("Choose a model", &text);
-    let w: gtk::Widget = b.clone().upcast();
-    // How much the model can hold (the owner, 2026-09-21: a bar on the card, not a command).
-    // LM Studio and the cloud runners are never told a context size, so the engine only ever
-    // guessed 8192 -- and that guess is what caps `look` at 40 controls however big the model is.
-    use aios_rail::models::{HOLDS, hold_index, hold_label};
-    let bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (HOLDS.len() - 1) as f64, 1.0);
-    bar.set_round_digits(0);
-    bar.set_draw_value(false);
-    bar.set_hexpand(true);
-    for (i, h) in HOLDS.iter().enumerate() {
-        bar.add_mark(i as f64, gtk::PositionType::Bottom, Some(&hold_label(*h)));
-    }
-    bar.set_value(hold_index(held.unwrap_or(HOLDS[0])) as f64);
-    for c in choices {
-        let btn = gtk::Button::with_label(&aios_rail::models::label(&c));
-        btn.set_halign(gtk::Align::Start);
-        let (col, me, tx, st, key, bar) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), key.clone(), bar.clone());
-        btn.connect_clicked(move |_| {
-            col.remove(&me);
-            // The bar as it stands now: the owner moved it, then picked the model, and the
-            // size he had set before came back instead (2026-09-23).
-            let hold = Some(HOLDS[bar.value() as usize]);
-            match &c.model {
-                Some(m) => st.set_text(&match apply_model(&c.kind, &c.url, m, key.as_deref(), hold) {
-                    Ok(()) => format!("Switched to {m}."),
-                    Err(e) => format!("Could not switch: {e}"),
-                }),
-                None => {
-                    // An LM Studio that wants its key: ask for it here, then list its models with it.
-                    let k = plain_card("Its API key", &format!("LM Studio at {} needs its API key (LM Studio → Developer → Server settings).", c.url));
-                    let entry = gtk::PasswordEntry::new();
-                    entry.set_show_peek_icon(true);
-                    let go = gtk::Button::with_label("Use this key");
-                    go.set_halign(gtk::Align::Start);
-                    k.append(&entry); k.append(&go);
-                    let kw: gtk::Widget = k.upcast();
-                    col.append(&kw);
-                    let (col2, tx2, url) = (col.clone(), tx.clone(), c.url.clone());
-                    go.connect_clicked(move |_| {
-                        let key = entry.text().to_string();
-                        if !aios_rail::models::safe_key(&key) { return; }
-                        col2.remove(&kw);
-                        let (tx3, url2) = (tx2.clone(), url.clone());
-                        std::thread::spawn(move || {
-                            let found = run("ai-os-find", &["--url", &url2], Some(&key));
-                            let _ = tx3.send(FromNet::Keyed { url: url2, key, found });
-                        });
-                    });
-                }
-            }
-        });
-        b.append(&btn);
-    }
-    let chosen = gtk::Label::new(None);
-    chosen.set_width_chars(10);
-    let set = gtk::Button::with_label("Set");
-    let show = {
-        let chosen = chosen.clone();
-        move |b: &gtk::Scale| chosen.set_text(&hold_label(HOLDS[b.value() as usize]))
-    };
-    show(&bar);
-    bar.connect_value_changed(show);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    row.append(&gtk::Label::new(Some("How much it can hold:")));
-    row.append(&bar);
-    row.append(&chosen);
-    row.append(&set);
-    b.append(&row);
-    let hint = gtk::Label::new(Some("Move the bar to the context length you loaded the model with, \
-then press Set. LM Studio shows it beside the model; a cloud model holds far more. Leave it at 8k if \
-you are not sure -- set higher than the model really holds and its answers start coming back cut off. \
-A full agent wants 16k or more when this PC can hold it: at 8k it remembers only the last few steps of the chat."));
-    hint.set_xalign(0.0); hint.set_wrap(true); hint.add_css_class("dim");
-    b.append(&hint);
-    let (st, env_now, key_now) = (status.clone(), env.to_string(), key.clone());
-    set.connect_clicked(move |_| {
-        let n = HOLDS[bar.value() as usize];
-        let Some((kind, url, model)) = aios_rail::models::current_choice(&env_now) else {
-            st.set_text("Pick a model first, then say how much it can hold."); return;
-        };
-        st.set_text(&match apply_model(&kind, &url, &model, key_now.as_deref(), Some(n)) {
-            Ok(()) => format!("It can hold {} now. The AI restarted with it.", hold_label(n)),
-            Err(e) => format!("Could not set it: {e}"),
-        });
-    });
-    let accounts = gtk::Button::with_label("Cloud accounts…");
-    accounts.set_halign(gtk::Align::Start);
-    let (col, me, tx, st) = (column.clone(), w.clone(), to_ui.clone(), status.clone());
-    accounts.connect_clicked(move |_| { col.remove(&me); col.append(&cloud_card(&col, &tx, &st)); });
-    b.append(&accounts);
-    let close = gtk::Button::with_label("Close");
-    close.set_halign(gtk::Align::Start);
-    let (col, me) = (column.clone(), w.clone());
-    close.connect_clicked(move |_| col.remove(&me));
-    b.append(&close);
     w
 }
 
@@ -457,65 +213,10 @@ const CSS: &str = "
 .title { font-weight: bold; }
 .dim { opacity: 0.7; font-size: 90%; }
 .status { opacity: 0.6; font-style: italic; margin: 2px 12px; }
+.sidebar { background: alpha(@theme_fg_color, 0.04); padding: 6px; }
+.nav { padding: 6px 10px; border-radius: 6px; }
+.nav:checked { background: alpha(@theme_selected_bg_color, 0.25); font-weight: bold; }
 ";
-
-/// The guide in a window of its own beside the chat, so the chat stays usable while it is open.
-fn show_guide(parent: &gtk::ApplicationWindow) {
-    let text = gtk::Label::builder().label(aios_rail::GUIDE).use_markup(true).wrap(true).xalign(0.0).selectable(true).focusable(false)
-        .margin_start(16).margin_end(16).margin_top(12).margin_bottom(16).build();
-    let scroll = gtk::ScrolledWindow::builder().child(&text).hscrollbar_policy(gtk::PolicyType::Never).build();
-    let win = gtk::Window::builder().title("AI OS guide").transient_for(parent).default_width(520).default_height(600).child(&scroll).build();
-    win.present();
-}
-
-/// The Skills screen (Phase 3 §6): each notebook, its entries with how often they helped, and a ✕
-/// that deletes one. Rebuilt from every `skills` answer, so a delete shows at once.
-fn show_skills(parent: &gtk::ApplicationWindow, slot: &Rc<RefCell<Option<gtk::Window>>>, notebooks: &[Notebook], say: &Sender<Request>) {
-    let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    column.set_margin_start(12); column.set_margin_end(12); column.set_margin_top(12); column.set_margin_bottom(12);
-    // The first notebook is what is installed (machine-map spec §4), there even before any lesson.
-    if notebooks.iter().all(|nb| nb.name == "installed on this computer") {
-        let l = gtk::Label::new(Some("Nothing learned yet. After a job that worked, what the AI learned shows here."));
-        l.set_wrap(true); l.set_xalign(0.0); column.append(&l);
-    }
-    for nb in notebooks {
-        let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        for n in &nb.entries {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            // A program is what is on disk: nothing to forget, nothing used.
-            if n.kind == "program" {
-                let l = gtk::Label::new(Some(&format!("{}: {}", n.topic, n.text)));
-                l.set_wrap(true); l.set_xalign(0.0); l.set_hexpand(true); l.set_selectable(true);
-                row.append(&l);
-                list.append(&row);
-                continue;
-            }
-            let mark = if n.failed { " — did not work last time" } else if n.needs_check { " — needs checking" } else { "" };
-            let l = gtk::Label::new(Some(&format!("{}: {}\nused {} time{}{mark}", n.topic, n.text, n.uses, if n.uses == 1 { "" } else { "s" })));
-            l.set_wrap(true); l.set_xalign(0.0); l.set_hexpand(true); l.set_selectable(true);
-            row.append(&l);
-            let x = gtk::Button::with_label("✕");
-            x.set_tooltip_text(Some("Delete this"));
-            let (s, notebook, topic) = (say.clone(), nb.name.clone(), n.topic.clone());
-            x.connect_clicked(move |_| { let _ = s.send(Request::Forget { notebook: notebook.clone(), topic: topic.clone() }); });
-            row.append(&x);
-            list.append(&row);
-        }
-        let title = match nb.name.as_str() { "this computer" => "This computer".to_string(), "installed on this computer" => "Installed on this computer".to_string(), n => n.to_string() };
-        let ex = gtk::Expander::builder().label(format!("{title} ({})", nb.entries.len())).child(&list).expanded(notebooks.len() == 1).build();
-        column.append(&ex);
-    }
-    let scroll = gtk::ScrolledWindow::builder().child(&column).hscrollbar_policy(gtk::PolicyType::Never).build();
-    let mut slot_ref = slot.borrow_mut();
-    match slot_ref.as_ref().filter(|w| w.is_visible()) {
-        Some(w) => w.set_child(Some(&scroll)),
-        None => {
-            let w = gtk::Window::builder().title("What the AI has learned").transient_for(parent).default_width(480).default_height(560).child(&scroll).build();
-            w.present();
-            *slot_ref = Some(w);
-        }
-    }
-}
 
 fn main() {
     // The software renderer, unless the person chose one: GTK's GPU renderers left new cards
@@ -526,40 +227,23 @@ fn main() {
     app.connect_activate(|app| {
         let css = gtk::CssProvider::new(); css.load_from_string(CSS);
         gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-        let win = gtk::ApplicationWindow::builder().application(app).title("AI OS").default_width(420).default_height(600).build();
+        let win = gtk::ApplicationWindow::builder().application(app).title("AI OS").default_width(570).default_height(600).build();
         // 600, not taller: a small screen (a VM's, a laptop's) put a taller window's bottom — the
         // newest card, its Yes button, the entry — below the edge. The cards scroll inside it.
         let header = gtk::HeaderBar::new();
         let clear = gtk::Button::with_label("Clear");
         clear.set_tooltip_text(Some("A clean start: the AI forgets the chat and what it was told to keep and stops a task still open (projects and skills stay)"));
         header.pack_start(&clear);
-        let model_btn = gtk::Button::with_label("Model");
-        model_btn.set_tooltip_text(Some("Switch the AI's model"));
-        header.pack_start(&model_btn);
-        // Stays on until turned off (the owner's call, 2026-09-19); the engine reads it every turn.
-        let cloud = gtk::ToggleButton::with_label("Cloud");
-        cloud.set_tooltip_text(Some("Use your cloud accounts: stronger models, but what you ask leaves this computer"));
-        cloud.set_active(cloud_on());
-        header.pack_start(&cloud);
         // Stop where it can always be reached while a job runs, not on a card scrolled out of view.
         let stop = gtk::Button::with_label("Stop");
         stop.add_css_class("destructive-action");
         stop.set_visible(false);
         header.pack_end(&stop);
-        let help = gtk::Button::with_label("Help");
-        help.set_tooltip_text(Some("How the AI OS works"));
-        header.pack_end(&help);
-        let skills_btn = gtk::Button::with_label("Skills");
-        skills_btn.set_tooltip_text(Some("What the AI has learned, and a way to delete it"));
-        header.pack_end(&skills_btn);
         win.set_titlebar(Some(&header));
-        let parent = win.clone();
-        help.connect_clicked(move |_| show_guide(&parent));
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&column).build();
         let status = gtk::Label::new(Some("Connecting to the AI OS service…")); status.add_css_class("status"); status.set_xalign(0.0);
         let entry = gtk::Entry::builder().placeholder_text("Tell the AI what you want…").margin_start(8).margin_end(8).margin_bottom(8).build();
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
         // The spinner beside the status line: turning while the AI works (cards::busy_after).
         let spinner = gtk::Spinner::new(); spinner.set_margin_start(12);
         let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -577,7 +261,38 @@ fn main() {
             }
             glib::ControlFlow::Continue
         });
-        root.append(&scroll); root.append(&status_row); root.append(&entry);
+        // The pages, and the menu on the left that picks one (sidebar design §3).
+        let stack = gtk::Stack::new();
+        stack.set_vexpand(true); stack.set_hexpand(true);
+        stack.add_named(&scroll, Some("chat"));
+        let projects_col = pages::page_column(); stack.add_named(&pages::scrolled(&projects_col), Some("projects"));
+        let skills_col = pages::page_column(); stack.add_named(&pages::scrolled(&skills_col), Some("skills"));
+        let model_col = pages::page_column(); stack.add_named(&pages::scrolled(&model_col), Some("model"));
+        stack.add_named(&pages::help::page(), Some("help"));
+        let chat_nav = pages::nav("💬 Chat", "chat", &stack, None);
+        let projects_nav = pages::nav("📁 Projects", "projects", &stack, Some(&chat_nav));
+        let skills_nav = pages::nav("🧠 Skills", "skills", &stack, Some(&chat_nav));
+        let model_nav = pages::nav("⚙ Model", "model", &stack, Some(&chat_nav));
+        let help_nav = pages::nav("? Help", "help", &stack, Some(&chat_nav));
+        chat_nav.set_active(true);
+        // Stays on until turned off (the owner's call, 2026-09-19); the engine reads it every turn.
+        let cloud = gtk::ToggleButton::with_label("☁ Cloud");
+        cloud.add_css_class("nav");
+        cloud.set_tooltip_text(Some("Use your cloud accounts: stronger models, but what you ask leaves this computer"));
+        cloud.set_active(cloud_on());
+        let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        menu.add_css_class("sidebar"); menu.set_size_request(150, -1);
+        let gap = gtk::Box::new(gtk::Orientation::Vertical, 0); gap.set_vexpand(true);
+        for w in [&chat_nav, &projects_nav, &skills_nav] { menu.append(w); }
+        menu.append(&gap);
+        menu.append(&model_nav); menu.append(&cloud); menu.append(&help_nav);
+        // The message box belongs to the chat.
+        let e_vis = entry.clone();
+        stack.connect_visible_child_name_notify(move |s| e_vis.set_visible(s.visible_child_name().as_deref() == Some("chat")));
+        let main_area = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        main_area.append(&stack); main_area.append(&status_row); main_area.append(&entry);
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        root.append(&menu); root.append(&gtk::Separator::new(gtk::Orientation::Vertical)); root.append(&main_area);
         win.set_child(Some(&root));
 
         // Stay at the bottom, but only once GTK has allocated the new card: `upper` grows when the
@@ -594,28 +309,32 @@ fn main() {
         // Once per login, off the GTK thread: a slow network never holds the window up.
         let up = to_ui.clone();
         std::thread::spawn(move || { if let Some(v) = aios_rail::update::check() { let _ = up.send(FromNet::Update(v)); } });
-        let (to_ui_models, to_ui2, to_ui_cloud) = (to_ui.clone(), to_ui.clone(), to_ui.clone());
+        let (to_ui_models, to_ui2) = (to_ui.clone(), to_ui.clone());
         let say = net_thread(to_ui);
-        let s_skills = say.clone();
-        skills_btn.connect_clicked(move |_| { let _ = s_skills.send(Request::Skills {}); });
-        let skills_win: Rc<RefCell<Option<gtk::Window>>> = Rc::default();
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
 
-        let (tx_m, cards_m, status_m) = (to_ui_models, cards.clone(), status.clone());
-        model_btn.connect_clicked(move |_| {
+        let s_skills = say.clone();
+        skills_nav.connect_toggled(move |b| if b.is_active() { let _ = s_skills.send(Request::Skills {}); });
+        let s_projects = say.clone();
+        projects_nav.connect_toggled(move |b| if b.is_active() { let _ = s_projects.send(Request::Projects {}); });
+        let (tx_m, cards_m, status_m, col_m) = (to_ui_models, cards.clone(), status.clone(), model_col.clone());
+        model_nav.connect_toggled(move |b| {
+            if !b.is_active() { return }
+            pages::empty(&col_m);
             if cards_m.borrow().running() { status_m.set_text("Finish or stop the task first, then switch models."); return; }
             status_m.set_text("Looking for models on your network…");
             let tx = tx_m.clone();
             std::thread::spawn(move || { let found = run("ai-os-find", &[], None); let _ = tx.send(FromNet::Models { found, env: engine_env() }); });
         });
-        let (col_c, st_c) = (column.clone(), status.clone());
+        let model_nav2 = model_nav.clone();
+        let st_c = status.clone();
         cloud.connect_toggled(move |t| {
             let flag = format!("{}/cloud-on", config_dir());
             let done = if t.is_active() { write_private(&flag, "") } else { std::fs::remove_file(&flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }).map_err(|e| e.to_string()) };
             if let Err(e) = done { st_c.set_text(&format!("Could not switch the cloud: {e}")); return }
-            // Nothing to use yet: the card to add an account, rather than a switch that does nothing.
-            if t.is_active() && aios_rail::models::accounts(&cloud_accounts()).is_empty() { col_c.append(&cloud_card(&col_c, &to_ui_cloud, &st_c)); }
+            // Nothing to use yet: the Model page, where the card to add an account waits.
+            if t.is_active() && aios_rail::models::accounts(&cloud_accounts()).is_empty() { model_nav2.set_active(true); }
             st_c.set_text(if t.is_active() { "Cloud is on: your cloud accounts answer first." } else { "Cloud is off: only your own models answer." });
         });
         let s_stop = say.clone();
@@ -628,8 +347,8 @@ fn main() {
         entry.connect_activate(move |e| { let t = e.text().trim().to_string(); if !t.is_empty() { let _ = s.send(Request::Say(t)); e.set_text(""); } });
 
         let (cards2, widgets2, column2, status2, say2, spinner2, stop2, entry2, cloud2) = (cards.clone(), widgets.clone(), column.clone(), status.clone(), say.clone(), spinner.clone(), stop.clone(), entry.clone(), cloud.clone());
+        let (model_col2, projects_col2, skills_col2, chat_nav2) = (model_col.clone(), projects_col.clone(), skills_col.clone(), chat_nav.clone());
         let live2 = live.clone();
-        let (parent_for_skills, skills_win2, say_for_skills) = (win.clone(), skills_win.clone(), say.clone());
         glib::timeout_add_local(Duration::from_millis(50), move || {
             while let Ok(msg) = from_net.try_recv() {
                 match msg {
@@ -637,18 +356,22 @@ fn main() {
                     FromNet::Update(v) => column2.prepend(&update_card(&v, &column2)),
                     FromNet::Models { found, env } => {
                         status2.set_text("");
-                        column2.append(&models_card(&found, &env, None, &column2, &to_ui2, &status2));
+                        pages::empty(&model_col2);
+                        model_col2.append(&models_card(&found, &env, None, &model_col2, &to_ui2, &status2));
+                        // Cloud on with no account yet: the card to add one, under the models.
+                        if cloud2.is_active() && aios_rail::models::accounts(&cloud_accounts()).is_empty() { model_col2.append(&cloud_card(&model_col2, &to_ui2, &status2)); }
                     }
                     FromNet::Keyed { url, key, found } => {
                         // Only that runner's lines, and none still asking for a key: the key worked.
                         let only: String = found.lines().filter(|l| l.split('\t').nth(1) == Some(url.as_str())).map(|l| format!("{l}\n")).collect();
                         if only.is_empty() || only.contains("\t-\t") { status2.set_text("LM Studio did not accept that key."); }
-                        else { column2.append(&models_card(&only, &engine_env(), Some(key), &column2, &to_ui2, &status2)); }
+                        else { model_col2.append(&models_card(&only, &engine_env(), Some(key), &model_col2, &to_ui2, &status2)); }
                     }
-                    FromNet::Cloud { provider, key, found } => { status2.set_text(""); column2.append(&cloud_models_card(provider, &found, key, &column2, &status2, &cloud2)); }
+                    FromNet::Cloud { provider, key, found } => { status2.set_text(""); model_col2.append(&cloud_models_card(provider, &found, key, &model_col2, &status2, &cloud2)); }
                     FromNet::Down => { spinner2.stop(); status2.set_text("The AI OS service is not running — retrying…"); }
                     FromNet::Event(ev) => {
-                        if let Event::Skills { notebooks } = &ev { show_skills(&parent_for_skills, &skills_win2, notebooks, &say_for_skills); continue; }
+                        if let Event::Skills { notebooks } = &ev { pages::skills::fill(&skills_col2, notebooks, &say2); continue; }
+                        if let Event::Projects { projects } = &ev { pages::projects::fill(&projects_col2, projects, &entry2, &chat_nav2); continue; }
                         match aios_rail::cards::busy_after(&ev) {
                             Some(true) => { spinner2.start(); set_status(&status2, &live2, "The AI is thinking…"); }
                             Some(false) => { spinner2.stop(); set_status(&status2, &live2, ""); }
@@ -662,7 +385,7 @@ fn main() {
                         }
                         for ch in changes {
                             match ch {
-                                Change::Added(i) => { let w = render(&cards2.borrow().list[i], &say2, &entry2); column2.append(&w); widgets2.borrow_mut().push(w); }
+                                Change::Added(i) => { chat_nav2.set_active(true); let w = render(&cards2.borrow().list[i], &say2, &entry2); column2.append(&w); widgets2.borrow_mut().push(w); }
                                 Change::Updated(i) => { let old = widgets2.borrow()[i].clone(); let w = render(&cards2.borrow().list[i], &say2, &entry2); column2.insert_child_after(&w, Some(&old)); column2.remove(&old); widgets2.borrow_mut()[i] = w; }
                                 // What the AI is doing this second (engine `tick`): the step it is
                                 // on and the command or file it is working, while it works it.

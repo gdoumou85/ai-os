@@ -27,14 +27,14 @@ The AI keeps the whole chat since your last Clear, as far as it has room for —
 While the AI is working, the circle at the bottom turns and the line beside it says what it is doing right now, in a short sentence — for example <tt>installing blender</tt>. After twenty seconds it also says how long that has been going, so you can tell something long from something stuck. When it finishes, it says it is thinking about what to remember; that is the last thing it does, and it can take a few minutes on a slow model.
 
 
-<big><b>The buttons at the top</b></big>
+<big><b>The menu on the left</b></big>
 
-• <b>Clear</b> is a clean start: the AI forgets the chat and the things you told it to keep, and stops whatever it is doing or waiting on you to answer. Your projects, their notes, the journal and skills stay; the AI brings a project up only when you name it ("carry on with the car rental site").
-• <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop what it is doing first. Your cloud accounts are there too. The same card has a bar, <b>How much it can hold</b>: move it to the context length you loaded the model with, then press Set, or press a model and it switches with that size. The bar shows the size in use each time you open the card, and an update keeps it. 8k is the least it can run on, but it then remembers only the last few steps of the chat; a model that can hold 16k or more does noticeably better as a full agent, so give it that much when this computer can. With Ollama the model is loaded at that size, so set it only as high as your graphics card's memory allows.
-• <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
+• <b>Chat</b> is the conversation itself, with <b>Clear</b> and the red <b>Stop</b> button above it. Clear is a clean start: the AI forgets the chat and the things you told it to keep, and stops whatever it is doing or waiting on you to answer. Your projects, their notes, the journal and skills stay; the AI brings a project up only when you name it ("carry on with the car rental site"). Stop shows up only while it is working.
+• <b>Projects</b> lists every project the AI knows, newest work first. Press a project's name to put "let's continue" it in the message box, or <b>Open folder</b> to open it on the computer.
 • <b>Skills</b> shows what is installed on this computer and what the AI has learned, with a way to delete a lesson (see Skills below).
+• <b>Model</b> lists the AI models it can find on your computer and your network. Press one to switch. Finish or stop what it is doing first. The same card has a bar, <b>How much it can hold</b>: move it to the context length you loaded the model with, then press Set, or press a model and it switches with that size. The bar shows the size in use each time you open the card, and an update keeps it. 8k is the least it can run on, but it then remembers only the last few steps of the chat; a model that can hold 16k or more does noticeably better as a full agent, so give it that much when this computer can. With Ollama the model is loaded at that size, so set it only as high as your graphics card's memory allows. <b>Cloud accounts…</b> on the same card is where your cloud accounts live.
+• <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
 • <b>Help</b> opens this guide.
-• <b>Stop</b> shows up only while it is working.
 
 When a new version is out, a card at login says so. Press <b>Update now</b>, type your password in the window that opens, then restart the computer.
 
@@ -55,7 +55,7 @@ After work that went well, the AI writes down what it would want to know straigh
 • <b>A notebook per craft</b>, like "blender" or "web design": ways of doing things that worked, mistakes and how they were fixed, and what you liked. It reads one when what you asked is in that area.
 
 The Done card says what it learned ("Learned: open a website"). If it learned something that changes the computer, like installing a program, it asks first and shows what it would keep and the steps that did it: press <b>Keep</b> or <b>Discard</b>. Only the newest one waits: if you answer neither, the next thing it does drops it.
-Press <b>Skills</b> at the top to read the notebooks and delete anything with ✕. <b>Installed on this computer</b>, the first list, has no ✕: it shows what is on the computer, and changes when a program is installed or removed. A tip that stopped working is marked, and the AI fixes or removes it the next time.
+Press <b>Skills</b> in the menu to read the notebooks and delete anything with ✕. <b>Installed on this computer</b>, the first list, has no ✕: it shows what is on the computer, and changes when a program is installed or removed. A tip that stopped working is marked, and the AI fixes or removes it the next time.
 
 
 <big><b>The AI model: its brain</b></big>
@@ -77,9 +77,9 @@ Everything you ask goes to the runner you chose. On your own computers nothing l
 
 Cloud models are much stronger than what a home computer can run, and several providers give some use for free. The AI OS can use your cloud accounts, one key each. When one account's free allowance runs out, the next takes over by itself. When all of them have run out, your own model answers again.
 
-<b>The Cloud button</b> at the top turns this on and off, and it stays the way you left it. While it is on, what you ask leaves your computer. Some free plans use what you send to train their models.
+<b>The Cloud switch</b> in the menu turns this on and off, and it stays the way you left it. While it is on, what you ask leaves your computer. Some free plans use what you send to train their models.
 
-<b>To add an account:</b> press <b>Model</b>, then <b>Cloud accounts…</b>, paste the key, and press the provider's button. Pick a model from the list it shows, and Cloud turns on. The same card lists your accounts in the order they are tried, each with a Remove button.
+<b>To add an account:</b> press <b>Model</b>, then <b>Cloud accounts…</b>, paste the key, and press the provider's button. Pick a model from the list it shows, and Cloud turns on. The same card lists your accounts in the order they are tried, each with a Remove button. Turning Cloud on with no account yet opens Model, where that card waits.
 • <b>NVIDIA</b> (build.nvidia.com): sign in, then <b>Get API Key</b>. It gives free credits for many large models.
 • <b>OpenRouter</b> (openrouter.ai, then Keys): many models behind one key. Only its free models are listed (their names end in ":free"); they allow a limited number of answers a day.
 • <b>Ollama</b> (ollama.com, Settings, then Keys): its cloud models may need a paid plan.
