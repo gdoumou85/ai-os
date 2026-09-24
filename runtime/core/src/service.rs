@@ -127,9 +127,9 @@ pub fn socket_path() -> std::path::PathBuf {
 pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<dyn FnMut(&Event)>) -> Engine<M> + Send>) -> ! {
     let shared = Arc::new(Shared { clients: Mutex::new(vec![]), seq: AtomicU64::new(1), mirror: Mutex::new(None) });
     let (tx, rx) = channel::<Command>();
-    // The engine's stop flag and inbox, handed back once the engine exists. Nothing is accepted
-    // before they arrive: a client that could connect first would have nothing to raise or fill,
-    // and its word would be lost without a trace.
+    // The engine's stop flag, inbox and the projects' default root, handed back once the engine
+    // exists. Nothing is accepted before they arrive: a client that could connect first would have
+    // nothing to raise or fill, and its word would be lost without a trace.
     let (ready, engine_ready) = channel::<(Arc<AtomicBool>, crate::engine::Inbox, PathBuf)>();
     // Stop words sent but not yet taken by the engine thread. The flag belongs to the queue, not to
     // the moment: a "stop" typed behind a request that has not started must still stop it, and one

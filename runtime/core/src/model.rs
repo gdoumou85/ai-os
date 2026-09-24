@@ -224,9 +224,11 @@ pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
         "think": false,
         "format": format_for(prompt),
         // Ollama loads the model at what each request asks for, so a fixed 8192 here undid the
-        // Model card's bar on every question (the owner, 2026-09-23). `num_predict: -1`: no length
-        // limit on the answer but the window itself — a whole file is one answer (2026-09-24).
-        "options": { "temperature": 0.0, "num_ctx": loaded_context(), "num_predict": -1 },
+        // Model card's bar on every question (the owner, 2026-09-23). `num_predict: loaded_context()`:
+        // no length limit but the window itself — a whole file is one answer (2026-09-24). Ollama
+        // then stops itself there with `done_reason: "length"`, the same cap `read_stream` enforces
+        // on what it actually reads, belt and braces.
+        "options": { "temperature": 0.0, "num_ctx": loaded_context(), "num_predict": loaded_context() },
         "messages": std::iter::once(serde_json::json!({ "role": "system", "content": prompt.system }))
             .chain(history(prompt)).chain(std::iter::once(user)).collect::<Vec<_>>()
     })
@@ -267,14 +269,42 @@ pub fn parse_content(content: &str) -> Result<Move, ModelError> {
     serde_json::from_str(content).map_err(|e| ModelError::BadJson(format!("{e}: {content}")))
 }
 
+/// A 429, however the runner shapes it — `error.code`, a top-level `code`, or just words in the
+/// message — is the account's allowance, not a plain failure: the cloud pool moves to the next
+/// account on `Quota`, same as a 402/429 HTTP status in `ask_at`. Anything else in `error` is `Http`.
+fn stream_error(v: &serde_json::Value) -> Option<ModelError> {
+    let why = v["error"].as_str().or(v["error"]["message"].as_str())?;
+    let is_429 = v["error"]["code"] == 429 || v["code"] == 429 || why.contains("429");
+    Some(if is_429 { ModelError::Quota(why.to_string()) } else { ModelError::Http(why.to_string()) })
+}
+
+/// The whole body as one JSON object, for a runner that answered `stream: true` with its ordinary
+/// non-streamed response instead — LM Studio does this under some settings, and so does a proxy
+/// that buffers the whole thing before replying. Each kind's answer sits where its non-streamed
+/// response always put it. `None` when the body isn't even that; a top-level `error` there is
+/// honoured as `Http`, same as today's in-stream check.
+fn whole_body_content(kind: Kind, body: &str) -> Result<Option<String>, ModelError> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body.trim()) else { return Ok(None) };
+    if let Some(why) = v["error"].as_str().or(v["error"]["message"].as_str()) { return Err(ModelError::Http(why.to_string())) }
+    let content = match kind {
+        Kind::Ollama => v["message"]["content"].as_str(),
+        Kind::OpenAi => v["choices"][0]["message"]["content"].as_str(),
+    };
+    Ok(content.map(str::to_string))
+}
+
 /// An answer as it streams in, whole: Ollama sends a JSON object per line, an OpenAI-style runner
 /// `data: ` lines ending in `data: [DONE]`. `watch` hears the words so far at most every `every`
 /// and drops the stream by answering false. A silence longer than the read timeout is an error
-/// that says "timed out", which `next_move_watched` asks once more after. A body with no JSON in
-/// it at all (a proxy's page, a runner that ignored `stream`) is said as that, with its first line.
+/// that says "timed out", which `next_move_watched` asks once more after. Lines that never parse
+/// as a stream item are kept instead (capped, so a chatty non-JSON proxy can't grow forever); when
+/// none ever parsed, that raw body is tried once as a whole, non-streamed answer — a runner that
+/// ignored `stream: true` and just sent its ordinary response still answers. Only when that also
+/// yields nothing is it said as what it is, with the body's start.
 pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Duration, watch: &mut dyn FnMut(usize) -> bool) -> Result<String, ModelError> {
     use std::io::BufRead;
-    let (mut content, mut seen, mut odd) = (String::new(), false, String::new());
+    let cap = loaded_context() * 4;
+    let (mut content, mut seen, mut raw) = (String::new(), false, String::new());
     let mut told = std::time::Instant::now();
     for line in std::io::BufReader::new(from).lines() {
         let line = line.map_err(|e| ModelError::Http(match e.kind() {
@@ -283,21 +313,28 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
         }))?;
         let json = match kind { Kind::Ollama => Some(line.as_str()), Kind::OpenAi => line.strip_prefix("data:").map(str::trim).filter(|d| *d != "[DONE]") };
         let Some(v) = json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) else {
-            if odd.is_empty() { odd = line.chars().take(300).collect(); }
+            if raw.len() < cap { raw.push_str(&line); raw.push('\n'); }
             continue
         };
         seen = true;
-        if let Some(why) = v["error"].as_str().or(v["error"]["message"].as_str()) { return Err(ModelError::Http(why.to_string())) }
+        if let Some(e) = stream_error(&v) { return Err(e) }
         let cut = match kind { Kind::Ollama => v["done_reason"] == "length", Kind::OpenAi => v["choices"][0]["finish_reason"] == "length" };
         let piece = match kind { Kind::Ollama => &v["message"]["content"], Kind::OpenAi => &v["choices"][0]["delta"]["content"] };
         if let Some(p) = piece.as_str() { content.push_str(p); }
+        // Bigger than the whole context window could never be kept in the chat anyway, so this is
+        // the window, not a limit on how much the AI may write — and it stops a model repeating
+        // itself forever, which the learning turn has no Stop button to catch (engine.rs's `learn`).
+        if content.len() / 4 > loaded_context() { return Err(ModelError::CutOff(content.split_whitespace().count())) }
         if cut { return Err(ModelError::CutOff(content.split_whitespace().count())) }
         if told.elapsed() >= every {
             told = std::time::Instant::now();
             if !watch(content.split_whitespace().count()) { return Err(ModelError::Stopped) }
         }
     }
-    if !seen { return Err(ModelError::Http(format!("the runner's answer was not a stream: {}", odd.trim()))) }
+    if !seen {
+        if let Some(whole) = whole_body_content(kind, &raw)? { return Ok(whole) }
+        return Err(ModelError::Http(format!("the runner's answer was not a stream: {}", raw.chars().take(300).collect::<String>().trim())))
+    }
     Ok(content)
 }
 
@@ -495,7 +532,7 @@ mod tests {
         assert_eq!(b["think"], false);
         assert_eq!(b["options"]["temperature"], 0.0);
         assert_eq!(b["options"]["num_ctx"], 8192);
-        assert_eq!(b["options"]["num_predict"], -1, "no length limit but the window");
+        assert_eq!(b["options"]["num_predict"], loaded_context(), "no length limit but the window");
         assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 6);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
@@ -561,8 +598,40 @@ mod tests {
         assert!(matches!(read_stream(Kind::Ollama, o.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::CutOff(2))));
         let s = r#"data: {"choices":[{"delta":{"content":"a b c"},"finish_reason":"length"}]}"#;
         assert!(matches!(read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::CutOff(3))));
-        // A runner that ignored `stream` is said as that, not read as an empty answer.
-        assert!(matches!(read_stream(Kind::OpenAi, OPENAI_HI.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::Http(w)) if w.contains("not a stream")));
+    }
+
+    #[test]
+    fn a_stream_bigger_than_the_context_window_is_cut_off() {
+        // A model repeating itself forever would grow the content past what the window could ever
+        // hold, one small piece at a time — nothing here ever says `done_reason: "length"`.
+        let want = loaded_context() * 4 + 1;
+        let piece = "a".repeat(1000);
+        let (mut body, mut pushed) = (String::new(), 0);
+        while pushed < want {
+            body.push_str(&format!(r#"{{"message":{{"content":"{piece}"}},"done":false}}"#));
+            body.push('\n');
+            pushed += piece.len();
+        }
+        assert!(matches!(read_stream(Kind::Ollama, body.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::CutOff(_))));
+    }
+
+    #[test]
+    fn a_runner_that_ignored_stream_still_answers_from_its_whole_body() {
+        // OpenAI-style: one whole response object, not `data:` lines.
+        let whole = r#"{"choices":[{"message":{"content":"{\"move\":\"reply\",\"thought\":\"t\",\"text\":\"hi\",\"outcome\":\"done\"}"}}]}"#;
+        let got = read_stream(Kind::OpenAi, whole.as_bytes(), std::time::Duration::ZERO, &mut |_| true).unwrap();
+        assert!(matches!(parse_content(&got).unwrap(), Move::Reply { text, .. } if text == "hi"), "{got}");
+
+        // Ollama-style: same idea, its own whole shape.
+        let whole = r#"{"message":{"content":"{\"move\":\"reply\",\"thought\":\"t\",\"text\":\"hi\",\"outcome\":\"done\"}"},"done":true}"#;
+        let got = read_stream(Kind::Ollama, whole.as_bytes(), std::time::Duration::ZERO, &mut |_| true).unwrap();
+        assert!(matches!(parse_content(&got).unwrap(), Move::Reply { text, .. } if text == "hi"), "{got}");
+    }
+
+    #[test]
+    fn a_429_in_the_stream_moves_the_cloud_pool_on_instead_of_giving_up() {
+        let s = r#"data: {"error":{"code":429,"message":"Rate limit exceeded"}}"#;
+        assert!(matches!(read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::Quota(w)) if w.contains("Rate limit")));
     }
 
     #[test]
