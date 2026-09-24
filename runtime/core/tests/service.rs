@@ -140,6 +140,9 @@ fn stop_during_a_job_lands_and_a_dropped_client_changes_nothing() {
     let mut b = Client::connect(&sock).unwrap();
     b.say("stop").unwrap();
     drop(b);
+    // The stop must have reached the service before the model answers: with nothing left to run
+    // after the Reply, a gate opened first would let the turn finish ahead of it.
+    until(&mut a, |e| matches!(e, Event::You { text } if text == "stop"));
     gtx.send(()).unwrap(); // lets the model answer the Reply; the flag is checked before it is acted on
     let got = until(&mut a, |e| matches!(e, Event::Stopped { .. } | Event::Done { .. }));
     assert!(matches!(got.last().unwrap(), Event::Stopped { .. }), "{got:?}");
