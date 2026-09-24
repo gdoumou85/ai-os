@@ -7,7 +7,7 @@ The AI OS is an assistant that gets things done on this computer for you. You te
 
 <big><b>How to talk to it</b></big>
 
-• <b>Say anything</b> — a question, or something to get done ("make me a script that renames my photos by date") — and it decides for itself what to do: answer you straight away, ask you something first if it needs to, or get to work. There are no separate kinds of request to learn; it works it out as it goes, and asks you again if something only you can answer comes up.
+• <b>Say anything</b> — a question, or something to get done ("make me a script that renames my photos by date") — and it decides for itself what to do: answer you straight away, ask you something first if it needs to, or get to work. There are no separate kinds of request to learn; it works it out as it goes. It asks only about what you want, never how to do it, and once you answer it gets on with the work.
 • <b>Say "you decide"</b> when you don't want questions: it makes the choices itself.
 • <b>Tell it something to keep</b> ("always use Python 3", "from now on, my projects go under Work") and it remembers it from then on, until you press Clear. It only keeps what you say is to hold (words like always, never, from now on, remember); it does not note things down on its own.
 • <b>While it works</b>, a card shows its to-do list, when it is keeping one, and a tick or cross for each thing it has done. You can keep typing — what you say joins the work at its next step, no need to wait for it to finish. Say <b>"stop"</b>, or press the red <b>Stop</b> button at the top, and it stops right there. The chat stays, so you can say what you want differently. To start clean instead, press <b>Clear</b>.
