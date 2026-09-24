@@ -564,3 +564,8 @@ Two things the owner hit on his first full-access run.
 - **2026-09-24**, no repeat loop: a 27B enlarged one screen square some twenty times in Blender
   and never clicked; only failures were counted. Any action but key, scroll, wait and
   program_output now warns at three identical in a row and ends the turn at five. (v0.10.3)
+- **2026-09-24**, scripting first (the owner): a program that can be scripted or run from the
+  command line (blender --background --python, libreoffice --headless, gimp -b, inkscape
+  --actions, ffmpeg) is worked that way, not through its screen, and the result is opened in the
+  program when the user asked for it. Also: a stop typed behind a queued request is counted, not
+  cleared before the request runs. (v0.10.4)
