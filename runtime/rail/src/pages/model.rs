@@ -77,11 +77,18 @@ pub(crate) fn cloud_models_card(provider: aios_rail::models::Provider, found: &s
         let (col, me, st, sw, key) = (column.clone(), w.clone(), status.clone(), switch.clone(), key.clone());
         btn.connect_clicked(move |_| {
             col.remove(&me);
-            let Some(line) = aios_rail::models::account_line(provider.name, provider.kind, provider.url, &m, &key) else { st.set_text("That model's name has characters it may not."); return };
-            match write_private(&format!("{}/cloud.tsv", config_dir()), &(cloud_accounts() + &line)) {
-                Ok(()) => { sw.set_active(true); st.set_text(&format!("Added {} {m}. Cloud is on.", provider.name)); }
-                Err(e) => st.set_text(&format!("Could not save the account: {e}")),
-            }
+            let Some(line) = aios_rail::models::account_line(provider.name, provider.kind, provider.url, &m, &key) else {
+                let msg = "That model's name has characters it may not.";
+                st.set_text(msg);
+                col.append(&super::msg(msg));
+                return
+            };
+            let msg = match write_private(&format!("{}/cloud.tsv", config_dir()), &(cloud_accounts() + &line)) {
+                Ok(()) => { sw.set_active(true); format!("Added {} {m}. Cloud is on.", provider.name) }
+                Err(e) => format!("Could not save the account: {e}"),
+            };
+            st.set_text(&msg);
+            col.append(&super::msg(&msg));
         });
         b.append(&btn);
     }
@@ -169,10 +176,14 @@ pub(crate) fn models_card(found: &str, env: &str, key: Option<String>, column: &
             // size he had set before came back instead (2026-09-23).
             let hold = Some(HOLDS[bar.value() as usize]);
             match &c.model {
-                Some(m) => st.set_text(&match apply_model(&c.kind, &c.url, m, key.as_deref(), hold) {
-                    Ok(()) => format!("Switched to {m}."),
-                    Err(e) => format!("Could not switch: {e}"),
-                }),
+                Some(m) => {
+                    let msg = match apply_model(&c.kind, &c.url, m, key.as_deref(), hold) {
+                        Ok(()) => format!("Switched to {m}."),
+                        Err(e) => format!("Could not switch: {e}"),
+                    };
+                    st.set_text(&msg);
+                    col.append(&super::msg(&msg));
+                }
                 None => {
                     // An LM Studio that wants its key: ask for it here, then list its models with it.
                     let k = plain_card("Its API key", &format!("LM Studio at {} needs its API key (LM Studio → Developer → Server settings).", c.url));

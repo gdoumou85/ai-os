@@ -7,8 +7,6 @@ use std::sync::mpsc::Sender;
 
 pub fn fill(col: &gtk::Box, notebooks: &[Notebook], say: &Sender<Request>) {
     super::empty(col);
-    let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    column.set_margin_start(12); column.set_margin_end(12); column.set_margin_top(12); column.set_margin_bottom(12);
     // The first notebook is what is installed (machine-map spec §4), there even before any lesson.
     if notebooks.iter().all(|nb| nb.name == "installed on this computer") {
         let l = gtk::Label::new(Some("Nothing learned yet. After a job that worked, what the AI learned shows here."));

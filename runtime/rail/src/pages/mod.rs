@@ -33,3 +33,10 @@ pub fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 pub fn empty(col: &gtk::Box) {
     while let Some(c) = col.first_child() { col.remove(&c); }
 }
+
+/// A line of wrapped text left on a page once a card closes, so the page is never blank.
+pub fn msg(text: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    l.set_wrap(true); l.set_xalign(0.0);
+    l
+}

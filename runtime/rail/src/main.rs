@@ -309,7 +309,7 @@ fn main() {
         // Once per login, off the GTK thread: a slow network never holds the window up.
         let up = to_ui.clone();
         std::thread::spawn(move || { if let Some(v) = aios_rail::update::check() { let _ = up.send(FromNet::Update(v)); } });
-        let (to_ui_models, to_ui2) = (to_ui.clone(), to_ui.clone());
+        let (to_ui_models, to_ui2, to_ui_cloud) = (to_ui.clone(), to_ui.clone(), to_ui.clone());
         let say = net_thread(to_ui);
         let cards = Rc::new(RefCell::new(Cards::default()));
         let widgets: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
@@ -318,23 +318,33 @@ fn main() {
         skills_nav.connect_toggled(move |b| if b.is_active() { let _ = s_skills.send(Request::Skills {}); });
         let s_projects = say.clone();
         projects_nav.connect_toggled(move |b| if b.is_active() { let _ = s_projects.send(Request::Projects {}); });
-        let (tx_m, cards_m, status_m, col_m) = (to_ui_models, cards.clone(), status.clone(), model_col.clone());
+        let (tx_m, cards_m, status_m, col_m, cloud_m) = (to_ui_models, cards.clone(), status.clone(), model_col.clone(), cloud.clone());
         model_nav.connect_toggled(move |b| {
             if !b.is_active() { return }
             pages::empty(&col_m);
-            if cards_m.borrow().running() { status_m.set_text("Finish or stop the task first, then switch models."); return; }
+            if cards_m.borrow().running() {
+                status_m.set_text("Finish or stop the task first, then switch models.");
+                col_m.append(&pages::msg("Finish or stop the task first, then switch models."));
+                // Adding an account restarts nothing, so it is fine while a task runs.
+                if cloud_m.is_active() && aios_rail::models::accounts(&cloud_accounts()).is_empty() { col_m.append(&cloud_card(&col_m, &tx_m, &status_m)); }
+                return;
+            }
             status_m.set_text("Looking for models on your network…");
             let tx = tx_m.clone();
             std::thread::spawn(move || { let found = run("ai-os-find", &[], None); let _ = tx.send(FromNet::Models { found, env: engine_env() }); });
         });
-        let model_nav2 = model_nav.clone();
+        let (model_nav2, model_col_c, tx_c) = (model_nav.clone(), model_col.clone(), to_ui_cloud);
         let st_c = status.clone();
         cloud.connect_toggled(move |t| {
             let flag = format!("{}/cloud-on", config_dir());
             let done = if t.is_active() { write_private(&flag, "") } else { std::fs::remove_file(&flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }).map_err(|e| e.to_string()) };
             if let Err(e) = done { st_c.set_text(&format!("Could not switch the cloud: {e}")); return }
-            // Nothing to use yet: the Model page, where the card to add an account waits.
-            if t.is_active() && aios_rail::models::accounts(&cloud_accounts()).is_empty() { model_nav2.set_active(true); }
+            // Nothing to use yet: the card to add one, on the Model page — shown at once if it is
+            // already the page up, since a toggle already active emits no `toggled` to react to.
+            if t.is_active() && aios_rail::models::accounts(&cloud_accounts()).is_empty() {
+                if model_nav2.is_active() { model_col_c.append(&cloud_card(&model_col_c, &tx_c, &st_c)); }
+                else { model_nav2.set_active(true); }
+            }
             st_c.set_text(if t.is_active() { "Cloud is on: your cloud accounts answer first." } else { "Cloud is off: only your own models answer." });
         });
         let s_stop = say.clone();
