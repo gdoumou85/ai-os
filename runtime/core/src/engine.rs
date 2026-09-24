@@ -115,6 +115,12 @@ fn asks_to_keep(text: &str) -> bool {
      "in future", "in the future", "going forward", "by default"].iter().any(|w| t.contains(w))
 }
 
+/// The owner's own words asking to be warned (watchers design §1): a watcher made for them is theirs.
+fn asks_to_watch(text: &str) -> bool {
+    let t = text.to_lowercase();
+    ["watch", "warn", "remind", "alert", "notify", "tell me when", "every"].iter().any(|w| t.contains(w))
+}
+
 /// Where the user's things are, as the user would know it. Never told, a 9B clearing "all
 /// project work" guessed /home/user/projects and worked on a folder that was not there
 /// (the owner's run, 2026-09-23).
@@ -273,6 +279,41 @@ impl<M: Model> Engine<M> {
         }
         self.store.set_setting(key, value)?;
         Ok(Outcome::ok(format!("setting {key} = {value}")))
+    }
+
+    /// `watch` (watchers design §1): creates the watcher or replaces the one of that name.
+    fn watch(&mut self, turn: &Job, name: &str, reason: &str, urgent: bool, when: &str, command: &[String]) -> Result<Outcome, EngineError> {
+        let who = if asks_to_watch(&turn.request) { "you" } else { "AI" };
+        let words: String = turn.request.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
+        let w = match crate::watchers::build(name, reason, urgent, &format!("{who} (\"{words}\")"), when, command.to_vec()) {
+            Ok(w) => w,
+            Err(e) => return Ok(Outcome::err(e)),
+        };
+        // A live program runs its new command from the scheduler's next tick.
+        if crate::watchers::get(self.store.conn(), &w.name)?.is_some_and(|old| old.kind == crate::watchers::Kind::Push) {
+            let _ = executor::programs::stop(&crate::watchers::program_name(&w.name));
+        }
+        crate::watchers::put(self.store.conn(), &w, crate::store::now_ms())?;
+        self.watchers_changed()?;
+        let what = match w.kind { crate::watchers::Kind::Timer => "a timer", crate::watchers::Kind::Check => "a check", crate::watchers::Kind::Push => "a live program" };
+        Ok(Outcome::ok(format!("watching {}: {}, {what}", w.name, crate::watchers::when_text(&w))))
+    }
+
+    fn unwatch(&mut self, name: &str) -> Result<Outcome, EngineError> {
+        if !crate::watchers::delete(self.store.conn(), name)? {
+            let names: Vec<String> = crate::watchers::list(self.store.conn())?.into_iter().map(|w| w.name).collect();
+            return Ok(Outcome::err(format!("no watcher is called {name}; there are: {}", if names.is_empty() { "none".to_string() } else { names.join(", ") })));
+        }
+        let _ = executor::programs::stop(&crate::watchers::program_name(name));
+        self.watchers_changed()?;
+        Ok(Outcome::ok(format!("stopped watching {name}")))
+    }
+
+    /// Every rail's Watchers page redrawn.
+    fn watchers_changed(&mut self) -> Result<(), EngineError> {
+        let watchers = crate::watchers::views(self.store.conn())?;
+        self.emit(Event::Watchers { watchers });
+        Ok(())
     }
 
     /// One model call after a job, never fatal (Phase 3 §4): the job is already over and said so.
@@ -556,8 +597,9 @@ impl<M: Model> Engine<M> {
         let (machine, places) = (self.machine_block(), self.places()?);
         let (instructions, journal, notes) = (self.store.instructions()?, self.journal(&turn.request), self.named_notes(&turn.request)?);
         let programs = executor::programs::running();
+        let watchers = crate::watchers::line(self.store.conn())?;
         let ctx = prompt::context_block(&prompt::Context { machine: &machine, places: &places, programs: &programs, instructions: &instructions,
-            journal: &journal, notes: &notes, tips: &turn.notes_block, request: &turn.request, todo: &turn.plan });
+            journal: &journal, notes: &notes, tips: &turn.notes_block, request: &turn.request, todo: &turn.plan, watchers: &watchers });
         // The answer needs room too, and a whole file is one answer: a quarter of the window, at
         // least the 1500 tokens it always had.
         let window = self.model.context_tokens();
@@ -573,6 +615,8 @@ impl<M: Model> Engine<M> {
         let mut outcome = match &action {
             Action::Wait { seconds } => self.wait(*seconds),
             Action::SetSetting { key, value } => self.apply_setting(key, value)?,
+            Action::Watch { name, reason, urgent, when, command } => self.watch(turn, name, reason, *urgent, when, command)?,
+            Action::Unwatch { name } => self.unwatch(name)?,
             _ => {
                 let exec = self.executor_for(turn)?;
                 let mut o = exec.execute(&turn.id, &action)?;
@@ -1240,5 +1284,32 @@ mod tests {
         assert!(journal_for(j, "delete the flappy files").contains("flappy bird game"));
         assert!(!journal_for(j, "delete the flappy files").contains("car rental"));
         assert_eq!(journal_for(j, "delete any project files"), "");
+    }
+
+    #[test]
+    fn watch_makes_the_watcher_the_owner_asked_for_and_unwatch_removes_it() {
+        let w = |when: &str| act(Action::Watch { name: "time".into(), reason: "say the time".into(), urgent: false, when: when.into(), command: vec![] });
+        let (mut e, _, _) = engine_with(vec![w("every 30 seconds"), w("every 2 minutes"), reply("I will tell you the time.")], "watch");
+        let ev = events_of(&mut e, "every 2 minutes tell me the time");
+        let rows = e.store.all_messages().unwrap();
+        assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("failed") && t.contains("every N minutes")), "{rows:?}");
+        let got = crate::watchers::get(e.store.conn(), "time").unwrap().unwrap();
+        assert!(got.made_by.starts_with("you (\"every 2 minutes") && got.every_s == 120, "{got:?}");
+        assert!(ev.iter().any(|v| matches!(v, Event::Watchers { watchers } if watchers.len() == 1 && watchers[0].when == "every 2 min")), "{ev:?}");
+        e.model = crate::model::FakeModel::new(vec![act(Action::Unwatch { name: "time".into() }), reply("Stopped.")]);
+        e.handle("stop telling me the time").unwrap();
+        assert!(crate::watchers::list(e.store.conn()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_watcher_the_ai_sets_itself_is_the_ais_and_every_prompt_lists_them() {
+        let (mut e, _, _) = engine_with(vec![
+            act(Action::Watch { name: "site".into(), reason: "the build ends; check it".into(), urgent: false, when: "every 5 minutes".into(), command: vec!["ls".into()] }),
+            reply("ok"), reply("hi"),
+        ], "watch-ai");
+        e.handle("build the site").unwrap();
+        assert!(crate::watchers::get(e.store.conn(), "site").unwrap().unwrap().made_by.starts_with("AI"));
+        e.handle("hello").unwrap();
+        assert!(e.model.prompts.borrow().last().unwrap().user.contains("Your watchers: site (every 5 min)."));
     }
 }

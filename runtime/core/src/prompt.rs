@@ -32,6 +32,7 @@ How to work:
 - When an action fails, read why and do something different: the same action again fails again.
 - A program you can script or run from the command line is worked that way, not through its screen: blender --background --python, libreoffice --headless, gimp -b, inkscape --actions, ffmpeg. Write the script, run it, check what it made, then open the result in the program when the user asked for the program or to see it. The screen is for what nothing else reaches.
 - Never install what This machine already lists.
+- An alert is your earlier self or the user asking to be woken for something: read its reason and act on it, then keep the reason current.
 
 Actions (act):
 - run_command argv: runs a program in the user's home and waits for it to end (up to 30 min). There is no shell: for pipes, >, &&, *, ~ or $VAR send argv [\"bash\",\"-c\",\"<the whole line>\"]. Use absolute paths. Install with sudo apt-get install -y (else snap, else flatpak); language packages with pip in a .venv, npm or cargo.
@@ -42,7 +43,8 @@ Actions (act):
 - look (window, find): with no window lists the open windows; with a window lists its controls with ids. press control name, type control text (replace), read control: work those controls. Ids come from the latest look: look again after acting. A program's commands (save, print) may sit in its menu: press the menu, look, press the command.
 - key keys: a key or combination on the screen, like ctrl+s, alt+tab, escape, down, f5.
 {screen}
-- set_setting projects_root value: moves where new projects go, only when the user asks.")
+- set_setting projects_root value: moves where new projects go, only when the user asks.
+- watch name reason urgent when (command): wakes you later with an alert. when: every 5 minutes, every 2 hours, daily 08:00, or live. No command: a timer. A command with every: it runs then, and what it prints wakes you (it prints nothing when nothing happened). A command with live: a program that keeps running and runs ai-os-alert \"<name>\" \"<what happened>\" when something does. reason: what it is for and what to do when it fires, for whoever reads it then. urgent true pauses the work in hand. The same name replaces it; unwatch name removes it.")
 }
 
 /// What the model is told about now, rebuilt for every call (one-loop design §1). It goes last,
@@ -51,6 +53,7 @@ pub struct Context<'a> {
     pub machine: &'a str,
     pub places: &'a str,
     pub programs: &'a [String],
+    pub watchers: &'a str,
     pub instructions: &'a [String],
     pub journal: &'a str,
     pub notes: &'a str,
@@ -62,6 +65,7 @@ pub struct Context<'a> {
 pub fn context_block(c: &Context) -> String {
     let mut s = format!("{}\n{}\n", c.machine.trim_end(), c.places);
     if !c.programs.is_empty() { s.push_str(&format!("Running in the background: {}.\n", c.programs.join(", "))); }
+    if !c.watchers.is_empty() { s.push_str(c.watchers); s.push('\n'); }
     if !c.instructions.is_empty() {
         s.push_str("Standing instructions from the user:\n");
         for i in c.instructions { s.push_str(&format!("- {i}\n")); }
@@ -225,6 +229,7 @@ mod tests {
         assert!(brief(true).contains("screen_look") && brief(false).contains("blender --background --python"));
         let blind = brief(false);
         assert!(blind.contains("cannot see pictures") && !blind.contains("screen_click"));
+        assert!(brief(false).contains("unwatch name"));
     }
 
     #[test]
@@ -241,7 +246,8 @@ mod tests {
         let tips = "t".repeat(3000);
         let todo: Vec<String> = (0..12).map(|i| format!("[ ] {i} {}", "d".repeat(80))).collect();
         let programs = vec!["devserver".to_string(), "download".to_string()];
-        let c = Context { machine: &machine, places: &places, programs: &programs, instructions: &instructions, journal: &journal, notes: &notes, tips: &tips, request: &"r".repeat(5000), todo: &todo };
+        let watchers = format!("Your watchers: {}.", (0..10).map(|i| format!("watcher-name-{i} (every 5 min, paused)")).collect::<Vec<_>>().join(", "));
+        let c = Context { machine: &machine, places: &places, programs: &programs, watchers: &watchers, instructions: &instructions, journal: &journal, notes: &notes, tips: &tips, request: &"r".repeat(5000), todo: &todo };
         let n = context_block(&c).len() / 4;
         assert!(n < 3500, "about {n} tokens");
     }
@@ -272,7 +278,7 @@ mod tests {
 
     #[test]
     fn the_request_and_the_todo_are_always_in_the_context_block() {
-        let c = Context { machine: "m", places: "p", programs: &[], instructions: &[], journal: "", notes: "", tips: "", request: "make it blue", todo: &["[x] a".into(), "[ ] b".into()] };
+        let c = Context { machine: "m", places: "p", programs: &[], watchers: "", instructions: &[], journal: "", notes: "", tips: "", request: "make it blue", todo: &["[x] a".into(), "[ ] b".into()] };
         let s = context_block(&c);
         assert!(s.contains("The request you are working on: make it blue") && s.contains("Your to-do list: [x] a / [ ] b"), "{s}");
     }
