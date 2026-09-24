@@ -458,7 +458,7 @@ impl DesktopWorker {
 
 impl Worker for DesktopWorker {
     fn run(&self, action: &Action) -> Outcome {
-        if matches!(action, Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. }) {
+        if matches!(action, Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. } | Action::Key { .. } | Action::Scroll { .. } | Action::Drag { .. }) {
             return match crate::screen::run(&mut self.0.borrow_mut().screen, action) {
                 Ok((d, image)) => Outcome { image, ..Outcome::ok(d) },
                 Err(e) => Outcome::err(e),

@@ -87,7 +87,20 @@ pub enum Action {
         lines: Option<usize>,
     },
     StopProgram { name: String },
+    /// A key or combination on the visible screen: "ctrl+s", "alt+tab", "escape".
+    Key { keys: String },
+    /// The wheel at a spot of a square from the latest look.
+    Scroll {
+        cell: u32,
+        spot: u32,
+        direction: String,
+        #[serde(default = "one")]
+        amount: u32,
+    },
+    Drag { from_cell: u32, from_spot: u32, to_cell: u32, to_spot: u32 },
 }
+
+fn one() -> u32 { 1 }
 
 /// A desktop-entry id: `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Dots and capitals are normal there
 /// (`org.gnome.TextEditor`); a slash, a space or a leading dot or dash never is.

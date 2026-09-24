@@ -27,7 +27,10 @@ pub const MOVE_SCHEMA: &str = r##"{
       { "type":"object", "properties": { "kind": {"enum":["web_search"]}, "query": {"type":"string"} }, "required":["kind","query"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["start_program"]}, "name": {"type":"string"}, "argv": {"type":"array","items":{"type":"string"},"minItems":1} }, "required":["kind","name","argv"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["program_output"]}, "name": {"type":"string"}, "lines": {"type":"integer","minimum":1} }, "required":["kind","name"], "additionalProperties": false },
-      { "type":"object", "properties": { "kind": {"enum":["stop_program"]}, "name": {"type":"string"} }, "required":["kind","name"], "additionalProperties": false }
+      { "type":"object", "properties": { "kind": {"enum":["stop_program"]}, "name": {"type":"string"} }, "required":["kind","name"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["key"]}, "keys": {"type":"string"} }, "required":["kind","keys"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["scroll"]}, "cell": {"type":"integer","minimum":1,"maximum":48}, "spot": {"type":"integer","minimum":1,"maximum":16}, "direction": {"enum":["up","down","left","right"]}, "amount": {"type":"integer","minimum":1,"maximum":20} }, "required":["kind","cell","spot","direction","amount"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["drag"]}, "from_cell": {"type":"integer","minimum":1,"maximum":48}, "from_spot": {"type":"integer","minimum":1,"maximum":16}, "to_cell": {"type":"integer","minimum":1,"maximum":48}, "to_spot": {"type":"integer","minimum":1,"maximum":16} }, "required":["kind","from_cell","from_spot","to_cell","to_spot"], "additionalProperties": false }
     ] }
   },
   "oneOf": [
@@ -86,6 +89,7 @@ mod tests {
             "screen_look", "screen_click", "screen_type",
             "web_read", "web_search",
             "start_program", "program_output", "stop_program",
+            "key", "scroll", "drag",
         ]);
     }
 

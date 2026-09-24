@@ -22,7 +22,8 @@ pub fn lane(action: &Action) -> Lane {
         // Listed, not `_`: a new action kind must fail to compile here rather than land
         // silently on the wrong hand.
         Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. }
-        | Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. } => Lane::Desktop,
+        | Action::ScreenLook { .. } | Action::ScreenClick { .. } | Action::ScreenType { .. }
+        | Action::Key { .. } | Action::Scroll { .. } | Action::Drag { .. } => Lane::Desktop,
     }
 }
 
@@ -118,7 +119,10 @@ mod tests {
     fn desktop_actions_take_the_desktop_lane() {
         for a in [Action::Look { window: None, find: None }, Action::Press { control: 1, name: "Bold".into() },
                   Action::Type { control: 1, text: "x".into(), replace: false }, Action::Read { control: 1, from_line: None, lines: None },
-                  Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false }] {
+                  Action::OpenApp { name: "org.gnome.Calculator".into(), visible: false },
+                  Action::Key { keys: "ctrl+s".into() },
+                  Action::Scroll { cell: 1, spot: 1, direction: "down".into(), amount: 3 },
+                  Action::Drag { from_cell: 1, from_spot: 1, to_cell: 2, to_spot: 1 }] {
             assert_eq!(lane(&a), Lane::Desktop, "{a:?}");
         }
     }

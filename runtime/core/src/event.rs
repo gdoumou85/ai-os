@@ -31,6 +31,9 @@ pub fn describe(action: &Action) -> String {
         Action::StartProgram { name, argv } => format!("started {name} ({}) in the background", argv.join(" ")),
         Action::ProgramOutput { name, .. } => format!("checked on {name}"),
         Action::StopProgram { name } => format!("stopped {name}"),
+        Action::Key { keys } => format!("pressed {keys}"),
+        Action::Scroll { direction, .. } => format!("scrolled {direction}"),
+        Action::Drag { from_cell, to_cell, .. } => format!("dragged from square {from_cell} to square {to_cell}"),
     }
 }
 
@@ -61,6 +64,9 @@ pub fn doing(action: &Action) -> String {
         Action::StartProgram { name, .. } => format!("starting {name}"),
         Action::ProgramOutput { name, .. } => format!("checking on {name}"),
         Action::StopProgram { name } => format!("stopping {name}"),
+        Action::Key { keys } => format!("pressing {keys}"),
+        Action::Scroll { direction, .. } => format!("scrolling {direction}"),
+        Action::Drag { .. } => "dragging".into(),
     }
 }
 
