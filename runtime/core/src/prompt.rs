@@ -114,13 +114,18 @@ pub fn fit(rows: &[(String, String)], budget: usize) -> Vec<Msg> {
     out
 }
 
-/// A project the message names: its whole name, or one word of it (4+ letters) — "the car rental
-/// site" names car-rental-broker. The front door listed every project, and a 9B greeted with "Hi"
-/// picked the only one and started work on it, whatever the prompt said (the owner, 2026-09-23).
+/// A project the message names: its whole name, or a telling word of it (4+ letters) that starts
+/// a word of the message — "the car rental site" names car-rental-broker. The front door listed
+/// every project, and a 9B greeted with "Hi" picked the only one and started work on it (the owner,
+/// 2026-09-23). A word any project could have does not count: "a snake game" is not Pool Game.
 pub(crate) fn named_in(p: &ProjectRow, message: &str) -> bool {
+    const ANY: &[&str] = &["game", "games", "site", "website", "project", "projects", "apps", "test", "demo", "tool", "tools",
+        "page", "pages", "script", "scripts", "simple", "basic", "first", "second", "online", "model", "models"];
     let m = message.to_lowercase();
     let name = p.name.to_lowercase();
-    m.contains(&name) || name.split(|c: char| !c.is_alphanumeric()).any(|w| w.len() >= 4 && m.contains(w))
+    let words: Vec<&str> = m.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    m.contains(&name) || name.split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.len() >= 4 && !ANY.contains(&w) && words.iter().any(|mw| mw.starts_with(w)))
 }
 
 /// I4: the full action JSON for the last 6 steps used to go straight into the prompt — one
@@ -200,6 +205,17 @@ mod tests {
         assert!(p.user.contains("\"this computer\""), "{}", p.user);
         let failed = learning_turn(&j, false);
         assert!(failed.user.contains("did not finish") && !failed.user.contains("Write at most 5 entries"), "{}", failed.user);
+    }
+
+    #[test]
+    fn a_project_is_named_by_a_telling_word_only() {
+        let p = |n: &str| ProjectRow { name: n.into(), folder: format!("/p/{n}"), description: String::new(), touched_at: 0 };
+        assert!(named_in(&p("Pool Game"), "lets continue our work with the pool web game"));
+        assert!(!named_in(&p("Pool Game"), "make me a snake game"), "game is any game's word");
+        assert!(!named_in(&p("Pool Game"), "is the whirlpool on?"));
+        assert!(named_in(&p("car-rental-broker"), "carry on with the car rental site"));
+        assert!(named_in(&p("car-rental-broker"), "how are the rentals"));
+        assert!(named_in(&p("new-project"), "open new-project"), "the whole name still counts");
     }
 
     #[test]

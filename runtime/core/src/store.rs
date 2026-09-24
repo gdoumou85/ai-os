@@ -131,8 +131,14 @@ impl Store {
     /// Clear that kept "(Noted for the future: …Blender…)" answered his next "Hello" with Blender,
     /// and nothing else could forget them). Projects and notebooks stay.
     pub fn forget_chat(&self) -> Result<(), StoreError> {
-        self.conn.execute("DELETE FROM messages", ())?;
+        self.forget_messages()?;
         self.conn.execute("DELETE FROM instructions", ())?;
+        Ok(())
+    }
+
+    /// A fresh chat that keeps the standing instructions: at a restart, and on a switch of project.
+    pub fn forget_messages(&self) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM messages", ())?;
         Ok(())
     }
 
