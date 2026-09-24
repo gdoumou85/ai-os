@@ -561,3 +561,6 @@ Two things the owner hit on his first full-access run.
 - **2026-09-24**, no to-do loop: a 27B re-sent the same one-item list every 20 seconds and never
   acted, and only the 200-move cap would have ended it. Right after a to-do list, todo is out of
   the allowed moves; one sent anyway is answered, not shown. (v0.10.2)
+- **2026-09-24**, no repeat loop: a 27B enlarged one screen square some twenty times in Blender
+  and never clicked; only failures were counted. Any action but key, scroll, wait and
+  program_output now warns at three identical in a row and ends the turn at five. (v0.10.3)
