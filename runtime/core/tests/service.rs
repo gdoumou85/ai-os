@@ -247,6 +247,9 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
 #[test]
 fn clear_during_work_stops_it() {
     let dir = temp("clear-work");
+    // Clear also forgets the chat on the on-disk database (AI_OS_DB): its own path, so this does
+    // not race the_skills_screen test's own env::set_var in the same process.
+    std::env::set_var("AI_OS_DB", dir.join("notes.db"));
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
     let sock = start(&dir, job(), Arc::new(Mutex::new(Some(grx))));
     let (mut r, mut w) = connect(&sock).split();
