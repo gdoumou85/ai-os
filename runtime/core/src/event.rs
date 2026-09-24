@@ -80,7 +80,7 @@ pub fn lines(event: &Event) -> Vec<String> {
     match event {
         Event::Said { text } | Event::Understood { text, .. }
         | Event::Done { text, .. } | Event::Failed { text, .. } | Event::Stopped { text, .. } | Event::Busy { text, .. } => vec![text.clone()],
-        Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } | Event::Skills { .. } | Event::Cleared {} => vec![],
+        Event::You { .. } | Event::Plan { .. } | Event::Step { .. } | Event::State { .. } | Event::Skills { .. } | Event::Projects { .. } | Event::Cleared {} => vec![],
         Event::NeedsAnswer { questions, options, .. } => questions.iter().enumerate().map(|(i, q)| match options.get(i).filter(|o| !o.is_empty()) {
             Some(o) => format!("Question: {q} ({})", o.join(" / ")),
             None => format!("Question: {q}"),

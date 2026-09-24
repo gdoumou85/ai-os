@@ -43,7 +43,7 @@ pub fn busy_after(ev: &Event) -> Option<bool> {
         | Event::Error { .. } | Event::Learned { .. } => Some(false),
         // A slow local model can take minutes for the learning turn after Done/Failed, so the
         // spinner keeps turning until the Learned that always follows (engine.rs `learn`) stops it.
-        Event::Done { .. } | Event::Failed { .. } | Event::Busy { .. } | Event::State { .. } | Event::Skills { .. } | Event::Cleared {} => None,
+        Event::Done { .. } | Event::Failed { .. } | Event::Busy { .. } | Event::State { .. } | Event::Skills { .. } | Event::Projects { .. } | Event::Cleared {} => None,
     }
 }
 
@@ -180,8 +180,8 @@ impl Cards {
                 }
                 ch
             }
-            // The Skills screen is its own window (main.rs), not a card.
-            Event::Skills { .. } => vec![],
+            // The Skills screen and the Projects page are their own windows (main.rs), not cards.
+            Event::Skills { .. } | Event::Projects { .. } => vec![],
             // The whole column is redrawn (main.rs), not one card.
             Event::Cleared {} => { self.clear(); vec![] }
             Event::Busy { text, .. } | Event::Error { text } => vec![Change::Line(text.clone())],

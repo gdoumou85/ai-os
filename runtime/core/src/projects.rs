@@ -51,6 +51,22 @@ pub fn first_line(notes: &str) -> String {
     notes.lines().map(|l| l.trim().trim_start_matches('#').trim()).find(|l| !l.is_empty()).unwrap_or("").chars().take(120).collect()
 }
 
+/// The projects as the Projects page shows them, the most recently changed first.
+pub fn views(store: &Store, default: &Path) -> Result<Vec<aios_proto::ProjectView>, StoreError> {
+    let changed = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
+    let mut v: Vec<aios_proto::ProjectView> = list(store, default)?.into_iter().map(|p| {
+        let notes = Path::new(&p.folder).join("BLUEPRINT.md");
+        aios_proto::ProjectView {
+            summary: std::fs::read_to_string(&notes).map(|t| first_line(&t)).unwrap_or_default(),
+            touched_at: changed(Path::new(&p.folder)).max(changed(&notes)),
+            name: p.name, folder: p.folder,
+        }
+    }).collect();
+    v.sort_by(|a, b| b.touched_at.cmp(&a.touched_at));
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +94,15 @@ mod tests {
         assert_eq!(first_line("\n# Pool Game\nA pool table"), "Pool Game");
         assert_eq!(first_line(""), "");
         assert_eq!(first_line(&"x".repeat(300)).len(), 120);
+    }
+
+    #[test]
+    fn the_page_shows_each_project_with_its_first_line() {
+        let root = tmp("views");
+        std::fs::create_dir_all(root.join("game")).unwrap();
+        std::fs::write(root.join("game/BLUEPRINT.md"), "A pool table in the browser").unwrap();
+        let v = views(&Store::open_in_memory().unwrap(), &root).unwrap();
+        assert_eq!((v[0].name.as_str(), v[0].summary.as_str()), ("game", "A pool table in the browser"));
+        assert!(v[0].touched_at > 0);
     }
 }

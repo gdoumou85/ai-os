@@ -5,7 +5,7 @@ use aios_proto::{Event, JobState, Request, StepView, Waiting};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -100,6 +100,15 @@ fn skills_event(forget: Option<(&str, &str)>) -> Event {
     match read() { Ok(notebooks) => Event::Skills { notebooks }, Err(e) => Event::Error { text: format!("could not read the notebooks: {e}") } }
 }
 
+/// The projects as the Projects page draws them, read on the client's own thread so the page
+/// opens while a job runs.
+fn projects_event(default: &Path) -> Event {
+    match crate::store::Store::open(&db_path()).and_then(|s| crate::projects::views(&s, default)) {
+        Ok(projects) => Event::Projects { projects },
+        Err(e) => Event::Error { text: format!("could not list the projects: {e}") },
+    }
+}
+
 /// `$AI_OS_SOCKET_DIR/ai-os.sock` when set (tests, a second engine on purpose), else
 /// `$XDG_RUNTIME_DIR/ai-os.sock` (a systemd user service and every shell in the distro have
 /// it), else `/run/user/<uid>/ai-os.sock`.
@@ -121,7 +130,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
     // The engine's stop flag and inbox, handed back once the engine exists. Nothing is accepted
     // before they arrive: a client that could connect first would have nothing to raise or fill,
     // and its word would be lost without a trace.
-    let (ready, engine_ready) = channel::<(Arc<AtomicBool>, crate::engine::Inbox)>();
+    let (ready, engine_ready) = channel::<(Arc<AtomicBool>, crate::engine::Inbox, PathBuf)>();
     // Stop words sent but not yet taken by the engine thread. The flag belongs to the queue, not to
     // the moment: a "stop" typed behind a request that has not started must still stop it, and one
     // with nothing queued before it must not stop the next job. The engine thread sets the flag
@@ -149,7 +158,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         }
         // Everything a client thread reads is now set: clients may arrive, and they watch the
         // resumed job go by like any other.
-        let _ = ready.send((engine.stop_flag(), engine.inbox()));
+        let _ = ready.send((engine.stop_flag(), engine.inbox(), engine.default_root()));
         // At boot the engine starts before the network does (the owner's VM, 2026-09-19: "Network
         // is unreachable", and the open job left where it was). A resume the model runner could not
         // answer is tried again for a minute; anything else is reported once.
@@ -184,7 +193,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         eprintln!("engine: the engine thread {} — exiting so the service is restarted", if ended.is_err() { "panicked" } else { "ended" });
         std::process::exit(1);
     });
-    let (stop, inbox) = engine_ready.recv().expect("the engine thread builds the engine");
+    let (stop, inbox, root) = engine_ready.recv().expect("the engine thread builds the engine");
     let mut next_id = 1u64;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -200,6 +209,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         let stop = stop.clone();
         let stops = stops.clone();
         let inbox = inbox.clone();
+        let root = root.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stream).lines() {
                 let Ok(line) = line else { break };
@@ -245,6 +255,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                     }
                     Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
                     Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
+                    Ok(Request::Projects {}) => sh.send_to(id, &projects_event(&root)),
                     // A turn open (the inbox exists): its inbox closes and the words in it go (the
                     // user cleared them), the flag lands between its steps as "stop" would, and the
                     // screen empties now; the engine forgets the rows once that turn has ended

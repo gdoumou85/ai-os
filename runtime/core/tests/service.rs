@@ -308,6 +308,19 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
 }
 
 #[test]
+fn the_projects_page_gets_the_projects_newest_first() {
+    let dir = temp("projects-page");
+    std::fs::create_dir_all(dir.join("projects/game")).unwrap();
+    std::fs::write(dir.join("projects/game/BLUEPRINT.md"), "# Pool\nA pool table").unwrap();
+    let sock = start_with(&dir, vec![], Arc::new(Mutex::new(None)), true);
+    let (mut r, mut w) = connect(&sock).split();
+    w.request(&aios_proto::Request::Projects {}).unwrap();
+    let got = until_r(&mut r, |e| matches!(e, Event::Projects { .. }));
+    let Some(Event::Projects { projects }) = got.last() else { unreachable!() };
+    assert!(projects.iter().any(|p| p.name == "game" && p.summary == "Pool"), "{projects:?}");
+}
+
+#[test]
 fn clear_during_work_empties_the_screen_at_once_and_the_next_word_starts_fresh() {
     let _turn = db_turn();
     let dir = temp("clear-work");

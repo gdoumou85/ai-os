@@ -231,6 +231,9 @@ impl<M: Model> Engine<M> {
     /// A clone of the engine's own stop flag — raise it to cancel the open job between steps.
     pub fn stop_flag(&self) -> Arc<AtomicBool> { self.stop.clone() }
 
+    /// Where projects go when the user never said (the service lists them from its client threads).
+    pub fn default_root(&self) -> PathBuf { self.default_root.clone() }
+
     /// Hand every event to `sink` as it happens — what the service broadcasts from.
     pub fn with_sink(mut self, sink: Box<dyn FnMut(&Event)>) -> Self {
         self.sink = sink;
