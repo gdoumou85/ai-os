@@ -404,7 +404,7 @@ impl<M: Model> Engine<M> {
     fn alert_turn(&mut self, a: &crate::watchers::Alert) -> Result<State, EngineError> {
         let mut turn = Job::turn(&self.home.display().to_string(), &prompt::alert_request(a));
         let main = self.store.chat().to_string();
-        let (answered, image) = (std::mem::take(&mut self.answered), self.image.take());
+        let (answered, image, project) = (std::mem::take(&mut self.answered), self.image.take(), self.chat_project.clone());
         self.store.set_chat(&format!("alert-{}", turn.id));
         self.in_alert = true;
         self.give_tips(&mut turn);
@@ -415,7 +415,8 @@ impl<M: Model> Engine<M> {
         let forgot = self.store.forget_messages();
         self.store.set_chat(&main);
         self.in_alert = false;
-        (self.answered, self.image) = (answered, image);
+        // A project the alert reached into is not what the owner's chat is about.
+        (self.answered, self.image, self.chat_project) = (answered, image, project);
         r?;
         forgot?;
         Ok(turn.state)
@@ -1454,5 +1455,22 @@ mod tests {
         ], "alert-watch");
         e.handle_alert(&alert("price", false)).unwrap();
         assert!(crate::watchers::get(e.store.conn(), "price").unwrap().unwrap().made_by.starts_with("AI"));
+    }
+
+    #[test]
+    fn a_project_an_alert_reaches_into_is_not_the_owners_chat_project() {
+        let (mut e, _, root) = engine_with(vec![], "alert-project");
+        for n in ["pool-game", "car-rental"] {
+            let p = root.join("projects").join(n);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("BLUEPRINT.md"), format!("notes of {n}")).unwrap();
+        }
+        let page = root.join("projects/pool-game/index.html").display().to_string();
+        e.model = crate::model::FakeModel::new(vec![reply("a"), act(Action::ReadFile { path: page, from_line: None, lines: None }), reply("Told them."), reply("c")]);
+        e.handle("hi").unwrap();
+        e.handle_alert(&alert("price", false)).unwrap();
+        let ev = events_of(&mut e, "now the car rental site");
+        assert!(!ev.iter().any(|v| matches!(v, Event::Said { text } if text.contains("fresh chat"))), "{ev:?}");
+        assert!(e.store.all_messages().unwrap().iter().any(|(r, t)| r == "user" && t == "hi"), "the owner's chat keeps its words");
     }
 }
