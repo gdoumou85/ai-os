@@ -190,6 +190,25 @@ fn journal_line(turn: &Job, how: &str, text: &str) -> String {
     line
 }
 
+/// What is at the top of a project's folder, so a new chat builds on the files already there
+/// instead of writing them again: a stopped run left index.html and style.css, its notes never
+/// said so, and the next run made both anew (the owner, 2026-09-25).
+fn files_of(folder: &str) -> String {
+    let Ok(rd) = std::fs::read_dir(folder) else { return String::new() };
+    let mut v: Vec<String> = rd.flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') { return None }
+        let m = e.metadata().ok()?;
+        Some(if m.is_dir() { format!("{name}/") } else { format!("{name} ({} bytes)", m.len()) })
+    }).collect();
+    if v.is_empty() { return "Files there: none yet.".into() }
+    v.sort();
+    // ponytail: the top level, first 30; ls for the rest.
+    let more = if v.len() > 30 { format!(" and {} more", v.len() - 30) } else { String::new() };
+    v.truncate(30);
+    format!("Files there: {}{more}.", v.join(", "))
+}
+
 fn not_a_move(error: &str) -> String {
     format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\": reply, ask, todo, act or remember.", error.chars().take(120).collect::<String>())
 }
@@ -677,6 +696,7 @@ impl<M: Model> Engine<M> {
     /// Runs one action and puts its result in the conversation. `true`: the turn ended here.
     fn act(&mut self, turn: &mut Job, action: Action, thought: &str) -> Result<bool, EngineError> {
         self.tick(&turn.id, if thought.trim().is_empty() { crate::event::doing(&action) } else { short(thought) });
+        let new_file = matches!(&action, Action::WriteFile { path, .. } if !Path::new(&turn.folder).join(path).exists());
         let mut outcome = match &action {
             Action::Wait { seconds } => self.wait(*seconds),
             Action::SetSetting { key, value } => self.apply_setting(key, value)?,
@@ -695,19 +715,22 @@ impl<M: Model> Engine<M> {
             }
         };
         if outcome.ok { self.after_ok(turn, &action)?; }
+        if outcome.ok && new_file { self.note_new_file(turn, &action, thought)?; }
         let key = serde_json::to_string(&action).unwrap_or_default();
         let same = 1 + turn.steps.iter().rev()
             // `starts_with`: a stored detail may carry the warning or a project's notes after it.
             .take_while(|s| !s.ok && s.detail.starts_with(&outcome.detail) && serde_json::to_string(&s.action).unwrap_or_default() == key).count();
-        // The same action over and over, whatever it gives: a 27B enlarged one screen square 20
-        // times and never clicked (the owner, 2026-09-24). Keys, scrolls, waits and a program's
-        // output are fine to repeat.
+        // The same file written again and again counts as the same action whatever it says: a 27B
+        // rewrote style.css until the owner stopped it (2026-09-25). append_file parts are fine.
+        let key_of = |a: &Action| match a { Action::WriteFile { path, .. } => format!("write_file {path}"), a => serde_json::to_string(a).unwrap_or_default() };
         let again = if matches!(action, Action::Key { .. } | Action::Scroll { .. } | Action::Wait { .. } | Action::ProgramOutput { .. }) { 0 }
-            else { 1 + turn.steps.iter().rev().take_while(|s| serde_json::to_string(&s.action).unwrap_or_default() == key).count() };
+            else { 1 + turn.steps.iter().rev().take_while(|s| key_of(&s.action) == key_of(&action)).count() };
         let n = again.max(if outcome.ok { 0 } else { same });
         if n >= Self::SAME_FAIL_WARN {
-            outcome.detail.push_str(&if outcome.ok { format!(" (you have done exactly this {n} times in a row: it shows nothing new, do something different)") }
-                else { format!(" (this has failed {n} times in a row: do something different)") });
+            outcome.detail.push_str(&if outcome.ok {
+                if matches!(action, Action::WriteFile { .. }) { format!(" (you have written this file {n} times in a row: read it or run it to see what is wrong, then change it with edit_file)") }
+                else { format!(" (you have done exactly this {n} times in a row: it shows nothing new, do something different)") }
+            } else { format!(" (this has failed {n} times in a row: do something different)") });
         }
         outcome.detail.push_str(&self.notes_on_first_touch(turn, &action)?);
         turn.steps.push(StepRecord { plan_step: 0, action: action.clone(), ok: outcome.ok, detail: outcome.detail.clone() });
@@ -742,6 +765,25 @@ impl<M: Model> Engine<M> {
         Ok(())
     }
 
+    /// A new file in a project goes into its notes at once, in the AI's own words for it, so a run
+    /// that is stopped still leaves them current (the owner, 2026-09-25). A project with no notes
+    /// yet is left to write its own.
+    fn note_new_file(&self, turn: &Job, action: &Action, thought: &str) -> Result<(), EngineError> {
+        let Action::WriteFile { path, .. } = action else { return Ok(()) };
+        let file = Path::new(&turn.folder).join(path);
+        if file.file_name().is_some_and(|f| f == "BLUEPRINT.md") { return Ok(()) }
+        let Some(p) = self.project_of(&file)? else { return Ok(()) };
+        let bp = Path::new(&p.folder).join("BLUEPRINT.md");
+        let Ok(mut notes) = std::fs::read_to_string(&bp) else { return Ok(()) };
+        if !notes.is_empty() && !notes.ends_with('\n') { notes.push('\n'); }
+        if !notes.lines().any(|l| l.trim() == "## Files") { notes.push_str("\n## Files\n"); }
+        let rel = file.strip_prefix(&p.folder).unwrap_or(&file).display().to_string();
+        let why = thought.trim();
+        notes.push_str(&format!("- {rel}{}\n", if why.is_empty() { String::new() } else { format!(": {why}") }));
+        if let Err(e) = std::fs::write(&bp, notes) { eprintln!("engine: the new file was not noted in {} ({e})", bp.display()); }
+        Ok(())
+    }
+
     /// Every project (`core::projects`).
     fn projects(&self) -> Result<Vec<ProjectRow>, EngineError> {
         Ok(crate::projects::list(&self.store, &self.default_root)?)
@@ -763,7 +805,7 @@ impl<M: Model> Engine<M> {
     /// The notes of the projects the message names, for the context block (at most two).
     fn named_notes(&self, words: &str) -> Result<String, EngineError> {
         let named: Vec<ProjectRow> = self.projects()?.into_iter().filter(|p| prompt::named_in(p, words)).take(2).collect();
-        Ok(named.iter().map(|p| format!("Notes of the project {} ({}/BLUEPRINT.md):\n{}", p.name, p.folder, Self::notes_of(p, 1500))).collect::<Vec<_>>().join("\n"))
+        Ok(named.iter().map(|p| format!("Notes of the project {} ({}/BLUEPRINT.md):\n{}\n{}", p.name, p.folder, Self::notes_of(p, 1500), files_of(&p.folder))).collect::<Vec<_>>().join("\n"))
     }
 
     /// A project's notes, the first time in a turn an action reaches into its folder.
@@ -775,8 +817,8 @@ impl<M: Model> Engine<M> {
             turn.projects_seen.push(p.name.clone());
             if self.chat_project.is_none() { self.chat_project = Some(p.folder.clone()); }
             out.push_str(&match std::fs::read_to_string(Path::new(&p.folder).join("BLUEPRINT.md")) {
-                Ok(_) => format!("\n[{} is a project; its notes, {}/BLUEPRINT.md:]\n{}", p.name, p.folder, Self::notes_of(&p, 2000)),
-                Err(_) => format!("\n[{} ({}) is a project with no BLUEPRINT.md yet: write one there — what it is, how it is built and run, where it stands.]", p.name, p.folder),
+                Ok(_) => format!("\n[{} is a project; its notes, {}/BLUEPRINT.md:]\n{}\n{}", p.name, p.folder, Self::notes_of(&p, 2000), files_of(&p.folder)),
+                Err(_) => format!("\n[{} ({}) is a project with no BLUEPRINT.md yet: write one there — what it is, how it is built and run, where it stands.]\n{}", p.name, p.folder, files_of(&p.folder)),
             });
         }
         Ok(out)
@@ -1236,6 +1278,41 @@ mod tests {
         let prompts = e.model.prompts.borrow();
         assert!(prompts[0].user.contains("rentals by the day"));
         assert!(!prompts[1].user.contains("rentals by the day"), "a greeting brings up no project");
+    }
+
+    #[test]
+    fn a_projects_files_come_with_its_notes() {
+        let (mut e, _, root) = engine_with(vec![reply("ok")], "files-listed");
+        let p = root.join("projects").join("pool-game");
+        std::fs::create_dir_all(p.join("assets")).unwrap();
+        std::fs::write(p.join("BLUEPRINT.md"), "a pool table").unwrap();
+        std::fs::write(p.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(p.join("style.css"), "body{}").unwrap();
+        e.handle("lets continue working with the pool game").unwrap();
+        let user = &e.model.prompts.borrow()[0].user;
+        assert!(user.contains("Files there: BLUEPRINT.md (12 bytes), assets/, index.html (13 bytes), style.css (6 bytes)."), "{user}");
+    }
+
+    #[test]
+    fn the_same_file_written_again_and_again_warns_at_three_and_ends_at_five() {
+        let w = |i: usize| act(Action::WriteFile { path: "style.css".into(), contents: format!("body {{ margin: {i}px }}") });
+        let (mut e, _, _) = engine_with((0..5).map(w).collect(), "rewrite");
+        let ev = events_of(&mut e, "style the page");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { text, .. } if text.contains("5 times")), "{ev:?}");
+        let rows = e.store.all_messages().unwrap();
+        assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("written this file 3 times in a row")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_new_file_in_a_project_goes_into_its_notes_at_once() {
+        let (mut e, _, root) = engine_with(vec![], "noted-at-once");
+        let p = root.join("projects").join("pool-game");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("BLUEPRINT.md"), "# Pool game\n").unwrap();
+        let write = |f: &str, why: &str| Move::Act { thought: why.into(), action: Action::WriteFile { path: p.join(f).display().to_string(), contents: "x".into() } };
+        e.model = crate::model::FakeModel::new(vec![write("game.js", "The rules and the shots."), write("game.js", "Fix the shot."), write("style.css", " "), reply("done"), reply("done")]);
+        e.handle("make the pool game").unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("BLUEPRINT.md")).unwrap(), "# Pool game\n\n## Files\n- game.js: The rules and the shots.\n- style.css\n");
     }
 
     #[test]
