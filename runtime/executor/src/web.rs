@@ -63,9 +63,18 @@ pub fn text_of(html: &str) -> (String, String) {
     (title, tidy(&out))
 }
 
-/// One attribute's value from a tag, quotes or none.
+/// One attribute's value from a tag, quotes or none. The match must sit on an attribute-name
+/// boundary — the byte before `name=` is ASCII whitespace (or the match is at the very start) —
+/// so `data-href=` is never read as `href=`, nor a `href=` sitting inside another value.
 fn attr(tag: &str, name: &str) -> Option<String> {
-    let at = tag.to_ascii_lowercase().find(&format!("{name}="))? + name.len() + 1;
+    let lower = tag.to_ascii_lowercase();
+    let pat = format!("{name}=");
+    let mut from = 0;
+    let at = loop {
+        let idx = from + lower[from..].find(&pat)?;
+        if idx == 0 || lower.as_bytes()[idx - 1].is_ascii_whitespace() { break idx + pat.len(); }
+        from = idx + 1;
+    };
     let v = &tag[at..];
     let (q, body) = match v.chars().next()? { c @ ('"' | '\'') => (c, &v[1..]), _ => (' ', v) };
     let end = body.find(|c: char| c == q || (q == ' ' && (c == '>' || c.is_whitespace()))).unwrap_or(body.len());
@@ -168,6 +177,12 @@ flap <b>hard</b>.</p><!-- hidden --><p>See <a href="https://example.org/more">mo
         assert!(text.contains("more birds <https://example.org/more>"), "{text}");
         assert!(text.contains("<here> now"), "{text}");
         assert!(!text.contains("color:red") && !text.contains("var x") && !text.contains("hidden"), "{text}");
+    }
+
+    #[test]
+    fn an_earlier_attribute_ending_in_href_is_not_mistaken_for_href() {
+        let (_, text) = text_of(r#"<a data-href="/track" href="https://real.example/">x</a>"#);
+        assert_eq!(text, "x <https://real.example/>");
     }
 
     #[test]
