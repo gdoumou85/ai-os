@@ -51,6 +51,18 @@ pub fn value() -> serde_json::Value {
     serde_json::from_str(MOVE_SCHEMA).expect("MOVE_SCHEMA is valid JSON")
 }
 
+/// The actions that need the model to see the screen (one-loop design §2).
+pub const SCREEN_KINDS: [&str; 5] = ["screen_look", "screen_click", "screen_type", "scroll", "drag"];
+
+/// The schema with the screen actions taken out, for a model that cannot see.
+pub fn without_screen(mut schema: serde_json::Value) -> serde_json::Value {
+    if let Some(a) = schema["$defs"]["action"]["oneOf"].as_array() {
+        let kept: Vec<serde_json::Value> = a.iter().filter(|o| !o["properties"]["kind"]["enum"][0].as_str().is_some_and(|k| SCREEN_KINDS.contains(&k))).cloned().collect();
+        schema["$defs"]["action"]["oneOf"] = serde_json::Value::Array(kept);
+    }
+    schema
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

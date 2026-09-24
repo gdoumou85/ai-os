@@ -73,6 +73,9 @@ impl<M: Model> Model for Pooled<M> {
     }
 
     fn context_tokens(&self) -> usize { self.local.context_tokens() }
+
+    /// A cloud account may not see, so with the Cloud switch on the screen is not offered.
+    fn sees(&self) -> bool { !self.dir.join(SWITCH).exists() && self.local.sees() }
 }
 
 #[cfg(test)]
@@ -86,7 +89,7 @@ mod tests {
         json_response("200 OK", &serde_json::json!({ "message": { "content": content } }).to_string())
     }
     fn local() -> FakeModel { FakeModel::new(vec![Move::Reply { text: "local".into(), remember: None }]) }
-    fn prompt() -> Prompt { Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None } }
+    fn prompt() -> Prompt { Prompt { system: "s".into(), user: "u".into(), allowed: vec![], image: None, ..Default::default() } }
     fn text(m: Move) -> String { match m { Move::Reply { text, .. } => text, m => panic!("{m:?}") } }
 
     #[test]

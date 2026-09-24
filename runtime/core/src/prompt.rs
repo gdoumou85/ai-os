@@ -52,7 +52,7 @@ pub fn front_door(instructions: &[String], projects: &[ProjectRow], notebooks: &
          Asked to forget, or to wipe what you remember, reply that the Clear button at the top does it: you cannot, and it is no job.\n\nUser says: {}",
         join_instructions(instructions), projects_txt, notebooks_txt, recent_txt, message
     );
-    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"], image: None }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["reply", "start", "housekeep"], image: None, ..Default::default() }
 }
 
 /// The moves legal right now, by job state and mode (decision 13): sent as `Prompt::allowed` so
@@ -173,7 +173,7 @@ pub fn job_turn(instructions: &[String], job: &Job, blueprint: Option<&str>, las
         "Machine: Ubuntu Linux (python3, no `python`; root through sudo; pip packages go into the working directory's .venv — `python3 -m venv .venv`, then .venv/bin/pip — and run from there: .venv/bin/python, .venv/bin/django-admin).\nStanding instructions:\n{}\n\n{}\nGoal: {}\n{}Mode: {}\nWhat you told the user you understood: {}\n\nUser's answers:\n{}\n\nPlan:\n{}{}{}{}\n\nSteps so far:\n{}{}\n\n{}",
         join_instructions(instructions), header, job.goal, verbatim, mode, job.understood, answers, plan, bp_block, last, tips, summarise_steps(job), note, hint
     );
-    Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job), image: None }
+    Prompt { system: SYSTEM.into(), user, allowed: allowed_moves(job), image: None, ..Default::default() }
 }
 
 /// Every step of the job, numbered as the learning turn cites them: the last 80 in full, compact.
@@ -205,7 +205,7 @@ pub fn learning_turn(job: &Job, passed: bool) -> Prompt {
         if passed { "passed its check" } else { "did not finish" },
         if job.housekeeping { "housekeeping" } else { &job.project }, job.goal, job.request, learn_steps(job), tips,
     );
-    Prompt { system: SYSTEM.into(), user, allowed: vec!["learn"], image: None }
+    Prompt { system: SYSTEM.into(), user, allowed: vec!["learn"], image: None, ..Default::default() }
 }
 
 #[cfg(test)]
