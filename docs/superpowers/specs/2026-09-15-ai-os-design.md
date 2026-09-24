@@ -554,3 +554,7 @@ Two things the owner hit on his first full-access run.
   web_read, web_search, key, scroll, drag, start_program, program_output, stop_program, wait.
   Words sent mid-work join the turn. The engine holds only Stop, 100 actions, the same failure
   3/5 times, and the notes reminder. (v0.10.0)
+- **2026-09-24**, no ask loop: the answer to a question used to start a turn whose pinned request
+  was the answer alone, and a 9B asked again round after round. The answer now carries the
+  request and the question ("(you asked) … (their answer) …"), and that turn cannot ask again (a
+  Clear since the question drops it). The brief: ask what the user wants, never how. (v0.10.1)
