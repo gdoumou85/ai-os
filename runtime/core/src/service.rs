@@ -190,13 +190,15 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                 match serde_json::from_str::<Request>(&line) {
                     Ok(Request::Hello(_)) => { let st = sh.mirror.lock().unwrap().clone(); sh.send_to(id, &Event::State { job: st }); }
                     Ok(Request::Say(text)) => {
+                        // Stop: arm the flag before the echo goes out — a client waits on that
+                        // echo to know the word landed, and a model gated on it must never answer
+                        // ahead of a flag the echo promised was already set (2026-09-24).
+                        if is_stop(&text) { stop.store(true, Ordering::SeqCst); }
                         sh.broadcast(&Event::You { text: text.clone() });
-                        // Stop: arm the flag (lands between steps if a job is running) AND queue
-                        // it (a stop typed before the engine picked the request up must not sit
-                        // behind the whole job; an idle engine answers it as today). The
-                        // engine thread clears a flag nothing consumed.
+                        // Queue the word too (a stop typed before the engine picked the request up
+                        // must not sit behind the whole job; an idle engine answers it as today).
+                        // The engine thread clears a flag nothing consumed.
                         if is_stop(&text) {
-                            stop.store(true, Ordering::SeqCst);
                             if tx.send(Command::Say(text)).is_err() { break; }
                             continue;
                         }
