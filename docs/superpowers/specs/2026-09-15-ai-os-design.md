@@ -547,3 +547,10 @@ Two things the owner hit on his first full-access run.
   share a telling word with the request (a stop list drops "delete", "project" and the like), at
   most five; a project job has its blueprint instead. Clear leaves the journal. A housekeeping
   job asked for a project too does the rest and says the project is to be asked for. (v0.9.5)
+- **2026-09-24**, one loop (spec `2026-09-23-one-loop-design.md`): the front door, the job types,
+  ask-then-plan, the blueprint gate, the done check and the rejection budget are gone. A message
+  starts a turn; the model makes one move at a time (reply, ask, todo, act, remember) over the
+  chat since Clear, with a context block that pins the request and the to-do list. New hands:
+  web_read, web_search, key, scroll, drag, start_program, program_output, stop_program, wait.
+  Words sent mid-work join the turn. The engine holds only Stop, 100 actions, the same failure
+  3/5 times, and the notes reminder. (v0.10.0)
