@@ -98,13 +98,16 @@ pub const OLLAMA: Provider = Provider { name: "Ollama", kind: "ollama", url: "ht
 pub const OPENROUTER: Provider = Provider { name: "OpenRouter", kind: "openai", url: "https://openrouter.ai/api" };
 
 /// The models worth offering from a provider's list. NVIDIA lists everything it hosts —
-/// embedders, safety filters, picture readers — and only some of those can hold a conversation.
+/// embedders, safety filters, rerankers — and only some of those can hold a conversation. A model
+/// that can also see is still a model to chat with.
 /// OpenRouter lists hundreds, most of them paid: only the free ones (`…:free`) are offered.
 /// ponytail: a name filter; NVIDIA's own model types if its list ever says them.
 pub fn chat_models(provider: Provider, names: Vec<String>) -> Vec<String> {
     if provider == OPENROUTER { return names.into_iter().filter(|n| n.ends_with(":free")).collect(); }
     if provider != NVIDIA { return names; }
-    const NOT_CHAT: [&str; 15] = ["embed", "rerank", "retriev", "guard", "safety", "reward", "vision", "-vl", "vlm", "clip", "parse", "detect", "translat", "pii", "content-"];
+    // A model that can see still holds a conversation (the owner, 2026-09-24: picture-reading
+    // matters more than the finder's old blanket "no vision models" guess).
+    const NOT_CHAT: [&str; 12] = ["embed", "rerank", "retriev", "guard", "safety", "reward", "clip", "parse", "detect", "translat", "pii", "content-"];
     const CHAT: [&str; 9] = ["instruct", "chat", "-it", "deepseek", "kimi", "qwen3", "gpt-oss", "nemotron", "coder"];
     names.into_iter().filter(|n| {
         let l = n.to_lowercase();
@@ -137,7 +140,8 @@ mod tests {
             "deepseek-ai/deepseek-v3.1", "microsoft/phi-3.5-vision-instruct", "qwen/qwen3-coder-480b-a35b-instruct", "nvidia/nv-rerankqa-mistral-4b-v3",
             "google/gemma-2-27b-it", "openai/gpt-oss-120b"].map(String::from).to_vec();
         assert_eq!(chat_models(NVIDIA, names.clone()), vec!["meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-v3.1",
-            "qwen/qwen3-coder-480b-a35b-instruct", "google/gemma-2-27b-it", "openai/gpt-oss-120b"]);
+            "microsoft/phi-3.5-vision-instruct", "qwen/qwen3-coder-480b-a35b-instruct", "google/gemma-2-27b-it", "openai/gpt-oss-120b"],
+            "a model that can see still holds a conversation");
         assert_eq!(chat_models(OLLAMA, names.clone()), names, "Ollama's list is already its chat models");
         let or = ["nvidia/nemotron-nano-9b-v2:free", "openai/gpt-4o", "qwen/qwen3-coder:free"].map(String::from).to_vec();
         assert_eq!(chat_models(OPENROUTER, or), vec!["nvidia/nemotron-nano-9b-v2:free", "qwen/qwen3-coder:free"], "free ones only");

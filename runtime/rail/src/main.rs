@@ -327,7 +327,8 @@ fn models_card(found: &str, env: &str, key: Option<String>, column: &gtk::Box, t
     b.append(&row);
     let hint = gtk::Label::new(Some("Move the bar to the context length you loaded the model with, \
 then press Set. LM Studio shows it beside the model; a cloud model holds far more. Leave it at 8k if \
-you are not sure -- set higher than the model really holds and its answers start coming back cut off."));
+you are not sure -- set higher than the model really holds and its answers start coming back cut off. \
+A full agent wants 16k or more when this PC can hold it: at 8k it remembers only the last few steps of the chat."));
     hint.set_xalign(0.0); hint.set_wrap(true); hint.add_css_class("dim");
     b.append(&hint);
     let (st, env_now, key_now) = (status.clone(), env.to_string(), key.clone());
@@ -379,15 +380,20 @@ fn render(card: &Card, say: &Sender<Request>, entry: &gtk::Entry) -> gtk::Widget
     match &card.kind {
         CardKind::You => { b.add_css_class("you"); b.append(&text(&card.text)); }
         CardKind::Said => { b.add_css_class("said"); b.append(&text(&card.text)); }
-        CardKind::Building { name, understood, steps, collapsed } => {
+        CardKind::Building { name, understood, steps, actions, collapsed } => {
             b.add_css_class("building");
-            b.append(&title(&format!("Building: {name}")));
+            b.append(&title(&if name.is_empty() { "Working".to_string() } else { format!("Building: {name}") }));
             if !collapsed {
-                b.append(&text(understood));
+                if !understood.is_empty() { b.append(&text(understood)); }
                 for s in steps {
                     let mark = if !s.done { "☐" } else if s.ok { "✓" } else { "✗" };
                     b.append(&text(&format!("{mark} {}", s.text)));
                     if let Some(d) = &s.detail { let l = text(d); l.add_css_class("dim"); b.append(&l); }
+                }
+                // The newest twelve actions; a long turn would push the chat off the screen.
+                if actions.len() > 12 { let l = text(&format!("… {} earlier", actions.len() - 12)); l.add_css_class("dim"); b.append(&l); }
+                for a in actions.iter().skip(actions.len().saturating_sub(12)) {
+                    let l = text(&format!("{} {}", if a.ok { "✓" } else { "✗" }, a.text)); l.add_css_class("dim"); b.append(&l);
                 }
             }
         }
