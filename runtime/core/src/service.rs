@@ -122,7 +122,15 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
     // before they arrive: a client that could connect first would have nothing to raise or fill,
     // and its word would be lost without a trace.
     let (ready, engine_ready) = channel::<(Arc<AtomicBool>, crate::engine::Inbox)>();
+    // Stop words sent but not yet taken by the engine thread. The flag belongs to the queue, not to
+    // the moment: a "stop" typed behind a request that has not started must still stop it, and one
+    // with nothing queued before it must not stop the next job. The engine thread sets the flag
+    // from this count as it takes each command; a stop raises it and queues its word under the same
+    // lock, so the two never interleave. Clearing it blindly after each command instead lost a stop
+    // typed right after a request (CI, 2026-09-24: the engine cleared it after `resume`).
+    let stops = Arc::new(Mutex::new(0usize));
     let sh = shared.clone();
+    let engine_stops = stops.clone();
     std::thread::spawn(move || {
         // The engine thread IS the service. If it ever ends — a panic in the store, a poisoned
         // mutex, the command channel closing — the whole process must end with it: an accept loop
@@ -155,22 +163,21 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                 Ok(_) => break,
             }
         }
-        engine.stop_flag().swap(false, Ordering::SeqCst);
         for cmd in rx {
+            {
+                let mut waiting = engine_stops.lock().unwrap();
+                if matches!(&cmd, Command::Say(t) if is_stop(t)) { *waiting -= 1; }
+                engine.stop_flag().store(*waiting > 0, Ordering::SeqCst);
+            }
             let text = match cmd {
                 Command::Say(text) => text,
                 // `Cleared` already went out from the client thread.
                 Command::Clear => {
                     if let Err(e) = engine.clear() { sh.broadcast(&Event::Error { text: format!("could not clear the chat: {e}") }); }
-                    engine.stop_flag().swap(false, Ordering::SeqCst);
                     continue;
                 }
             };
             let r = engine.handle_events(&text);
-            // Silent: the queued word is what answers the user (the engine says "Nothing is
-            // running now." itself, in every state). This only makes sure a flag nothing
-            // consumed cannot survive into the next job.
-            engine.stop_flag().swap(false, Ordering::SeqCst);
             if let Err(e) = r { sh.broadcast(&Event::Said { text: format!("(something went wrong: {e})") }); }
         }
         }));
@@ -191,6 +198,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         let sh = shared.clone();
         let tx = tx.clone();
         let stop = stop.clone();
+        let stops = stops.clone();
         let inbox = inbox.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stream).lines() {
@@ -217,9 +225,12 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                     Ok(Request::Say(text)) => {
                         // Stop: the flag lands between actions; queued too, for a turn not yet begun.
                         if is_stop(&text) {
+                            let mut waiting = stops.lock().unwrap();
+                            *waiting += 1;
                             stop.store(true, Ordering::SeqCst);
                             sh.broadcast(&Event::You { text: text.clone() });
                             if tx.send(Command::Say(text)).is_err() { break; }
+                            drop(waiting);
                             continue;
                         }
                         // Decide before the echo goes out (as with the stop flag above): a test —

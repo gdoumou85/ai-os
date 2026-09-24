@@ -231,6 +231,33 @@ fn stop_typed_right_after_a_request_still_stops_it() {
 }
 
 #[test]
+fn stop_typed_behind_a_queued_request_during_learning_still_stops_it() {
+    // The last job is learning (minutes on a real model), so a new request queues and the stop
+    // behind it finds no turn to land in. The engine used to clear the flag once that job ended,
+    // and the queued request then ran to the end past its stop.
+    let dir = temp("learn-stop");
+    let (gtx, grx) = std::sync::mpsc::channel::<()>();
+    let mut moves = job();
+    moves.extend([
+        Move::Act { thought: String::new(), action: write("b.txt") },
+        Move::Reply { thought: String::new(), text: "second".into(), outcome: aios_core::moves::Ending::Done },
+    ]);
+    let sock = start(&dir, moves, Arc::new(Mutex::new(Some(grx))));
+    let mut a = connect(&sock);
+    a.hello().unwrap(); a.next_event();
+    a.say("make p").unwrap();
+    gtx.send(()).unwrap(); gtx.send(()).unwrap(); // Act, Reply
+    until(&mut a, |e| matches!(e, Event::Done { .. }));
+    // The engine is now in the learning turn, at the gate.
+    a.say("make q").unwrap();
+    a.say("stop").unwrap();
+    until(&mut a, |e| matches!(e, Event::You { text } if text == "stop"));
+    for _ in 0..3 { gtx.send(()).unwrap(); } // the learning turn, then make q's Act and Reply
+    let got = until(&mut a, |e| matches!(e, Event::Stopped { .. } | Event::Done { .. } | Event::Said { .. }));
+    assert!(matches!(got.last().unwrap(), Event::Stopped { .. }), "{got:?}");
+}
+
+#[test]
 fn bind_refuses_a_live_socket_and_removes_a_stale_file() {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     // Something answers on it: a second engine on one database is never what the user meant.
