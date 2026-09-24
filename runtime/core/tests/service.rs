@@ -29,13 +29,18 @@ impl aios_core::model::Model for GatedModel {
 fn start(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>) -> PathBuf {
     let sock = dir.join("ai-os.sock");
     let listener = service::bind(&sock).unwrap();
-    let root = dir.clone();
+    let dir = dir.clone();
     std::thread::spawn(move || {
         service::run(listener, Box::new(move |sink| {
             let rec = Recorder::default();
-            std::fs::create_dir_all(root.join("hk")).unwrap();
-            std::fs::create_dir_all(root.join("home")).unwrap();
-            Engine::new(Store::open_in_memory().unwrap(), GatedModel { inner: Mutex::new(FakeModel::new(moves)), gate }, root.clone(), None, scripted_workers(&rec), root.join("hk")).with_home(root.join("home")).with_sink(sink)
+            // The projects root is its own folder, apart from home: home living under it would
+            // make every plain write there a "project change" the engine expects notes for, and
+            // a script with no move to spare for the reminder hangs the whole test (2026-09-24).
+            let projects = dir.join("projects");
+            std::fs::create_dir_all(&projects).unwrap();
+            std::fs::create_dir_all(dir.join("hk")).unwrap();
+            std::fs::create_dir_all(dir.join("home")).unwrap();
+            Engine::new(Store::open_in_memory().unwrap(), GatedModel { inner: Mutex::new(FakeModel::new(moves)), gate }, projects, None, scripted_workers(&rec), dir.join("hk")).with_home(dir.join("home")).with_sink(sink)
         }))
     });
     let t = Instant::now();
@@ -43,7 +48,10 @@ fn start(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc
     sock
 }
 
+/// A mismatch fails in 30s instead of hanging CI: a read that waits longer than that closes the
+/// connection, so `next_event` gives `None` and this panics with whatever it got.
 fn until(c: &mut Client, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
+    let _ = c.set_read_timeout(Some(Duration::from_secs(30)));
     let mut got = vec![];
     while let Some(e) = c.next_event() { let stop = pred(&e); got.push(e); if stop { return got; } }
     panic!("connection closed before the event: {got:?}");
