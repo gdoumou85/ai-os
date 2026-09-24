@@ -5,7 +5,7 @@ use aios_core::moves::Move;
 use aios_core::service;
 use aios_core::store::Store;
 use aios_core::testing::{scripted_workers, Recorder};
-use aios_proto::{Client, Event};
+use aios_proto::{Client, Event, Request};
 use executor::action::Action;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -53,6 +53,11 @@ fn start(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc
 /// `on_disk`: the engine keeps its chat in the shared test database, as the real service does, so
 /// a test can read what a Clear left behind.
 fn start_with(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>, on_disk: bool) -> PathBuf {
+    start_model(dir, GatedModel { inner: Mutex::new(FakeModel::new(moves)), gate }, on_disk)
+}
+
+/// `start_with` for a test's own model.
+fn start_model<M: aios_core::model::Model + Send + 'static>(dir: &PathBuf, model: M, on_disk: bool) -> PathBuf {
     let db = on_disk.then(|| test_db().to_str().unwrap().to_string());
     let sock = dir.join("ai-os.sock");
     let listener = service::bind(&sock).unwrap();
@@ -68,7 +73,7 @@ fn start_with(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync:
             std::fs::create_dir_all(dir.join("hk")).unwrap();
             std::fs::create_dir_all(dir.join("home")).unwrap();
             let store = match &db { Some(p) => Store::open(p).unwrap(), None => Store::open_in_memory().unwrap() };
-            Engine::new(store, GatedModel { inner: Mutex::new(FakeModel::new(moves)), gate }, projects, None, scripted_workers(&rec), dir.join("hk")).with_home(dir.join("home")).with_sink(sink)
+            Engine::new(store, model, projects, None, scripted_workers(&rec), dir.join("hk")).with_home(dir.join("home")).with_sink(sink)
         }))
     });
     let t = Instant::now();
@@ -390,4 +395,104 @@ fn a_message_while_only_a_chat_reply_is_in_progress_is_queued_not_busy() {
     gtx.send(()).unwrap(); gtx.send(()).unwrap();
     let got = until(&mut a, |e| matches!(e, Event::Said { text } if text == "two"));
     assert!(!got.iter().any(|e| matches!(e, Event::Busy { text, .. } if text.contains("Say stop"))), "{got:?}");
+}
+
+/// A watcher in the shared test database: a timer an hour apart, so the scheduler never fires it
+/// during a test. Each test uses its own names.
+fn add_watcher(name: &str, paused: bool) {
+    let s = Store::open(test_db().to_str().unwrap()).unwrap();
+    let w = aios_core::watchers::build(name, "tell the user the time", false, "you", "every 60 minutes", vec![]).unwrap();
+    aios_core::watchers::put(s.conn(), &w, aios_core::store::now_ms()).unwrap();
+    if paused { aios_core::watchers::set_paused(s.conn(), name, true).unwrap(); }
+}
+
+fn reply(t: &str) -> Move { Move::Reply { thought: String::new(), text: t.into(), outcome: aios_core::moves::Ending::Done } }
+
+/// Answers with the last line it is given, once the gate lets it: whose words a turn heard.
+struct Echo { gate: std::sync::mpsc::Receiver<()> }
+impl aios_core::model::Model for Echo {
+    fn next_move(&self, p: &aios_core::model::Prompt) -> Result<Move, aios_core::model::ModelError> {
+        let _ = self.gate.recv_timeout(Duration::from_secs(5));
+        Ok(reply(p.user.lines().last().unwrap_or_default()))
+    }
+}
+
+#[test]
+fn an_alert_is_taken_for_a_known_watcher_and_refused_otherwise() {
+    let _turn = db_turn();
+    let dir = temp("alert");
+    let sock = start_with(&dir, vec![reply("It is noon.")], Arc::new(Mutex::new(None)), true);
+    add_watcher("clock-a", false);
+    add_watcher("clock-asleep", true);
+    let (mut r, mut w) = connect(&sock).split();
+    w.request(&Request::Alert { watcher: "nobody".into(), text: "x".into() }).unwrap();
+    let got = until_r(&mut r, |e| matches!(e, Event::Error { .. }));
+    assert!(matches!(got.last(), Some(Event::Error { text }) if text.contains("no watcher")), "{got:?}");
+    w.request(&Request::Alert { watcher: "clock-asleep".into(), text: "x".into() }).unwrap();
+    let got = until_r(&mut r, |e| matches!(e, Event::Error { .. }));
+    assert!(matches!(got.last(), Some(Event::Error { text }) if text.contains("paused")), "{got:?}");
+    w.request(&Request::Alert { watcher: "clock-a".into(), text: "it is 12:00".into() }).unwrap();
+    let got = until_r(&mut r, |e| matches!(e, Event::Done { .. }));
+    assert!(got.iter().any(|e| matches!(e, Event::Said { text } if text.starts_with("taken"))), "{got:?}");
+    assert!(got.iter().any(|e| matches!(e, Event::Alert { watcher, text, .. } if watcher == "clock-a" && text == "it is 12:00")), "{got:?}");
+    assert!(matches!(got.last(), Some(Event::Done { text, .. }) if text == "It is noon."), "{got:?}");
+}
+
+#[test]
+fn an_alert_waits_for_the_turn_in_hand() {
+    let _turn = db_turn();
+    let dir = temp("alert-waits");
+    let (gtx, grx) = std::sync::mpsc::channel::<()>();
+    let sock = start_with(&dir, vec![reply("made it"), reply("It is noon.")], Arc::new(Mutex::new(Some(grx))), true);
+    add_watcher("clock-w", false);
+    let (mut r, mut w) = connect(&sock).split();
+    w.say("make p").unwrap();
+    until_r(&mut r, |e| matches!(e, Event::You { .. }));
+    w.request(&Request::Alert { watcher: "clock-w".into(), text: "it is 12:00".into() }).unwrap();
+    until_r(&mut r, |e| matches!(e, Event::Said { text } if text.starts_with("taken")));
+    gtx.send(()).unwrap(); gtx.send(()).unwrap();
+    let got = until_r(&mut r, |e| matches!(e, Event::Done { .. }));
+    let said = got.iter().position(|e| matches!(e, Event::Said { text } if text == "made it")).unwrap_or_else(|| panic!("{got:?}"));
+    let alert = got.iter().position(|e| matches!(e, Event::Alert { .. })).unwrap_or_else(|| panic!("{got:?}"));
+    assert!(said < alert, "the owner's turn first: {got:?}");
+}
+
+#[test]
+fn the_owners_words_during_an_alert_wait_for_their_own_chat() {
+    let _turn = db_turn();
+    let dir = temp("alert-words");
+    let (gtx, grx) = std::sync::mpsc::channel::<()>();
+    let sock = start_model(&dir, Echo { gate: grx }, true);
+    add_watcher("clock-e", false);
+    let (mut r, mut w) = connect(&sock).split();
+    w.request(&Request::Alert { watcher: "clock-e".into(), text: "it is 12:00".into() }).unwrap();
+    until_r(&mut r, |e| matches!(e, Event::Alert { .. }));
+    w.say("hello").unwrap();
+    until_r(&mut r, |e| matches!(e, Event::You { .. }));
+    gtx.send(()).unwrap(); gtx.send(()).unwrap();
+    let got = until_r(&mut r, |e| matches!(e, Event::Said { text } if text == "hello"));
+    let done = got.iter().find_map(|e| match e { Event::Done { text, .. } => Some(text.clone()), _ => None }).unwrap_or_else(|| panic!("the alert's card closed first: {got:?}"));
+    assert!(done.contains("unwatch it if its job is done") && !done.contains("hello"), "{done}");
+}
+
+#[test]
+fn pause_and_delete_from_one_client_reach_every_client() {
+    let _turn = db_turn();
+    let dir = temp("watch-page");
+    let sock = start_with(&dir, vec![], Arc::new(Mutex::new(None)), true);
+    add_watcher("clock-p", false);
+    let is_list = |e: &Event| matches!(e, Event::Watchers { .. });
+    let find = |got: Vec<Event>| match got.last() { Some(Event::Watchers { watchers }) => watchers.iter().find(|w| w.name == "clock-p").cloned(), _ => unreachable!() };
+    let mut b = connect(&sock);
+    b.hello().unwrap();
+    until(&mut b, |e| matches!(e, Event::State { .. }));
+    let (mut ar, mut aw) = connect(&sock).split();
+    aw.request(&Request::Watchers {}).unwrap();
+    assert!(find(until_r(&mut ar, is_list)).is_some_and(|w| !w.paused));
+    aw.request(&Request::WatcherPause { name: "clock-p".into(), paused: true }).unwrap();
+    assert!(find(until_r(&mut ar, is_list)).is_some_and(|w| w.paused));
+    assert!(find(until(&mut b, is_list)).is_some_and(|w| w.paused));
+    aw.request(&Request::WatcherDelete { name: "clock-p".into() }).unwrap();
+    assert!(find(until_r(&mut ar, is_list)).is_none());
+    assert!(find(until(&mut b, is_list)).is_none());
 }

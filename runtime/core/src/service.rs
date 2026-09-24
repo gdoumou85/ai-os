@@ -1,19 +1,21 @@
 //! The engine as a service (1d design §3): one engine thread, one thread per client, JSON lines.
-use crate::engine::{is_discard_learned, is_keep_learned, is_stop, Engine};
+use crate::engine::{is_discard_learned, is_keep_learned, is_stop, Alerts, Engine};
 use crate::model::Model;
+use crate::watchers::{Alert, Fire, Fired};
 use aios_proto::{Event, JobState, Request, StepView, Waiting};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 /// `Clear`: pressed while a turn worked. The screen was cleared at once; this waits behind that
 /// turn so its last rows are written first and then forgotten with the rest (final review,
-/// 2026-09-24).
-enum Command { Say(String), Clear }
+/// 2026-09-24). `Wake`: an alert was queued; the engine thread looks at the queue when nothing of
+/// the owner's waits.
+enum Command { Say(String), Clear, Wake }
 
 /// Everything the client threads need without touching the engine.
 struct Shared {
@@ -109,6 +111,32 @@ fn projects_event(default: &Path) -> Event {
     }
 }
 
+/// The Watchers page's list, read on the caller's thread.
+fn watchers_event() -> Event {
+    match crate::store::Store::open(&db_path()).and_then(|s| crate::watchers::views(s.conn())) {
+        Ok(watchers) => Event::Watchers { watchers },
+        Err(e) => Event::Error { text: format!("could not read the watchers: {e}") },
+    }
+}
+
+/// An alert for the engine thread (watchers design §2): queued (an urgent one first, and it parks
+/// the work in hand), the engine woken, a pop-up on the desktop even with the rail closed, and
+/// every Watchers page current.
+fn raise(sh: &Shared, alerts: &Alerts, yld: &AtomicBool, tx: &Sender<Command>, a: Alert) {
+    let (title, body) = (a.watcher.clone(), a.text.clone());
+    // Its own thread waits for it, so no finished pop-up is left behind as a zombie.
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("notify-send").args(["-a", "AI OS", "-h", "string:desktop-entry:org.aios.Rail", &title, &body])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    });
+    let urgent = a.urgent;
+    crate::watchers::enqueue(&mut alerts.lock().unwrap(), a);
+    // After the queue, never before: the turn that sees the flag must find the alert.
+    if urgent { yld.store(true, Ordering::SeqCst); }
+    let _ = tx.send(Command::Wake);
+    sh.broadcast(&watchers_event());
+}
+
 /// `$AI_OS_SOCKET_DIR/ai-os.sock` when set (tests, a second engine on purpose), else
 /// `$XDG_RUNTIME_DIR/ai-os.sock` (a systemd user service and every shell in the distro have
 /// it), else `/run/user/<uid>/ai-os.sock`.
@@ -130,7 +158,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
     // The engine's stop flag, inbox and the projects' default root, handed back once the engine
     // exists. Nothing is accepted before they arrive: a client that could connect first would have
     // nothing to raise or fill, and its word would be lost without a trace.
-    let (ready, engine_ready) = channel::<(Arc<AtomicBool>, crate::engine::Inbox, PathBuf)>();
+    let (ready, engine_ready) = channel::<(Arc<AtomicBool>, crate::engine::Inbox, PathBuf, Alerts, Arc<AtomicBool>)>();
     // Stop words sent but not yet taken by the engine thread. The flag belongs to the queue, not to
     // the moment: a "stop" typed behind a request that has not started must still stop it, and one
     // with nothing queued before it must not stop the next job. The engine thread sets the flag
@@ -158,7 +186,7 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         }
         // Everything a client thread reads is now set: clients may arrive, and they watch the
         // resumed job go by like any other.
-        let _ = ready.send((engine.stop_flag(), engine.inbox(), engine.default_root()));
+        let _ = ready.send((engine.stop_flag(), engine.inbox(), engine.default_root(), engine.alerts(), engine.yield_flag()));
         // At boot the engine starts before the network does (the owner's VM, 2026-09-19: "Network
         // is unreachable", and the open job left where it was). A resume the model runner could not
         // answer is tried again for a minute; anything else is reported once.
@@ -172,16 +200,34 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                 Ok(_) => break,
             }
         }
-        for cmd in rx {
+        let queue = engine.alerts();
+        loop {
+            // The owner's words first; an alert when none of theirs wait (watchers design §2).
+            let cmd = match rx.try_recv() {
+                Ok(c) => Some(c),
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => None,
+            };
+            let alert = if cmd.is_none() { queue.lock().unwrap().pop_front() } else { None };
+            let cmd = match cmd {
+                Some(c) => Some(c),
+                None if alert.is_some() => None,
+                None => match rx.recv() { Ok(c) => Some(c), Err(_) => break },
+            };
             {
                 let mut waiting = engine_stops.lock().unwrap();
-                if matches!(&cmd, Command::Say(t) if is_stop(t)) { *waiting -= 1; }
+                if matches!(&cmd, Some(Command::Say(t)) if is_stop(t)) { *waiting -= 1; }
                 engine.stop_flag().store(*waiting > 0, Ordering::SeqCst);
             }
+            if let Some(a) = alert {
+                if let Err(e) = engine.handle_alert(&a) { sh.broadcast(&Event::Said { text: format!("(something went wrong with the alert from {}: {e})", a.watcher) }); }
+                continue;
+            }
             let text = match cmd {
-                Command::Say(text) => text,
+                Some(Command::Say(text)) => text,
+                Some(Command::Wake) | None => continue,
                 // `Cleared` already went out from the client thread.
-                Command::Clear => {
+                Some(Command::Clear) => {
                     if let Err(e) = engine.clear() { sh.broadcast(&Event::Error { text: format!("could not clear the chat: {e}") }); }
                     continue;
                 }
@@ -193,7 +239,32 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         eprintln!("engine: the engine thread {} — exiting so the service is restarted", if ended.is_err() { "panicked" } else { "ended" });
         std::process::exit(1);
     });
-    let (stop, inbox, root) = engine_ready.recv().expect("the engine thread builds the engine");
+    let (stop, inbox, root, alerts, yld) = engine_ready.recv().expect("the engine thread builds the engine");
+    // The watchers' clock (watchers design §1): every 15 s on its own connection, never on the
+    // engine thread. A check can take up to a minute; the next tick waits for it.
+    {
+        let (sh, alerts, yld, tx) = (shared.clone(), alerts.clone(), yld.clone(), tx.clone());
+        std::thread::spawn(move || {
+            let mut scheduler = crate::watchers::Scheduler::default();
+            let mut hands = crate::watchers::RealHands { home: PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into())) };
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(15));
+                let fired = crate::store::Store::open(&db_path()).and_then(|s| scheduler.tick(s.conn(), crate::store::now_ms(), &mut hands));
+                match fired {
+                    Ok(fired) => for f in fired {
+                        match f {
+                            Fired::Alert(a) => raise(&sh, &alerts, &yld, &tx, a),
+                            Fired::Paused { name, why } => {
+                                sh.broadcast(&Event::Said { text: format!("(I paused the watcher {name}: {why}. Resume it on the Watchers page.)") });
+                                sh.broadcast(&watchers_event());
+                            }
+                        }
+                    },
+                    Err(e) => eprintln!("engine: the watchers could not be read ({e})"),
+                }
+            }
+        });
+    }
     let mut next_id = 1u64;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -210,6 +281,8 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
         let stops = stops.clone();
         let inbox = inbox.clone();
         let root = root.clone();
+        let alerts = alerts.clone();
+        let yld = yld.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stream).lines() {
                 let Ok(line) = line else { break };
@@ -256,9 +329,29 @@ pub fn run<M: Model + 'static>(listener: UnixListener, make: Box<dyn FnOnce(Box<
                     Ok(Request::Skills {}) => sh.send_to(id, &skills_event(None)),
                     Ok(Request::Forget { notebook, topic }) => sh.send_to(id, &skills_event(Some((&notebook, &topic)))),
                     Ok(Request::Projects {}) => sh.send_to(id, &projects_event(&root)),
-                    // The Watchers page and `ai-os-alert` land in Task 5 (watchers design §2); for
-                    // now these requests reach the service and are accepted but do nothing.
-                    Ok(Request::Watchers {}) | Ok(Request::WatcherPause { .. }) | Ok(Request::WatcherDelete { .. }) | Ok(Request::Alert { .. }) => {}
+                    Ok(Request::Watchers {}) => sh.send_to(id, &watchers_event()),
+                    Ok(Request::WatcherPause { name, paused }) => match crate::store::Store::open(&db_path()).and_then(|s| crate::watchers::set_paused(s.conn(), &name, paused)) {
+                        Ok(_) => {
+                            // A paused live watcher's program stops; the scheduler starts it again on Resume.
+                            if paused { let _ = executor::programs::stop(&crate::watchers::program_name(&name)); }
+                            sh.broadcast(&watchers_event());
+                        }
+                        Err(e) => sh.send_to(id, &Event::Error { text: format!("could not change the watcher: {e}") }),
+                    },
+                    Ok(Request::WatcherDelete { name }) => match crate::store::Store::open(&db_path()).and_then(|s| crate::watchers::delete(s.conn(), &name)) {
+                        Ok(_) => {
+                            let _ = executor::programs::stop(&crate::watchers::program_name(&name));
+                            sh.broadcast(&watchers_event());
+                        }
+                        Err(e) => sh.send_to(id, &Event::Error { text: format!("could not delete the watcher: {e}") }),
+                    },
+                    // `ai-os-alert`: answered to it alone (no `seq`), then raised like a scheduler's alert.
+                    Ok(Request::Alert { watcher, text }) => match crate::store::Store::open(&db_path()).and_then(|s| crate::watchers::fire(s.conn(), &watcher, &text, crate::store::now_ms())) {
+                        Ok(Fire::Handled(a)) => { sh.send_to(id, &Event::Said { text: format!("taken: {watcher}") }); raise(&sh, &alerts, &yld, &tx, a); }
+                        Ok(Fire::Throttled) => sh.send_to(id, &Event::Said { text: format!("taken: {watcher} (counted: its last alert was under 2 minutes ago)") }),
+                        Ok(Fire::Refused(why)) => sh.send_to(id, &Event::Error { text: why }),
+                        Err(e) => sh.send_to(id, &Event::Error { text: format!("could not reach the watchers: {e}") }),
+                    },
                     // A turn open (the inbox exists): its inbox closes and the words in it go (the
                     // user cleared them), the flag lands between its steps as "stop" would, and the
                     // screen empties now; the engine forgets the rows once that turn has ended

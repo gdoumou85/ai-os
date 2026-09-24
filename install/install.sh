@@ -17,7 +17,7 @@ esac; done
 owner=$(id -un); uid=$(id -u); ogroup=$(id -gn)
 [ "$(uname -m)" = x86_64 ] || { echo "only x86_64 is built" >&2; exit 1; }
 . /etc/os-release; [ "${VERSION_ID:-}" = 26.04 ] || echo "warning: built and tested on Ubuntu 26.04, this is ${PRETTY_NAME:-unknown}" >&2
-for f in bin/ai-os-engine bin/ai-os-chat bin/ai-os-rail bin/ai-os-find org.aios.Rail.desktop check.sh ai-os-engine.service.in; do
+for f in bin/ai-os-engine bin/ai-os-chat bin/ai-os-rail bin/ai-os-find bin/ai-os-alert org.aios.Rail.desktop check.sh ai-os-engine.service.in; do
   [ -f "$here/$f" ] || { echo "missing next to install.sh: $f" >&2; exit 1; }
 done
 echo "== installing the AI OS for $owner (sudo will ask for your password)"
@@ -74,7 +74,7 @@ sudo mv -f /etc/sudoers.d/ai-os.tmp /etc/sudoers.d/ai-os
 sudo rm -f /etc/sudoers.d/ai-os-admin /usr/local/libexec/ai-os-admin
 
 echo "== programs"
-for b in ai-os-engine ai-os-chat ai-os-rail ai-os-find; do sudo install -m 0755 -o root -g root "$here/bin/$b" /usr/local/bin/$b; done
+for b in ai-os-engine ai-os-chat ai-os-rail ai-os-find ai-os-alert; do sudo install -m 0755 -o root -g root "$here/bin/$b" /usr/local/bin/$b; done
 # Which build this is, for check.sh and for anyone reporting a problem. Older tarballs have none.
 if [ -f "$here/VERSION" ]; then
   sudo install -d /usr/local/share/ai-os
