@@ -14,7 +14,7 @@ The AI OS is an assistant that gets things done on this computer for you. You te
 
 The AI keeps the whole chat since your last Clear, as far as it has room for — how much that is depends on the model's <b>How much it can hold</b> setting (see Model, below); when there is more to the chat than it can hold at once, the oldest of it drops away first and the newest stays. It starts a fresh chat by itself when AI OS restarts, and when you name a different project than the one you were talking about ("now the car rental site"), and says so: it works from that project's notes, so two projects never mix. What is worth keeping longer than that it writes down: in each project's notes, and in the things you told it to keep (it shows these as "Noted for the future"). Clear forgets the chat and those notes; the AI cannot forget them itself, so asking it to just points you to Clear. A fresh chat by itself keeps what you told it to keep; only Clear drops that too.
 
-<b>What the AI knows about this computer.</b> Before every answer it looks at what is installed: the programs you can open, the usual tools, and whatever it installed itself. So it uses them rather than installing them again, and you never need to tell it "Blender is already installed". When it does install something, it installs it the standard way so it shows up next time. The list is at the top of <b>Skills</b>, under <b>Installed on this computer</b>. Clear does not touch it: it is what is on the computer, not something the AI remembers.
+<b>What the AI knows about this computer.</b> Before every answer it looks at what is installed: the programs you can open, the usual tools, and whatever it installed itself. So it uses them rather than installing them again, and you never need to tell it "Blender is already installed". When it does install something, it installs it the standard way so it shows up next time. The list is at the top of the <b>Skills</b> page, under <b>Installed on this computer</b>. Clear does not touch it: it is what is on the computer, not something the AI remembers.
 
 
 <big><b>The cards</b></big>
@@ -24,7 +24,7 @@ The AI keeps the whole chat since your last Clear, as far as it has room for —
 • <b>Done</b> (green): finished. The files it changed are listed with an Open button.
 • <b>Could not finish</b> (red): what went wrong, in plain words.
 
-While the AI is working, the circle at the bottom turns and the line beside it says what it is doing right now, in a short sentence — for example <tt>installing blender</tt>. While it writes a long answer, like a whole file, the line counts the words as they come (<tt>Writing its answer… 1250 words</tt>); there is no time limit on that, as long as the words keep coming, and <b>Stop</b> cuts it off at once. After twenty seconds it also says how long that has been going, so you can tell something long from something stuck. When it finishes, it says it is thinking about what to remember; that is the last thing it does, and it can take a few minutes on a slow model.
+While the AI is working, the circle at the bottom turns and the line beside it says what it is doing right now, in a short sentence — for example <tt>installing blender</tt>. While it writes a long answer, like a whole file, the line counts the words as they come (<tt>Writing its answer… 1250 words</tt>); there is no time limit on that, as long as the words keep coming, and <b>Stop</b> cuts it off at once. After twenty seconds on one step it also says how long that step has been going; the word count already shows progress on a long answer. When it finishes, it says it is thinking about what to remember; that is the last thing it does, and it can take a few minutes on a slow model.
 
 
 <big><b>The menu on the left</b></big>
@@ -79,7 +79,7 @@ Cloud models are much stronger than what a home computer can run, and several pr
 
 <b>The Cloud switch</b> in the menu turns this on and off, and it stays the way you left it. While it is on, what you ask leaves your computer. Some free plans use what you send to train their models.
 
-<b>To add an account:</b> press <b>Model</b>, then <b>Cloud accounts…</b>, paste the key, and press the provider's button. Pick a model from the list it shows, and Cloud turns on. The same card lists your accounts in the order they are tried, each with a Remove button. Turning Cloud on with no account yet opens Model, where that card waits.
+<b>To add an account:</b> open the <b>Model</b> page, press <b>Cloud accounts…</b>, paste the key, and press the provider's button. Pick a model from the list it shows, and Cloud turns on. The same card lists your accounts in the order they are tried, each with a Remove button. Turning Cloud on with no account yet opens Model, where that card waits.
 • <b>NVIDIA</b> (build.nvidia.com): sign in, then <b>Get API Key</b>. It gives free credits for many large models.
 • <b>OpenRouter</b> (openrouter.ai, then Keys): many models behind one key. Only its free models are listed (their names end in ":free"); they allow a limited number of answers a day.
 • <b>Ollama</b> (ollama.com, Settings, then Keys): its cloud models may need a paid plan.

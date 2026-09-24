@@ -134,7 +134,7 @@ impl RemoteModel {
             Kind::Ollama => (format!("{url}/api/chat"), ollama_body(&self.model, prompt)),
             Kind::OpenAi => (format!("{url}/v1/chat/completions"), openai_body(&self.model, prompt)),
         };
-        let mut req = ureq::AgentBuilder::new().timeout_read(answer_timeout()).build().post(&endpoint);
+        let mut req = ureq::AgentBuilder::new().timeout_read(answer_timeout()).timeout_write(answer_timeout()).build().post(&endpoint);
         if let Some(k) = &self.key { req = req.set("Authorization", &format!("Bearer {k}")); }
         match req.send_json(body) {
             Ok(r) => read_stream(self.kind, r.into_reader(), std::time::Duration::from_secs(2), watch).and_then(|c| parse_content(&c)).map_err(|e| (false, e)),
