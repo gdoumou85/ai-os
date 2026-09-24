@@ -177,6 +177,13 @@ fn short(s: &str) -> String {
 
 impl<M: Model> Engine<M> {
     const MAX_ACTIONS: usize = 100;
+    /// Every move counts here, not only actions: a model going round on to-do lists, notes that are
+    /// not kept or unreadable answers would otherwise never end (final review, 2026-09-24).
+    const MAX_MOVES: usize = 200;
+    const WENT_ROUND: &'static str = "I went round without getting anywhere, so I stopped.";
+    /// What a model that cannot see is told where the desktop hand offered the screen (final
+    /// review, 2026-09-24): the picture never reaches it, so neither does the advice to use it.
+    const CANNOT_SEE: &'static str = "this window lists no controls, and this model cannot see the screen: use key, the command line, or the program's own scripting (like blender --background --python)";
     /// The same action failing the same way this many times in a row: warn, then end.
     const SAME_FAIL_WARN: usize = 3;
     const SAME_FAIL_END: usize = 5;
@@ -388,6 +395,7 @@ impl<M: Model> Engine<M> {
         let _awake = executor::awake::hold("the AI is working");
         let mut unreadable = 0;
         let mut reminded = false;
+        let mut moves = 0;
         loop {
             if self.stop.swap(false, Ordering::SeqCst) {
                 self.just_stopped = true;
@@ -397,6 +405,12 @@ impl<M: Model> Engine<M> {
             if turn.steps.len() >= Self::MAX_ACTIONS {
                 return self.end(turn, State::Failed, format!("I stopped after {} actions without finishing.", Self::MAX_ACTIONS));
             }
+            if moves >= Self::MAX_MOVES {
+                let text = Self::WENT_ROUND.to_string();
+                if turn.steps.is_empty() && turn.plan.is_empty() { self.emit(Event::Said { text }); return Ok(()); }
+                return self.end(turn, State::Failed, text);
+            }
+            moves += 1;
             let p = self.prompt_for(turn)?;
             self.tick(&turn.id, "Thinking…".into());
             let mv = match self.model.next_move(&p) {
@@ -486,7 +500,12 @@ impl<M: Model> Engine<M> {
             _ => {
                 let exec = self.executor_for(turn)?;
                 let mut o = exec.execute(&turn.id, &action)?;
-                self.image = o.image.take();
+                let image = o.image.take();
+                if self.model.sees() { self.image = image; }
+                else if let Some(i) = o.detail.find(executor::atspi::SCREEN_INSTEAD) {
+                    o.detail.truncate(i);
+                    o.detail.push_str(Self::CANNOT_SEE);
+                }
                 o
             }
         };
@@ -660,8 +679,21 @@ impl<M: Model> Engine<M> {
             State::Cancelled => Event::Stopped { job_id, text, files },
             _ => Event::Failed { job_id, text, files },
         });
-        if state != State::Cancelled && !turn.steps.is_empty() { self.learn(turn, state == State::Done); }
+        if state != State::Cancelled {
+            // A to-do-only turn has nothing to learn from, but the rail's spinner stops only on a
+            // `Learned` (`cards::busy_after`), so it gets an empty one (final review, 2026-09-24).
+            if turn.steps.is_empty() { self.emit(Event::Learned { job_id: turn.id.clone(), lines: vec![], pending: false }); }
+            else { self.learn(turn, state == State::Done); }
+        }
         Ok(())
+    }
+
+    /// Clear pressed while a turn worked: run by the engine thread after the stopped turn has
+    /// written its last rows, so none of them leak into the fresh chat (final review, 2026-09-24).
+    /// No "stop" word was queued behind this stop, so the user's next real one must be answered.
+    pub fn clear(&mut self) -> Result<(), EngineError> {
+        self.just_stopped = false;
+        Ok(self.store.forget_chat()?)
     }
 }
 
@@ -842,7 +874,33 @@ mod tests {
             reply("nothing needed doing"),
         ], "todo-only");
         let ev = events_of(&mut e, "check it");
-        assert!(ev.iter().any(|v| matches!(v, Event::Done { text, .. } if text == "nothing needed doing")), "{ev:?}");
+        // Done then an empty Learned: the rail's spinner stops only on Learned (final review).
+        assert!(matches!(&ev[ev.len() - 2..], [Event::Done { text, .. }, Event::Learned { lines, pending: false, .. }] if text == "nothing needed doing" && lines.is_empty()), "{ev:?}");
+    }
+
+    #[test]
+    fn two_hundred_moves_without_getting_anywhere_end_the_turn() {
+        let todo = || Move::Todo { thought: String::new(), items: vec![TodoItem { text: "think".into(), done: false }] };
+        let (mut e, _, _) = engine_with((0..201).map(|_| todo()).collect(), "went-round");
+        let ev = events_of(&mut e, "go");
+        assert!(matches!(crate::testing::before_learned(&ev), Event::Failed { text, .. } if text.contains("went round")), "{ev:?}");
+        assert_eq!(e.model.prompts.borrow().iter().filter(|p| p.allowed != ["learn"]).count(), 200);
+    }
+
+    #[test]
+    fn the_screen_offered_by_the_desktop_hand_reaches_only_a_model_that_sees() {
+        for sees in [false, true] {
+            let look = Action::Look { window: Some("Blender".into()), find: None };
+            let (mut e, rec, _) = engine_with(vec![act(look), reply("ok")], if sees { "screen-sees" } else { "screen-blind" });
+            e.model.sees.set(sees);
+            let detail = format!("nothing that lists its controls is called Blender. {} The screen: squares 1-48.", executor::atspi::SCREEN_INSTEAD);
+            rec.desktop_outcomes.borrow_mut().push_back(Outcome { image: Some(vec![1, 2, 3]), ..Outcome::ok(detail) });
+            e.handle("work in blender").unwrap();
+            let p = &e.model.prompts.borrow()[1];
+            assert_eq!(p.image.is_some(), sees);
+            assert_eq!(p.user.contains("screen_look"), sees, "{}", p.user);
+            if !sees { assert!(p.user.contains("this model cannot see the screen"), "{}", p.user); }
+        }
     }
 
     #[test]

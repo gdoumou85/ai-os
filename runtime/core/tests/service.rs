@@ -29,6 +29,13 @@ fn test_db() -> &'static PathBuf {
     })
 }
 
+/// The tests that work on the shared database take turns: one's Clear would wipe the rows another
+/// is about to read (final review, 2026-09-24).
+fn db_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: Mutex<()> = Mutex::new(());
+    TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A model whose moves can be refilled from the test and that blocks on a gate so the test can
 /// act *while* the engine is inside a job.
 struct GatedModel { inner: Mutex<FakeModel>, gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>> }
@@ -40,6 +47,13 @@ impl aios_core::model::Model for GatedModel {
 }
 
 fn start(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>) -> PathBuf {
+    start_with(dir, moves, gate, false)
+}
+
+/// `on_disk`: the engine keeps its chat in the shared test database, as the real service does, so
+/// a test can read what a Clear left behind.
+fn start_with(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>, on_disk: bool) -> PathBuf {
+    let db = on_disk.then(|| test_db().to_str().unwrap().to_string());
     let sock = dir.join("ai-os.sock");
     let listener = service::bind(&sock).unwrap();
     let dir = dir.clone();
@@ -53,7 +67,8 @@ fn start(dir: &PathBuf, moves: Vec<Move>, gate: Arc<Mutex<Option<std::sync::mpsc
             std::fs::create_dir_all(&projects).unwrap();
             std::fs::create_dir_all(dir.join("hk")).unwrap();
             std::fs::create_dir_all(dir.join("home")).unwrap();
-            Engine::new(Store::open_in_memory().unwrap(), GatedModel { inner: Mutex::new(FakeModel::new(moves)), gate }, projects, None, scripted_workers(&rec), dir.join("hk")).with_home(dir.join("home")).with_sink(sink)
+            let store = match &db { Some(p) => Store::open(p).unwrap(), None => Store::open_in_memory().unwrap() };
+            Engine::new(store, GatedModel { inner: Mutex::new(FakeModel::new(moves)), gate }, projects, None, scripted_workers(&rec), dir.join("hk")).with_home(dir.join("home")).with_sink(sink)
         }))
     });
     let t = Instant::now();
@@ -227,6 +242,7 @@ fn bind_refuses_a_live_socket_and_removes_a_stale_file() {
 
 #[test]
 fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
+    let _turn = db_turn();
     let dir = temp("skills");
     let db = test_db();
     {
@@ -258,23 +274,55 @@ fn the_skills_screen_is_answered_from_the_database_and_forget_deletes() {
 }
 
 #[test]
-fn clear_during_work_stops_it() {
+fn clear_during_work_stops_it_then_forgets_every_row() {
+    let _turn = db_turn();
     let dir = temp("clear-work");
-    test_db(); // forget_chat's Store::open needs AI_OS_DB to point somewhere real
+    let db = test_db();
     let (gtx, grx) = std::sync::mpsc::channel::<()>();
-    let sock = start(&dir, job(), Arc::new(Mutex::new(Some(grx))));
+    let sock = start_with(&dir, job(), Arc::new(Mutex::new(Some(grx))), true);
     let (mut r, mut w) = connect(&sock).split();
     w.request(&aios_proto::Request::Say("make p".into())).unwrap();
     gtx.send(()).unwrap();
     while !matches!(r.next_event(), Some(Event::Step { .. }) | None) {}
     w.request(&aios_proto::Request::Clear {}).unwrap();
-    // service.rs sets the stop flag before forget_chat runs: waiting for Cleared here proves the
-    // flag is already armed, so opening the gate next cannot race the engine past its stop check.
-    while !matches!(r.next_event(), Some(Event::Cleared {}) | None) {}
+    // One reader thread takes a client's requests in order: the hello answered means the Clear
+    // before it has armed the stop flag, so opening the gate next cannot race past the stop check.
+    w.hello().unwrap();
+    while !matches!(r.next_event(), Some(Event::State { .. }) | None) {}
     gtx.send(()).unwrap();
+    // Cleared comes after Stopped now: the stopped turn writes its last rows first (final review).
     let mut got = vec![];
-    while let Some(e) = r.next_event() { let end = matches!(e, Event::Stopped { .. } | Event::Done { .. }); got.push(e); if end { break; } }
-    assert!(matches!(got.last(), Some(Event::Stopped { .. })), "{got:?}");
+    while let Some(e) = r.next_event() { let end = matches!(e, Event::Cleared {}); got.push(e); if end { break; } }
+    let ends: Vec<&Event> = got.iter().filter(|e| matches!(e, Event::Stopped { .. } | Event::Done { .. } | Event::Cleared {})).collect();
+    assert!(matches!(&ends[..], [Event::Stopped { .. }, Event::Cleared {}]), "{got:?}");
+    let rows = Store::open(db.to_str().unwrap()).unwrap().all_messages().unwrap();
+    assert!(rows.is_empty(), "nothing of the stopped turn leaks into the fresh chat: {rows:?}");
+}
+
+#[test]
+fn discard_sent_during_work_answers_the_notes_and_never_joins_the_turn() {
+    let _turn = db_turn();
+    let db = test_db();
+    {
+        let c = rusqlite::Connection::open(db).unwrap();
+        aios_core::notes::init(&c).unwrap();
+        let n = aios_core::notes::Note { notebook: "this computer".into(), topic: "open a website".into(), kind: "technique".into(), text: "open_app firefox".into(), ..Default::default() };
+        aios_core::notes::put(&c, &n, Some("an-older-job")).unwrap();
+    }
+    let dir = temp("discard-work");
+    let (gtx, grx) = std::sync::mpsc::channel::<()>();
+    let sock = start(&dir, job(), Arc::new(Mutex::new(Some(grx))));
+    let mut a = connect(&sock);
+    a.say("make p").unwrap();
+    gtx.send(()).unwrap(); // the Act
+    until(&mut a, |e| matches!(e, Event::Step { .. }));
+    a.say("discard what you learned").unwrap();
+    let got = until(&mut a, |e| matches!(e, Event::Said { .. }));
+    assert!(matches!(got.last(), Some(Event::Said { text }) if text == "Discarded it."), "{got:?}");
+    // Had the words joined the turn, the model would be asked once more and find no move left.
+    gtx.send(()).unwrap();
+    let got = until(&mut a, |e| matches!(e, Event::Done { .. } | Event::Failed { .. }));
+    assert!(matches!(got.last(), Some(Event::Done { text, .. }) if text == "finished"), "{got:?}");
 }
 
 #[test]
