@@ -144,6 +144,19 @@ fn journal_for(journal: &str, words: &str) -> String {
     format!("What earlier jobs did (the journal, lines about this request only):\n{}\n", lines[lines.len().saturating_sub(5)..].join("\n"))
 }
 
+/// A folder's folders, hidden ones left out.
+fn subfolders(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir).map(|rd| rd.flatten().map(|d| d.path())
+        .filter(|p| p.is_dir() && !p.file_name().is_some_and(|f| f.to_string_lossy().starts_with('.'))).collect()).unwrap_or_default()
+}
+
+/// The folders with a BLUEPRINT.md at or below `dir`, `depth` levels down at most; not below one.
+fn blueprint_folders(dir: &Path, depth: u32) -> Vec<PathBuf> {
+    if dir.join("BLUEPRINT.md").is_file() { return vec![dir.to_path_buf()] }
+    if depth == 0 { return vec![] }
+    subfolders(dir).iter().flat_map(|d| blueprint_folders(d, depth - 1)).collect()
+}
+
 /// The paths an action touches: the file it reads or writes, and absolute paths in a command.
 fn paths_in(action: &Action, folder: &str) -> Vec<PathBuf> {
     match action {
@@ -583,14 +596,17 @@ impl<M: Model> Engine<M> {
         Ok(())
     }
 
-    /// Every project: the folders under the projects root, and folders registered elsewhere that
-    /// still exist (one-loop design §2).
+    /// Every project: under the projects root, each folder with a BLUEPRINT.md (two levels down
+    /// at most) or, with none below it, the top folder itself; and folders registered elsewhere
+    /// that still exist (one-loop design §2). The owner's "WEb Games/Pool Game" read as a project
+    /// called "WEb Games" with no notes (2026-09-24).
     fn projects(&self) -> Result<Vec<ProjectRow>, EngineError> {
         let root = self.projects_root()?;
-        let mut v: Vec<ProjectRow> = std::fs::read_dir(&root).map(|rd| rd.flatten()
-            .filter(|d| d.path().is_dir() && !d.file_name().to_string_lossy().starts_with('.'))
-            .map(|d| ProjectRow { name: d.file_name().to_string_lossy().into_owned(), folder: d.path().display().to_string(), description: String::new(), touched_at: 0 })
-            .collect()).unwrap_or_default();
+        let row = |p: &Path| ProjectRow { name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), folder: p.display().to_string(), description: String::new(), touched_at: 0 };
+        let mut v: Vec<ProjectRow> = subfolders(&root).iter().flat_map(|top| {
+            let found = blueprint_folders(top, 2);
+            if found.is_empty() { vec![row(top)] } else { found.iter().map(|f| row(f)).collect() }
+        }).collect();
         v.sort_by(|a, b| a.name.cmp(&b.name));
         for r in self.store.list_projects()? {
             if Path::new(&r.folder).is_dir() && !Path::new(&r.folder).starts_with(&root) && v.iter().all(|p| p.folder != r.folder) { v.push(r); }
@@ -1016,6 +1032,19 @@ mod tests {
         let prompts = e.model.prompts.borrow();
         assert!(prompts[0].user.contains("rentals by the day"));
         assert!(!prompts[1].user.contains("rentals by the day"), "a greeting brings up no project");
+    }
+
+    #[test]
+    fn a_project_in_a_group_folder_is_found_by_its_notes() {
+        let (mut e, _, root) = engine_with(vec![reply("ok")], "nested");
+        let p = root.join("projects").join("WEb Games").join("Pool Game");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("BLUEPRINT.md"), "a pool table in the browser").unwrap();
+        std::fs::create_dir_all(root.join("projects").join("loose")).unwrap();
+        let names: Vec<String> = e.projects().unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Pool Game", "loose"]);
+        e.handle("lets continue our work with the pool web game").unwrap();
+        assert!(e.model.prompts.borrow()[0].user.contains("a pool table in the browser"));
     }
 
     #[test]
