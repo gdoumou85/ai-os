@@ -28,6 +28,9 @@ pub fn describe(action: &Action) -> String {
         Action::ScreenType { text, enter } => format!("typed {} on the screen{}", plural(text.chars().count(), "character"), if *enter { " and pressed Enter" } else { "" }),
         Action::WebRead { url, .. } => format!("read the page {url}"),
         Action::WebSearch { query } => format!("searched the web for {query}"),
+        Action::StartProgram { name, argv } => format!("started {name} ({}) in the background", argv.join(" ")),
+        Action::ProgramOutput { name, .. } => format!("checked on {name}"),
+        Action::StopProgram { name } => format!("stopped {name}"),
     }
 }
 
@@ -55,6 +58,9 @@ pub fn doing(action: &Action) -> String {
         Action::ScreenType { .. } => "typing on the screen".into(),
         Action::WebRead { url, .. } => format!("reading the page {url}"),
         Action::WebSearch { query } => format!("searching the web for {query}"),
+        Action::StartProgram { name, .. } => format!("starting {name}"),
+        Action::ProgramOutput { name, .. } => format!("checking on {name}"),
+        Action::StopProgram { name } => format!("stopping {name}"),
     }
 }
 

@@ -187,6 +187,12 @@ impl Worker for MachineWorker {
                 }
                 Err(e) => Outcome::err(e),
             },
+            Action::StartProgram { name, argv } => {
+                if needs_a_shell(argv) { return Outcome::err("not started: the program runs directly, with no shell, so *, ~, $VAR, |, > and && reach it as plain text. Start [\"bash\", \"-c\", \"<the line>\"] instead"); }
+                match crate::programs::start(name, argv, &self.workspace) { Ok(d) => Outcome::ok(d), Err(e) => Outcome::err(e) }
+            }
+            Action::ProgramOutput { name, lines } => match crate::programs::output(name, *lines) { Ok(d) => Outcome::ok(d), Err(e) => Outcome::err(e) },
+            Action::StopProgram { name } => match crate::programs::stop(name) { Ok(d) => Outcome::ok(d), Err(e) => Outcome::err(e) },
             _ => Outcome::err("commands and files have no hand for this action"),
         }
     }

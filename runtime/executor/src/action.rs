@@ -79,6 +79,14 @@ pub enum Action {
     },
     /// The top results of a web search: title, address, snippet.
     WebSearch { query: String },
+    /// Runs in the background, outliving the turn; output to a log (one-loop design §1b).
+    StartProgram { name: String, argv: Vec<String> },
+    ProgramOutput {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines: Option<usize>,
+    },
+    StopProgram { name: String },
 }
 
 /// A desktop-entry id: `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Dots and capitals are normal there
