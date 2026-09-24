@@ -127,8 +127,9 @@ limit for things that finish; the brief says to `start` anything that keeps runn
   is the floor and 16k or more is what a full agent wants when the PC can hold it.
 - **A model that cannot see.** The screen actions (`screen_look`, `screen_click`, `screen_type`,
   `scroll`, `drag`) are offered only to a model that takes images: Ollama's `/api/show`
-  `capabilities` has `vision`; a cloud model counts when its provider lists image input, else it
-  does not. Without them the schema drops those actions and the brief says why: the desktop is
+  `capabilities` has `vision`; with the Cloud switch on, the screen is closed for now (the pool
+  picks its account per call, after the grammar is built); a cloud model that can see is a
+  follow-up. Without them the schema drops those actions and the brief says why: the desktop is
   worked through `look`, `press`, `type`, `key` and the command line. The Model card's list stops filtering out models named `vision`/`-vl`/`vlm`, so one that can see can be chosen.
 
 ## 3. What the user sees
