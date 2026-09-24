@@ -569,3 +569,9 @@ Two things the owner hit on his first full-access run.
   --actions, ffmpeg) is worked that way, not through its screen, and the result is opened in the
   program when the user asked for it. Also: a stop typed behind a queued request is counted, not
   cleared before the request runs. (v0.10.4)
+- **2026-09-24**, projects kept apart (the owner): a project is any folder with a BLUEPRINT.md
+  under the projects folder, also inside a group folder (WEb Games/Pool Game), and its notes name
+  its other documents (designs, plans). A message naming another project than the chat's starts a
+  fresh chat, said on screen; a restart does too; standing instructions stay. A project is named
+  by a telling word only ("a snake game" is not Pool Game). One guard for moves that change
+  nothing twice (todo, remember); after acting on an answer a new question may come. (v0.10.5)
