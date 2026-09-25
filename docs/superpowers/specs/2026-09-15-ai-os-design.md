@@ -620,3 +620,7 @@ Two things the owner hit on his first full-access run.
   files … because no file or command tools are available", taking tools to mean an API's function
   calls. The brief now says the act actions are its tools, always there, with none other to wait
   for; the promised-work reminder names them too. (v0.12.4)
+- **2026-09-25**, updates found after login: the rail asked GitHub once, as it opened at login,
+  often before the network was up, and a failed ask stayed silent until the next login (the
+  owner's rail showed no card). It now asks every 10 minutes and offers each new version once;
+  the guide says how to see the installed version. (v0.12.5)

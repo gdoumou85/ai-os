@@ -1,5 +1,5 @@
-//! Is there a newer release on GitHub than the one installed? Asked once per login, when the
-//! rail opens (the owner's request, 2026-09-19): the answer is a card with Update now / Later.
+//! Is there a newer release on GitHub than the one installed? Asked when the rail opens and every
+//! 10 minutes after (the owner, 2026-09-19 and 2026-09-25): the answer is a card with Update now / Later.
 //! No network, no answer: the check never gets in the way of the chat.
 
 /// Where `get.sh` fetches from; the same repository the installer names.
