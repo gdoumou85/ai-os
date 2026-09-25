@@ -111,7 +111,7 @@ mod tests {
             "screen_look", "screen_click", "screen_type",
             "web_read", "web_search",
             "start_program", "program_output", "stop_program",
-            "key", "scroll", "drag", "wait", "watch", "unwatch",
+            "key", "scroll", "drag", "wait", "watch", "unwatch", "delegate",
         ]);
     }
 

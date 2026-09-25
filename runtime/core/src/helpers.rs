@@ -4,7 +4,7 @@
 use crate::cloud::Account;
 use crate::model::{Model, ModelError, Msg, Prompt, RemoteModel};
 use crate::moves::{Ending, Move};
-use executor::action::{Action, HelperTask};
+use executor::action::HelperTask;
 use executor::executor::{lane, Lane};
 use executor::worker::{MachineWorker, Outcome, Worker};
 use std::path::Path;

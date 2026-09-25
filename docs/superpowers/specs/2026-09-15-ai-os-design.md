@@ -644,3 +644,6 @@ Two things the owner hit on his first full-access run.
   helpers (coding, design, reasoning, review, debugging, art) that run at once, one thread and one
   cloud model each, spread over the OpenAI-style accounts; a failing model hands over to the next.
   Machine hand only; steps show on the card; offered only while Cloud has such an account. (v0.14.0)
+- **2026-09-25**, a broken cloud account hands over: a key refused (NVIDIA 401 mid-work) or a model
+  gone rests the account 15 minutes like a spent one, the next account takes over, and the chat says
+  why once; only when no account answers is the failure the turn's. (v0.14.0)

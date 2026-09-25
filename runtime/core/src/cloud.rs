@@ -102,6 +102,8 @@ impl<M: Model> Model for Pooled<M> {
     fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
         if !self.dir.join(SWITCH).exists() { return self.local.next_move_watched(prompt, watch) }
         let accounts = parse(&std::fs::read_to_string(self.dir.join(ACCOUNTS)).unwrap_or_default());
+        // The first account that failed for a reason other than its allowance, said if no account answers.
+        let mut broken: Option<String> = None;
         for a in accounts {
             if self.resting(&a.url, &a.model) { continue }
             let failed = match self.ask(&a, &a.model, prompt, watch) {
@@ -124,11 +126,21 @@ impl<M: Model> Model for Pooled<M> {
             }
             match failed {
                 ModelError::Quota(_) => eprintln!("cloud: {} has no model with allowance left; trying the next account", a.name),
-                // Any other failure is said, not hidden behind the local model: a cloud that
-                // never works must not look like one that does.
-                e => return Err(ModelError::Http(format!("cloud {} {}: {}", a.name, a.model, match e { ModelError::Http(w) => w, e => e.to_string() }))),
+                // A broken account (a key refused, a model gone) rests like a used-up one and the
+                // next account takes over (the owner, 2026-09-25: NVIDIA said 401 mid-work and the
+                // turn ended, with OpenRouter right behind it). Said once in the chat.
+                e => {
+                    let why = match e { ModelError::Http(w) => w, e => e.to_string() };
+                    eprintln!("cloud: {} {} failed ({why}); trying the next account", a.name, a.model);
+                    self.resting.borrow_mut().insert(format!("{} {}", a.url, a.model), Instant::now());
+                    *self.news.borrow_mut() = Some(format!("(Cloud: {} {} did not work ({}), so the next account takes over for a while. Model → Cloud accounts changes it.)", a.name, a.model, why.chars().take(160).collect::<String>()));
+                    broken.get_or_insert(format!("cloud {} {}: {why}", a.name, a.model));
+                }
             }
         }
+        // Every account broken or spent, and one broken: said, not hidden behind the local model —
+        // a cloud that never works must not look like one that does.
+        if let Some(e) = broken { return Err(ModelError::Http(e)) }
         eprintln!("cloud: no account has allowance left; using this machine's model");
         self.local.next_move_watched(prompt, watch)
     }
@@ -216,6 +228,20 @@ mod tests {
         assert_eq!(text(p.next_move(&prompt()).unwrap()), "first");
         assert!(p.no_tools.borrow().contains(&format!("http://{at} m")));
         assert_eq!(text(p.next_move(&prompt()).unwrap()), "second", "asked in JSON straight away");
+    }
+
+    #[test]
+    fn a_broken_account_hands_over_to_the_next() {
+        let d = temp_root("cloud-broken-next");
+        std::fs::write(d.join(SWITCH), "").unwrap();
+        let bad = serve(json_response("401 Unauthorized", r#"{"status":401,"title":"Unauthorized","detail":"Authentication failed"}"#), 1);
+        let good = serve(said("second"), 2);
+        std::fs::write(d.join(ACCOUNTS), format!("NVIDIA\tollama\thttp://{bad}\tm\tk\nOpenRouter\tollama\thttp://{good}\tm\tk\n")).unwrap();
+        let mut p = Pooled::new(local(), d);
+        p.others = Box::new(|_| vec![]);
+        assert_eq!(text(p.next_move(&prompt()).unwrap()), "second");
+        assert!(p.news().is_some_and(|n| n.contains("NVIDIA") && n.contains("Authentication failed")));
+        assert_eq!(text(p.next_move(&prompt()).unwrap()), "second", "the broken account rests: its server would not answer again");
     }
 
     #[test]
