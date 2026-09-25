@@ -281,7 +281,7 @@ mod tests {
         let picks = role_picks("reasoning\tn\tmoonshotai/kimi-k3\n");
         assert_eq!(rank("reasoning", &models, 0, 2, &speeds, &picks)[0], 1, "the owner's pick first, slow or not");
         let two = [("a", "x-coder"), ("b", "y-coder")];
-        assert_ne!(rank("coding", &two, 0, 2, &none, &none)[0], rank("coding", &two, 1, 2, &none, &none)[0], "two coders spread");
+        assert_ne!(rank("coding", &two, 0, 2, &Default::default(), &none)[0], rank("coding", &two, 1, 2, &Default::default(), &none)[0], "two coders spread");
     }
 
     #[test]
