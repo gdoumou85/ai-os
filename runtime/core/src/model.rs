@@ -357,7 +357,7 @@ pub fn tools_for(prompt: &Prompt) -> serde_json::Value {
 /// is `act` with that action.
 fn tool_move(name: &str, args: &str) -> Result<String, ModelError> {
     let mut a: serde_json::Map<String, serde_json::Value> = if args.trim().is_empty() { Default::default() }
-        else { serde_json::from_str(args).map_err(|e| ModelError::BadJson(format!("{e}: {name}({args})")))? };
+        else { serde_json::from_str(args).or_else(|e| serde_json::from_str(&repaired(args)).map_err(|_| ModelError::BadJson(format!("{e}: {name}({args})"))))? };
     Ok(if ["reply", "ask", "todo", "remember", "learn"].contains(&name) {
         a.insert("move".into(), name.into());
         serde_json::Value::Object(a)
@@ -370,7 +370,32 @@ fn tool_move(name: &str, args: &str) -> Result<String, ModelError> {
 
 /// A move from the whole of an answer's text.
 pub fn parse_content(content: &str) -> Result<Move, ModelError> {
-    serde_json::from_str(content).or_else(|e| found_in(content).ok_or_else(|| ModelError::BadJson(format!("{e}: {content}"))))
+    serde_json::from_str(content).or_else(|e| found_in(content)
+        .or_else(|| serde_json::from_str(&repaired(content)).ok())
+        .ok_or_else(|| ModelError::BadJson(format!("{e}: {content}"))))
+}
+
+/// JSON the way models get it wrong inside a long string, like a whole file's code: a raw line
+/// break or tab, and a backslash JSON has no escape for (`\d` in a regex). Each made what it meant,
+/// so a 4000-word file is not thrown away for one character (the owner, 2026-09-25: "could not
+/// read my own answer twice" while writing the trading assistant's files).
+fn repaired(s: &str) -> String {
+    let (mut out, mut in_string, mut chars) = (String::with_capacity(s.len() + 16), false, s.chars().peekable());
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => { in_string = !in_string; out.push(c) }
+            '\\' if in_string => match chars.peek() {
+                Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') => { out.push(c); out.push(chars.next().unwrap_or_default()) }
+                _ => out.push_str("\\\\"),
+            },
+            '\n' if in_string => out.push_str("\\n"),
+            '\r' if in_string => out.push_str("\\r"),
+            '\t' if in_string => out.push_str("\\t"),
+            c if in_string && c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The first move inside an answer that is more than the move: in a ```json block, after a sentence,
@@ -775,6 +800,15 @@ mod tests {
         let s = "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"move\\\":\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\\"reply\\\",\\\"thought\\\":\\\"t\\\",\\\"text\\\":\\\"hi\\\",\\\"outcome\\\":\\\"done\\\"}\"}}]}\n\ndata: [DONE]\n";
         let got = read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true).unwrap();
         assert!(matches!(parse_content(&got).unwrap(), Move::Reply { text, .. } if text == "hi"), "{got}");
+    }
+
+    #[test]
+    fn a_file_with_raw_line_breaks_and_regex_backslashes_is_still_read() {
+        let args = "{\"thought\":\"t\",\"path\":\"a.py\",\"contents\":\"import re\n\tre.match(r'\\d+\\.\\s', x)\\n\"}";
+        let mv = parse_content(&tool_move("write_file", args).unwrap()).unwrap();
+        let Move::Act { action: executor::action::Action::WriteFile { contents, .. }, .. } = mv else { panic!("{mv:?}") };
+        assert_eq!(contents, "import re\n\tre.match(r'\\d+\\.\\s', x)\n");
+        assert!(matches!(tool_move("write_file", "{\"path\":\"a.py\",\"contents\":\"cut off"), Err(ModelError::BadJson(_))), "a cut-off answer is still not a move");
     }
 
     #[test]

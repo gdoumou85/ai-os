@@ -225,7 +225,7 @@ fn files_of(folder: &str) -> String {
 }
 
 fn not_a_move(error: &str) -> String {
-    format!("your answer was not a move ({}). Answer with one JSON object whose first key is \"move\": reply, ask, todo, act or remember.", error.chars().take(120).collect::<String>())
+    format!("your answer could not be read ({}). Call one of your tools with valid JSON arguments (inside a string, write a line break as \\n and a backslash as \\\\), or, if you have no tools, answer with one JSON object whose first key is \"move\". A file over about 150 lines goes in parts: write_file the first, then append_file the rest.", error.chars().take(160).collect::<String>())
 }
 
 fn short(s: &str) -> String {
@@ -634,8 +634,9 @@ impl<M: Model> Engine<M> {
                     self.store.push_message("result", &not_a_move(&e))?;
                     continue;
                 }
-                Err(ModelError::BadJson(_)) => {
-                    let text = "(I could not read my own answer twice — the model is not answering in the required format. Please say that again, or switch the model.)".to_string();
+                // Why, in a few words, so the next report shows what the model got wrong.
+                Err(ModelError::BadJson(e)) => {
+                    let text = format!("(I could not read my own answer twice — the model is not answering in the required format. Say \"go on\" to try again, or switch the model. What was wrong: {})", e.chars().take(160).collect::<String>());
                     if !self.has_card(turn) { self.emit(Event::Said { text }); return Ok(()); }
                     return self.end(turn, State::Failed, text);
                 }
