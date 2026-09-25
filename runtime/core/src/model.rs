@@ -149,7 +149,7 @@ impl RemoteModel {
     fn ask_at(&self, url: &str, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, (bool, ModelError)> {
         let (endpoint, body) = match self.kind {
             Kind::Ollama => (format!("{url}/api/chat"), ollama_body(&self.model, prompt)),
-            Kind::OpenAi => (format!("{url}/v1/chat/completions"), openai_body(&self.model, prompt, self.tools)),
+            Kind::OpenAi => (format!("{}/chat/completions", aios_proto::v1(url)), openai_body(&self.model, prompt, self.tools)),
         };
         let mut req = ureq::AgentBuilder::new().timeout_read(answer_timeout()).timeout_write(answer_timeout()).build().post(&endpoint);
         if let Some(k) = &self.key { req = req.set("Authorization", &format!("Bearer {k}")); }

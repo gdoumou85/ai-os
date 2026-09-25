@@ -14,13 +14,25 @@ use std::path::Path;
 /// ponytail: a name filter; NVIDIA's own model types if its list ever says them.
 pub fn chat_models(url: &str, names: Vec<String>) -> Vec<String> {
     if url.contains("openrouter.ai") { return names.into_iter().filter(|n| n.ends_with(":free")).collect(); }
-    if !url.contains("nvidia.com") { return names; }
-    const NOT_CHAT: [&str; 12] = ["embed", "rerank", "retriev", "guard", "safety", "reward", "clip", "parse", "detect", "translat", "pii", "content-"];
+    if url.contains("ollama") { return names; }
+    // Groq, Mistral, Gemini and Cerebras list speech, image and moderation models too (2026-09-25).
+    const NOT_CHAT: [&str; 21] = ["embed", "rerank", "retriev", "guard", "safety", "reward", "clip", "parse", "detect", "translat", "pii", "content-",
+        "whisper", "tts", "moderation", "ocr", "imagen", "veo", "aqa", "orpheus", "playai"];
     const CHAT: [&str; 9] = ["instruct", "chat", "-it", "deepseek", "kimi", "qwen3", "gpt-oss", "nemotron", "coder"];
-    names.into_iter().filter(|n| {
-        let l = n.to_lowercase();
-        !NOT_CHAT.iter().any(|w| l.contains(w)) && CHAT.iter().any(|w| l.contains(w))
-    }).collect()
+    let nvidia = url.contains("nvidia.com");
+    names.into_iter()
+        // Gemini's list names its models `models/gemini-…`; a chat asks for them without it.
+        .map(|n| n.strip_prefix("models/").map(String::from).unwrap_or(n))
+        .filter(|n| {
+            let l = n.to_lowercase();
+            !NOT_CHAT.iter().any(|w| l.contains(w)) && (!nvidia || CHAT.iter().any(|w| l.contains(w)))
+        }).collect()
+}
+
+/// Where an OpenAI-style runner's API starts: `<url>/v1`, except Gemini's, whose address already
+/// carries its version (`…/v1beta/openai`).
+pub fn v1(url: &str) -> String {
+    if url.contains("/v1beta/") { url.trim_end_matches('/').to_string() } else { format!("{}/v1", url.trim_end_matches('/')) }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

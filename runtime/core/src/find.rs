@@ -70,8 +70,8 @@ pub fn scan(hosts: &[Ipv4Addr], ollama_port: u16, openai_port: u16, key: Option<
 /// What the runner at `url` has, asked as `kind`. Empty when it is not that kind of runner.
 pub fn ask(kind: Kind, url: &str, key: Option<&str>) -> Vec<Found> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(3)).build();
-    let (path, list, field) = match kind { Kind::Ollama => ("/api/tags", "models", "name"), Kind::OpenAi => ("/v1/models", "data", "id") };
-    let mut req = agent.get(&format!("{url}{path}"));
+    let (address, list, field) = match kind { Kind::Ollama => (format!("{url}/api/tags"), "models", "name"), Kind::OpenAi => (format!("{}/models", aios_proto::v1(url)), "data", "id") };
+    let mut req = agent.get(&address);
     if let Some(k) = key { req = req.set("Authorization", &format!("Bearer {k}")); }
     let body: serde_json::Value = match req.call() {
         Ok(r) => match r.into_json() { Ok(v) => v, Err(_) => return vec![] },

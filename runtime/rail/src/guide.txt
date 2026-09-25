@@ -98,12 +98,12 @@ Cloud models are much stronger than what a home computer can run, and several pr
 • <b>OpenRouter</b> (openrouter.ai, then Keys): many models behind one key. Only its free models are listed (their names end in ":free"); they allow a limited number of answers a day.
 • <b>Ollama</b> (ollama.com, Settings, then Keys): its cloud models may need a paid plan.
 
-<b>More providers are coming</b> (all free; each gives you one key):
-• <b>GitHub Models</b> (github.com/marketplace/models): uses a GitHub account.
-• <b>Google AI Studio</b> (aistudio.google.com): Gemini models, with a Google account.
-• <b>Groq</b> (console.groq.com): very fast.
-• <b>Mistral</b> (console.mistral.ai).
-• <b>Cerebras</b> (cloud.cerebras.ai).
+<b>More free providers</b>, each with its own key and its own daily allowance; the more you add, the longer the AI keeps going:
+• <b>Groq</b> (console.groq.com, then API Keys): very fast.
+• <b>Mistral</b> (console.mistral.ai, then API Keys; choose the free Experiment plan): strong coding and reasoning models.
+• <b>Gemini</b> (aistudio.google.com, then Get API key): Google's models, which can also look at pictures.
+• <b>Cerebras</b> (cloud.cerebras.ai, then API Keys): very fast.
+Free plans change often: when a key stops working, its account is passed over and the next one takes over.
 
 
 <big><b>When something goes wrong</b></big>

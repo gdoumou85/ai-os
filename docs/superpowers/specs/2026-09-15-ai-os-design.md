@@ -647,3 +647,6 @@ Two things the owner hit on his first full-access run.
 - **2026-09-25**, a broken cloud account hands over: a key refused (NVIDIA 401 mid-work) or a model
   gone rests the account 15 minutes like a spent one, the next account takes over, and the chat says
   why once; only when no account answers is the failure the turn's. (v0.14.0)
+- **2026-09-25**, more free providers: Groq, Mistral, Gemini and Cerebras buttons on the Cloud card
+  (all OpenAI-style; `aios_proto::v1` because Gemini's address carries its own version); the chat
+  filter drops speech, image and moderation models for every provider. (v0.14.1)
