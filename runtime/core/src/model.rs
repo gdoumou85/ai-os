@@ -41,13 +41,17 @@ pub enum ModelError {
     #[error("fake model has no more scripted moves")] Exhausted,
 }
 
+/// What `watch` hears while an answer comes: the words of thinking so far, and of the answer itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Heard { pub thinking: usize, pub writing: usize }
+
 /// The one thing the loop needs from a model: given a prompt, one move. Swappable (1b spec §5).
 pub trait Model {
     fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError>;
-    /// `next_move`, with `watch` told how many words of the answer have come, every few seconds
+    /// `next_move`, with `watch` told how many words of thinking and answer have come, every few seconds
     /// while it comes; `watch` answering false drops the answer where it stands (Stop). A model
     /// that does not stream answers in one go and never calls it.
-    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
+    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(Heard) -> bool) -> Result<Move, ModelError> {
         let _ = watch;
         self.next_move(prompt)
     }
@@ -63,6 +67,8 @@ pub trait Model {
     fn helper_accounts(&self) -> Vec<crate::cloud::Account> { vec![] }
     /// The other models an account's key opens, for a helper to move on to.
     fn other_models(&self, _account: &crate::cloud::Account) -> Vec<String> { vec![] }
+    /// Where the cloud's files are (model per role: the owner's picks and the speeds kept).
+    fn cloud_dir(&self) -> Option<std::path::PathBuf> { None }
 }
 
 /// Scripted moves for tests; records every prompt it was given.
@@ -146,7 +152,7 @@ impl RemoteModel {
 
     /// One request to the runner at `url`. `Err((true, _))` when it could not be reached at all —
     /// the only failure worth looking for it elsewhere.
-    fn ask_at(&self, url: &str, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, (bool, ModelError)> {
+    fn ask_at(&self, url: &str, prompt: &Prompt, watch: &mut dyn FnMut(Heard) -> bool) -> Result<Move, (bool, ModelError)> {
         let (endpoint, body) = match self.kind {
             Kind::Ollama => (format!("{url}/api/chat"), ollama_body(&self.model, prompt)),
             Kind::OpenAi => (format!("{}/chat/completions", aios_proto::v1(url)), openai_body(&self.model, prompt, self.tools)),
@@ -407,10 +413,10 @@ fn whole_body_content(kind: Kind, body: &str) -> Result<Option<String>, ModelErr
 /// none ever parsed, that raw body is tried once as a whole, non-streamed answer — a runner that
 /// ignored `stream: true` and just sent its ordinary response still answers. Only when that also
 /// yields nothing is it said as what it is, with the body's start.
-pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Duration, watch: &mut dyn FnMut(usize) -> bool) -> Result<String, ModelError> {
+pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Duration, watch: &mut dyn FnMut(Heard) -> bool) -> Result<String, ModelError> {
     use std::io::BufRead;
     let cap = loaded_context() * 4;
-    let (mut content, mut seen, mut raw) = (String::new(), false, String::new());
+    let (mut content, mut seen, mut raw, mut thinking) = (String::new(), false, String::new(), String::new());
     let mut told = std::time::Instant::now();
     // Pieces in a row that added nothing to read: no letter of the answer and no thought.
     let mut blank = 0;
@@ -434,6 +440,7 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
         if let Some(p) = piece.as_str() { content.push_str(p); }
         // A thinking model's thoughts come with empty answer pieces; those are not blank.
         let thought = match kind { Kind::Ollama => &v["message"]["thinking"], Kind::OpenAi => { let d = &v["choices"][0]["delta"]; if d["reasoning_content"].is_string() { &d["reasoning_content"] } else { &d["reasoning"] } } };
+        if let Some(t) = thought.as_str() { thinking.push_str(t) }
         let said = |x: &serde_json::Value| x.as_str().is_some_and(|t| !t.trim().is_empty());
         let mut args = false;
         for c in v["choices"][0]["delta"]["tool_calls"].as_array().into_iter().flatten() {
@@ -452,7 +459,8 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
         if cut { return Err(ModelError::CutOff(words(&content, &calls))) }
         if told.elapsed() >= every {
             told = std::time::Instant::now();
-            if !watch(words(&content, &calls)) { return Err(ModelError::Stopped) }
+            // A slow thinker shows its thinking words, so it does not look frozen (the owner, 2026-09-25).
+            if !watch(Heard { thinking: thinking.split_whitespace().count(), writing: words(&content, &calls) }) { return Err(ModelError::Stopped) }
         }
     }
     if let Some((name, args)) = calls.iter().find(|c| !c.0.is_empty()) { return tool_move(name, args) }
@@ -466,7 +474,7 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
 impl Model for RemoteModel {
     fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> { self.next_move_watched(prompt, &mut |_| true) }
 
-    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
+    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(Heard) -> bool) -> Result<Move, ModelError> {
         let url = self.url.borrow().clone();
         match self.ask_at(&url, prompt, watch) {
             Err((true, gone)) => {
@@ -773,8 +781,12 @@ mod tests {
     fn stop_drops_a_stream_and_a_runner_error_is_said() {
         let o = r#"{"message":{"content":"one two three"},"done":false}"#;
         let mut heard = 0;
-        assert!(matches!(read_stream(Kind::Ollama, o.as_bytes(), std::time::Duration::ZERO, &mut |w| { heard = w; false }), Err(ModelError::Stopped)));
+        assert!(matches!(read_stream(Kind::Ollama, o.as_bytes(), std::time::Duration::ZERO, &mut |w| { heard = w.writing; false }), Err(ModelError::Stopped)));
         assert_eq!(heard, 3);
+        let t = r#"{"message":{"content":"","thinking":"let me think this"},"done":false}"#;
+        let mut h = Heard::default();
+        assert!(matches!(read_stream(Kind::Ollama, t.as_bytes(), std::time::Duration::ZERO, &mut |w| { h = w; false }), Err(ModelError::Stopped)));
+        assert_eq!(h, Heard { thinking: 4, writing: 0 }, "a thinker's words are heard before its answer starts");
         let e = r#"{"error":"model runner has unexpectedly stopped"}"#;
         assert!(matches!(read_stream(Kind::Ollama, e.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::Http(w)) if w.contains("unexpectedly")));
     }

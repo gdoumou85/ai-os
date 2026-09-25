@@ -69,6 +69,13 @@ pub(crate) fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gt
         row.append(&rm);
         b.append(&row);
     }
+    // Which model each helper role starts on (model per role, 2026-09-25).
+    if list_has_helpers(&tsv) {
+        let roles = gtk::Button::with_label("Helpers' models…"); roles.set_halign(gtk::Align::Start);
+        let (col, me, tx, st) = (column.clone(), w.clone(), to_ui.clone(), status.clone());
+        roles.connect_clicked(move |_| { col.remove(&me); st.set_text("Asking your accounts which models they open…"); ask_roles(&tx); });
+        b.append(&roles);
+    }
     // Each provider's key page as a link (the owner, 2026-09-25): a click opens the browser there.
     let add = gtk::Label::new(None);
     add.set_markup("Add an account: make a free key on the provider's page, paste it here, and press that provider's button.
@@ -134,6 +141,97 @@ pub(crate) fn cloud_models_card(provider: aios_rail::models::Provider, found: &s
             };
             st.set_text(&msg);
             col.append(&super::msg(&msg));
+        });
+        b.append(&btn);
+    }
+    w
+}
+
+/// A model a helper can run on: its provider's name, address and model name.
+pub(crate) type Choice = (String, String, String);
+
+fn helper_provider(name: &str) -> Option<aios_rail::models::Provider> {
+    aios_rail::models::provider_named(name).filter(|p| p.kind == "openai")
+}
+fn list_has_helpers(tsv: &str) -> bool { aios_rail::models::accounts(tsv).iter().any(|(n, _)| helper_provider(n).is_some()) }
+
+/// Asks each account helpers can use which models its key opens, then the Roles card shows. The
+/// same list the engine gives its helpers: each account's own model first, then the others.
+fn ask_roles(to_ui: &Sender<FromNet>) {
+    let tx = to_ui.clone();
+    std::thread::spawn(move || {
+        let tsv = cloud_accounts();
+        let (mut all, mut others): (Vec<Choice>, Vec<Choice>) = (vec![], vec![]);
+        for (i, (name, model)) in aios_rail::models::accounts(&tsv).into_iter().enumerate() {
+            let (Some(p), Some(key)) = (helper_provider(&name), aios_rail::models::account_key(&tsv, i)) else { continue };
+            let found = run("ai-os-find", &["--url", p.url], Some(&key));
+            for m in aios_rail::models::chat_models(p, aios_rail::models::parse_found(&found).into_iter().filter_map(|c| c.model).collect()) {
+                if !others.iter().any(|c| c.1 == p.url && c.2 == m) { others.push((name.clone(), p.url.to_string(), m)) }
+            }
+            all.push((name, p.url.to_string(), model));
+        }
+        let starts = all.len();
+        others.retain(|o| !all.iter().any(|a| a.1 == o.1 && a.2 == o.2));
+        all.extend(others);
+        let _ = tx.send(FromNet::Roles { models: all, starts });
+    });
+}
+
+fn config_file(name: &str) -> String { std::fs::read_to_string(format!("{}/{name}", config_dir())).unwrap_or_default() }
+
+fn speed_text(speeds: &std::collections::HashMap<String, u32>, url: &str, model: &str) -> String {
+    speeds.get(&format!("{url} {model}")).map_or("not timed yet".to_string(), |s| format!("about {s} s an answer"))
+}
+
+/// The Roles card: the model each helper role starts on, how fast it answered, and Change.
+pub(crate) fn roles_card(models: std::rc::Rc<Vec<Choice>>, starts: usize, column: &gtk::Box, status: &gtk::Label) -> gtk::Widget {
+    let (speeds, picks) = (aios_proto::speeds(&config_file("speeds.tsv")), aios_proto::role_picks(&config_file("roles.tsv")));
+    let text = if models.is_empty() { "Helpers need a cloud account from NVIDIA, OpenRouter, Groq, Mistral, Gemini or Cerebras, and none of yours answered." }
+        else { "When the AI hands work to helpers, each starts on the model below and moves to the next if it fails. Automatic picks by the model's name and how fast it answered; one slower than 2 minutes an answer goes last." };
+    let b = plain_card("Helpers' models", text);
+    let w: gtk::Widget = b.clone().upcast();
+    if let Some((name, m)) = aios_rail::models::accounts(&cloud_accounts()).into_iter().next() {
+        let url = aios_rail::models::provider_named(&name).map_or("", |p| p.url);
+        b.append(&super::msg(&format!("Main AI: {m} on {name} · {}. Use this one on Cloud accounts changes it.", speed_text(&speeds, url, &m))));
+    }
+    let pairs: Vec<(&str, &str)> = models.iter().map(|c| (c.1.as_str(), c.2.as_str())).collect();
+    for role in aios_proto::HELPER_ROLES {
+        let Some(&k) = aios_proto::rank(role, &pairs, 0, starts, &speeds, &picks).first() else { continue };
+        let (name, url, m) = &models[k];
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let how = if picks.contains_key(role) { "you picked it" } else { "automatic" };
+        let l = super::msg(&format!("{}{}: {m} on {name} · {} ({how})", role[..1].to_uppercase(), &role[1..], speed_text(&speeds, url, m)));
+        l.set_hexpand(true);
+        let change = gtk::Button::with_label("Change");
+        let (col, me, st, models) = (column.clone(), w.clone(), status.clone(), models.clone());
+        change.connect_clicked(move |_| { col.remove(&me); col.append(&role_pick_card(role, models.clone(), starts, &col, &st)); });
+        row.append(&l); row.append(&change);
+        b.append(&row);
+    }
+    w
+}
+
+/// Every model the keys open, for one role: a click keeps it in roles.tsv; Automatic takes the pick out.
+fn role_pick_card(role: &'static str, models: std::rc::Rc<Vec<Choice>>, starts: usize, column: &gtk::Box, status: &gtk::Label) -> gtk::Widget {
+    let b = plain_card(&format!("A model for {role}"), "Automatic lets the AI choose. Times come from the model's real answers so far.");
+    let w: gtk::Widget = b.clone().upcast();
+    let speeds = aios_proto::speeds(&config_file("speeds.tsv"));
+    let choices = std::iter::once(None).chain((0..models.len()).filter(|&k| aios_rail::models::safe(&models[k].2)).map(Some));
+    for k in choices {
+        let label = k.map_or("Automatic".to_string(), |k| { let (n, u, m) = &models[k]; format!("{m} on {n} · {}", speed_text(&speeds, u, m)) });
+        let btn = gtk::Button::with_label(&label); btn.set_halign(gtk::Align::Start);
+        let (col, me, st, models) = (column.clone(), w.clone(), status.clone(), models.clone());
+        btn.connect_clicked(move |_| {
+            let kept: String = config_file("roles.tsv").lines().filter(|l| l.split('\t').next() != Some(role)).map(|l| format!("{l}\n")).collect();
+            let line = k.map_or(String::new(), |k| format!("{role}\t{}\t{}\n", models[k].1, models[k].2));
+            let saved = std::fs::create_dir_all(config_dir()).and_then(|_| std::fs::write(format!("{}/roles.tsv", config_dir()), kept + &line));
+            st.set_text(&match (saved, k) {
+                (Err(e), _) => format!("Could not save the pick: {e}"),
+                (Ok(()), Some(k)) => format!("The {role} helper now starts on {}.", models[k].2),
+                (Ok(()), None) => format!("The AI picks the {role} helper's model itself."),
+            });
+            col.remove(&me);
+            col.append(&roles_card(models.clone(), starts, &col, &st));
         });
         b.append(&btn);
     }

@@ -43,6 +43,8 @@ pub(crate) enum FromNet {
     Keyed { url: String, key: String, found: String },
     /// The cloud models an account's key opened, for the card that adds one.
     Cloud { provider: aios_rail::models::Provider, key: String, found: String, replace: Option<usize> },
+    /// Every model helpers can run on, the accounts' own `starts` first, for the Roles card.
+    Roles { models: Vec<pages::model::Choice>, starts: usize },
 }
 
 /// The socket on its own thread: reconnects every 3 s; every event goes to a plain std channel
@@ -401,6 +403,7 @@ fn main() {
                         else { model_col2.append(&models_card(&only, &engine_env(), Some(key), &model_col2, &to_ui2, &status2)); }
                     }
                     FromNet::Cloud { provider, key, found, replace } => { status2.set_text(""); model_col2.append(&cloud_models_card(provider, &found, key, replace, &model_col2, &status2, &cloud2)); }
+                    FromNet::Roles { models, starts } => { status2.set_text(""); model_col2.append(&pages::model::roles_card(std::rc::Rc::new(models), starts, &model_col2, &status2)); }
                     FromNet::Down => { spinner2.stop(); status2.set_text("The AI OS service is not running — retrying…"); }
                     FromNet::Event(ev) => {
                         if let Event::Skills { notebooks } = &ev { pages::skills::fill(&skills_col2, notebooks, &say2); continue; }

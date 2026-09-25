@@ -35,6 +35,62 @@ pub fn v1(url: &str) -> String {
     if url.contains("/v1beta/") { url.trim_end_matches('/').to_string() } else { format!("{}/v1", url.trim_end_matches('/')) }
 }
 
+/// The helper roles (helpers design), in the order the Roles card shows them.
+pub const HELPER_ROLES: [&str; 6] = ["coding", "design", "reasoning", "review", "debugging", "art"];
+/// Seconds an answer may take before its model goes to the back of a helper's list.
+pub const SLOW: u32 = 120;
+
+/// Whether a model's name says it is made for a helper role (model per role, 2026-09-25).
+/// ponytail: by name only; a provider's own model tags if one ever lists them.
+pub fn fits(role: &str, model: &str) -> bool {
+    let words: &[&str] = match role {
+        "coding" | "debugging" => &["cod", "devstral"],
+        "reasoning" | "review" => &["think", "reason", "-r1", "deepseek", "kimi", "qwq", "magistral", "gpt-oss-120b", "ultra"],
+        // Helpers have no screen, so design and art want a big all-round model, not one that sees.
+        _ => &["kimi", "gemini", "large", "medium", "maverick", "235b", "qwen3-max", "deepseek-v3", "gpt-oss-120b"],
+    };
+    let l = model.to_lowercase();
+    words.iter().any(|w| l.contains(w))
+}
+
+/// `speeds.tsv` (`url<TAB>model<TAB>seconds`, written by the engine after each cloud answer) by `url model`.
+pub fn speeds(tsv: &str) -> std::collections::HashMap<String, u32> {
+    tsv.lines().filter_map(|l| {
+        let [url, model, s] = l.split('\t').collect::<Vec<_>>()[..] else { return None };
+        Some((format!("{url} {model}"), s.parse().ok()?))
+    }).collect()
+}
+
+/// `roles.tsv` (`role<TAB>url<TAB>model`, the owner's picks on the Roles card) by role.
+pub fn role_picks(tsv: &str) -> std::collections::HashMap<String, (String, String)> {
+    tsv.lines().filter_map(|l| {
+        let [role, url, model] = l.split('\t').collect::<Vec<_>>()[..] else { return None };
+        Some((role.to_string(), (url.to_string(), model.to_string())))
+    }).collect()
+}
+
+/// The order helper `i` of `role` tries `models` (`(url, model)`, one per account first — `starts`
+/// of them — then the other models those keys open): the owner's pick, then models made for the
+/// role, fastest first, then the rest spread over the accounts from account `i`, and models slower
+/// than `SLOW` last. Helpers of one role start on different fitting models, so they spread too.
+pub fn rank(role: &str, models: &[(&str, &str)], i: usize, starts: usize, speeds: &std::collections::HashMap<String, u32>, picks: &std::collections::HashMap<String, (String, String)>) -> Vec<usize> {
+    let starts = starts.min(models.len());
+    let mut spread: Vec<usize> = (0..starts).map(|k| (i + k) % starts).collect();
+    spread.extend(starts..models.len());
+    let secs = |k: usize| speeds.get(&format!("{} {}", models[k].0, models[k].1)).copied();
+    let picked = |k: usize| picks.get(role).is_some_and(|(u, m)| u == models[k].0 && m == models[k].1);
+    let slow = |k: usize| secs(k).is_some_and(|s| s > SLOW);
+    let mut fitting: Vec<usize> = (0..models.len()).filter(|&k| !picked(k) && !slow(k) && fits(role, models[k].1)).collect();
+    // ponytail: an untimed model counts as 30 s; timed ones take over as answers come.
+    fitting.sort_by_key(|&k| secs(k).unwrap_or(30));
+    if !fitting.is_empty() { let n = i % fitting.len(); fitting.rotate_left(n) }
+    let mut order: Vec<usize> = spread.iter().copied().filter(|&k| picked(k)).collect();
+    order.extend(&fitting);
+    order.extend(spread.iter().copied().filter(|&k| !picked(k) && !slow(k) && !fitting.contains(&k)));
+    order.extend(spread.iter().copied().filter(|&k| !picked(k) && slow(k)));
+    order
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileKind { Text, Image, Other }
@@ -214,6 +270,19 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_role_starts_on_a_model_made_for_it_and_slow_ones_go_last() {
+        let models = [("o", "big-chat"), ("n", "moonshotai/kimi-k3"), ("o", "qwen/qwen3-coder:free"), ("n", "llama-3.1-8b-instruct")];
+        let speeds = super::speeds("n\tmoonshotai/kimi-k3\t300\no\tqwen/qwen3-coder:free\t12\nbad line\n");
+        let none = Default::default();
+        assert_eq!(rank("coding", &models, 0, 2, &speeds, &none), vec![2, 0, 3, 1], "the coder first, the slow kimi last");
+        assert_eq!(rank("reasoning", &models, 1, 2, &speeds, &none), vec![0, 2, 3, 1], "no fast fitting model: spread from account 1, the slow kimi last");
+        let picks = role_picks("reasoning\tn\tmoonshotai/kimi-k3\n");
+        assert_eq!(rank("reasoning", &models, 0, 2, &speeds, &picks)[0], 1, "the owner's pick first, slow or not");
+        let two = [("a", "x-coder"), ("b", "y-coder")];
+        assert_ne!(rank("coding", &two, 0, 2, &none, &none)[0], rank("coding", &two, 1, 2, &none, &none)[0], "two coders spread");
+    }
 
     #[test]
     fn kind_is_the_first_key_of_every_event() {

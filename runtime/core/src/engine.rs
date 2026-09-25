@@ -604,9 +604,14 @@ impl<M: Model> Engine<M> {
             // The words so far on the status line, and Stop dropping the answer where it stands:
             // a big file at 5 words a second is a long answer (the owner, 2026-09-24).
             let (stop, sink, id) = (&self.stop, &mut self.sink, turn.id.clone());
-            let answer = self.model.next_move_watched(&p, &mut |words| {
+            let answer = self.model.next_move_watched(&p, &mut |h| {
                 if stop.load(Ordering::SeqCst) { return false }
-                sink(&Event::Busy { job_id: id.clone(), text: format!("Writing its answer… {words} words") });
+                let text = match h {
+                    crate::model::Heard { writing: 0, thinking: 0 } => "Thinking…".to_string(),
+                    crate::model::Heard { writing: 0, thinking } => format!("Thinking… {thinking} words"),
+                    crate::model::Heard { writing, .. } => format!("Writing its answer… {writing} words"),
+                };
+                sink(&Event::Busy { job_id: id.clone(), text });
                 true
             });
             // The cloud pool switched models on its own: the owner hears which (2026-09-25).
@@ -921,8 +926,8 @@ impl<M: Model> Engine<M> {
             }
         }
         self.tick(&turn.id, format!("{} helper{} working…", tasks.len(), if tasks.len() == 1 { "" } else { "s" }));
-        let (id, stop, folder) = (turn.id.clone(), self.stop.clone(), PathBuf::from(&turn.folder));
-        let reports = crate::helpers::run(tasks, &models, accounts.len(), &folder, &stop, &mut |text| self.emit(Event::Step { job_id: id.clone(), plan_step: 0, text, ok: true }));
+        let (id, stop, folder, dir) = (turn.id.clone(), self.stop.clone(), PathBuf::from(&turn.folder), self.model.cloud_dir());
+        let reports = crate::helpers::run(tasks, &models, accounts.len(), dir.as_deref(), &folder, &stop, &mut |text| self.emit(Event::Step { job_id: id.clone(), plan_step: 0, text, ok: true }));
         let text = format!("the helpers are back:\n{}", crate::helpers::summary(&reports));
         if reports.iter().any(|r| r.done) { Outcome::ok(text) } else { Outcome::err(text) }
     }
@@ -1209,9 +1214,9 @@ mod tests {
     struct Streaming { inner: crate::model::FakeModel, before: std::cell::RefCell<Option<Box<dyn FnOnce()>>> }
     impl Model for Streaming {
         fn next_move(&self, p: &Prompt) -> Result<Move, ModelError> { self.inner.next_move(p) }
-        fn next_move_watched(&self, p: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
+        fn next_move_watched(&self, p: &Prompt, watch: &mut dyn FnMut(crate::model::Heard) -> bool) -> Result<Move, ModelError> {
             if let Some(b) = self.before.borrow_mut().take() { b() }
-            if !watch(12) { return Err(ModelError::Stopped) }
+            if !watch(crate::model::Heard { thinking: 0, writing: 12 }) { return Err(ModelError::Stopped) }
             self.inner.next_move(p)
         }
     }

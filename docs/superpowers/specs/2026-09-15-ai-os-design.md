@@ -650,3 +650,7 @@ Two things the owner hit on his first full-access run.
 - **2026-09-25**, more free providers: Groq, Mistral, Gemini and Cerebras buttons on the Cloud card
   (all OpenAI-style; `aios_proto::v1` because Gemini's address carries its own version); the chat
   filter drops speech, image and moderation models for every provider; each provider links to its key page on the card and in the guide. (v0.14.1)
+- **2026-09-25**, model per role (spec `2026-09-25-model-per-role-design.md`): every cloud answer's
+  time is kept in `speeds.tsv`; each helper role starts on the owner's pick (`roles.tsv`, the
+  Helpers' models card) or a model whose name fits the role, fastest first, and models slower than
+  2 minutes an answer go last (`aios_proto::rank`). The status line counts thinking words. (v0.15.0)
