@@ -78,6 +78,13 @@ fn result_card(kind: CardKind, text: &str, files: &[ChangedFile], job_id: &str) 
 impl Cards {
     fn push(&mut self, c: Card) -> Vec<Change> { self.list.push(c); vec![Change::Added(self.list.len() - 1)] }
 
+    /// `busy_after`, knowing whether a job's card is still open: words said mid-job (the cloud
+    /// switching models) are not the end of it, and the spinner keeps turning.
+    pub fn busy_after(&self, ev: &Event) -> Option<bool> {
+        if matches!(ev, Event::Said { .. }) && self.building.is_some() { return None }
+        busy_after(ev)
+    }
+
     fn open_building(&mut self, job_id: &str, name: &str, understood: &str, alert: bool) -> usize {
         self.list.push(Card { kind: CardKind::Building { name: name.into(), understood: understood.into(), steps: vec![], actions: vec![], collapsed: false, alert }, text: understood.into(), buttons: vec![btn("Stop", "stop")], opens: vec![], thumbnails: vec![], job_id: Some(job_id.into()) });
         let i = self.list.len() - 1; self.building = Some(i); i
@@ -163,8 +170,11 @@ impl Cards {
             Event::Learned { job_id, lines, pending } => {
                 // Keep/Discard act on whatever waits now, and every learning turn drops what the one
                 // before left waiting: an older card's buttons would keep an entry nobody read there.
+                // An alert's learning turn is not the owner moving on: the engine keeps what waits
+                // (engine.rs `learn`), so its buttons stay too.
+                let alert = self.list.iter().any(|c| c.job_id.as_deref() == Some(job_id.as_str()) && matches!(c.kind, CardKind::Building { alert: true, .. }));
                 let mut ch: Vec<Change> = vec![];
-                for (i, c) in self.list.iter_mut().enumerate() {
+                for (i, c) in self.list.iter_mut().enumerate().filter(|_| !alert) {
                     let had = c.buttons.len();
                     c.buttons.retain(|b| b.say != KEEP && b.say != DISCARD);
                     if c.buttons.len() != had { ch.push(Change::Updated(i)); }

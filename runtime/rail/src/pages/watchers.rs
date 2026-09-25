@@ -4,6 +4,11 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use std::sync::mpsc::Sender;
 
+thread_local! {
+    /// The watchers whose rows are open: every alert redraws the page, and an open row stays open.
+    static OPEN: std::cell::RefCell<std::collections::HashSet<String>> = Default::default();
+}
+
 pub fn fill(col: &gtk::Box, watchers: &[WatcherView], say: &Sender<Request>) {
     super::empty(col);
     if watchers.is_empty() {
@@ -21,7 +26,9 @@ pub fn fill(col: &gtk::Box, watchers: &[WatcherView], say: &Sender<Request>) {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row.append(&dot); row.append(&head);
         // A click opens its reason and last alert, with its switches.
-        let more = gtk::Expander::builder().label_widget(&row).build();
+        let more = gtk::Expander::builder().label_widget(&row).expanded(OPEN.with(|o| o.borrow().contains(&w.name))).build();
+        let n = w.name.clone();
+        more.connect_expanded_notify(move |e| OPEN.with(|o| { let mut o = o.borrow_mut(); if e.is_expanded() { o.insert(n.clone()); } else { o.remove(&n); } }));
         let inside = gtk::Box::new(gtk::Orientation::Vertical, 4);
         inside.append(&super::msg(&format!("Why: {}", w.reason)));
         if !w.last_text.is_empty() { let l = super::msg(&format!("Last alert: {}", w.last_text)); l.add_css_class("dim"); inside.append(&l); }

@@ -661,3 +661,7 @@ Two things the owner hit on his first full-access run.
 - **2026-09-25**, big files in parts, held to: an answer writing a file (write_file/append_file, as a
   tool call or in JSON) is stopped past `FILE_WORDS` (1500) and the model is told to write it in
   parts; replies stay unlimited. A helper is told the same, on the same model. (v0.15.2)
+- **2026-09-25**, leftovers from the watchers release: words said mid-job (the cloud switching
+  models) keep the spinner turning; an alert's learning turn leaves the owner's Keep/Discard in
+  place, as the engine already did; open Watchers rows stay open when the page redraws; a watcher's
+  alert still waiting is replaced by its newer one instead of queueing behind it. (v0.15.3)
