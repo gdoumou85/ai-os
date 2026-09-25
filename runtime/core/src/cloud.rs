@@ -47,12 +47,14 @@ pub struct Pooled<M: Model> {
     pub others: Box<dyn Fn(&Account) -> Vec<String>>,
     /// A switch to another model the owner has not been told about yet.
     news: RefCell<Option<String>>,
+    /// Account models whose provider refused native tools, by `url model`: asked on the JSON path.
+    no_tools: RefCell<std::collections::HashSet<String>>,
 }
 
 impl<M: Model> Pooled<M> {
     pub fn new(local: M, dir: PathBuf) -> Self {
         let others = Box::new(|a: &Account| aios_proto::chat_models(&a.url, find::ask(a.kind, &a.url, Some(&a.key)).into_iter().filter_map(|f| f.model).collect()));
-        Self { local, dir, resting: RefCell::default(), others, news: RefCell::default() }
+        Self { local, dir, resting: RefCell::default(), others, news: RefCell::default(), no_tools: RefCell::default() }
     }
 
     fn resting(&self, url: &str, model: &str) -> bool {
@@ -61,8 +63,20 @@ impl<M: Model> Pooled<M> {
 
     /// One account's answer from `model`; a used-up model is left to rest.
     fn ask(&self, a: &Account, model: &str, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
-        let m = RemoteModel { key: Some(a.key.clone()), ..RemoteModel::at(a.kind, &a.url, model) };
-        let answer = m.next_move_watched(&crate::model::format_spelled(prompt), watch);
+        let id = format!("{} {model}", a.url);
+        // Native tools for an OpenAI-style account (cloud native tools spec); the answer's shape in
+        // words on the JSON path, for a provider that took no tools.
+        let ask = |tools: bool, watch: &mut dyn FnMut(usize) -> bool| {
+            let m = RemoteModel { key: Some(a.key.clone()), tools, ..RemoteModel::at(a.kind, &a.url, model) };
+            if tools { m.next_move_watched(prompt, watch) } else { m.next_move_watched(&crate::model::format_spelled(prompt), watch) }
+        };
+        let tools = a.kind == Kind::OpenAi && !self.no_tools.borrow().contains(&id);
+        let mut answer = ask(tools, watch);
+        if tools && matches!(&answer, Err(ModelError::Http(e)) if e.to_lowercase().contains("tool")) {
+            eprintln!("cloud: {} {model} takes no tools; answering in JSON from now on", a.name);
+            self.no_tools.borrow_mut().insert(id);
+            answer = ask(false, watch);
+        }
         if let Err(ModelError::Quota(why)) = &answer {
             eprintln!("cloud: {} {model} is used up ({why})", a.name);
             self.resting.borrow_mut().insert(format!("{} {model}", a.url), Instant::now());
@@ -181,6 +195,20 @@ mod tests {
         assert_eq!(p.news(), None, "once");
         assert_eq!(std::fs::read_to_string(d.join(ACCOUNTS)).unwrap(), format!("A\tollama\thttp://{at}\tother\tk\n"));
         assert_eq!(text(p.next_move(&prompt()).unwrap()), "again", "the new model is asked straight away next time");
+    }
+
+    #[test]
+    fn a_provider_without_tools_is_asked_in_json_and_stays_there() {
+        let d = temp_root("cloud-no-tools");
+        std::fs::write(d.join(SWITCH), "").unwrap();
+        let refused = json_response("404 Not Found", r#"{"error":{"message":"No endpoints found that support tool use."}}"#);
+        let json = |t: &str| json_response("200 OK", &serde_json::json!({ "choices": [{ "message": { "content": serde_json::json!({ "move": "reply", "text": t }).to_string() } }] }).to_string());
+        let at = serve_each(vec![refused, json("first"), json("second")]);
+        std::fs::write(d.join(ACCOUNTS), format!("A\topenai\thttp://{at}\tm\tk\n")).unwrap();
+        let p = Pooled::new(local(), d);
+        assert_eq!(text(p.next_move(&prompt()).unwrap()), "first");
+        assert!(p.no_tools.borrow().contains(&format!("http://{at} m")));
+        assert_eq!(text(p.next_move(&prompt()).unwrap()), "second", "asked in JSON straight away");
     }
 
     #[test]
