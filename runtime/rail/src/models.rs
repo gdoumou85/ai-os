@@ -96,12 +96,20 @@ pub const NVIDIA: Provider = Provider { name: "NVIDIA", kind: "openai", url: "ht
 pub const OLLAMA: Provider = Provider { name: "Ollama", kind: "ollama", url: "https://ollama.com" };
 /// OpenRouter: many providers behind one key, OpenAI-style under `/api` (so `/api/v1/…`).
 pub const OPENROUTER: Provider = Provider { name: "OpenRouter", kind: "openai", url: "https://openrouter.ai/api" };
+/// Free tiers with no card (2026-09-25, the owner: "we must find more free providers"). All
+/// OpenAI-style; Gemini's address carries its own version (`aios_proto::v1`).
+pub const GROQ: Provider = Provider { name: "Groq", kind: "openai", url: "https://api.groq.com/openai" };
+pub const MISTRAL: Provider = Provider { name: "Mistral", kind: "openai", url: "https://api.mistral.ai" };
+pub const GEMINI: Provider = Provider { name: "Gemini", kind: "openai", url: "https://generativelanguage.googleapis.com/v1beta/openai" };
+pub const CEREBRAS: Provider = Provider { name: "Cerebras", kind: "openai", url: "https://api.cerebras.ai" };
+/// Every provider the Cloud card has a button for, in the order shown.
+pub const PROVIDERS: [Provider; 7] = [NVIDIA, OPENROUTER, GROQ, MISTRAL, GEMINI, CEREBRAS, OLLAMA];
 
 /// The models worth offering from a provider's list (`aios_proto::chat_models`).
 pub fn chat_models(provider: Provider, names: Vec<String>) -> Vec<String> { aios_proto::chat_models(provider.url, names) }
 
 /// The provider an account was added with, by the name its line keeps.
-pub fn provider_named(name: &str) -> Option<Provider> { [NVIDIA, OPENROUTER, OLLAMA].into_iter().find(|p| p.name == name) }
+pub fn provider_named(name: &str) -> Option<Provider> { PROVIDERS.into_iter().find(|p| p.name == name) }
 
 /// The key of the `i`th account, to ask its provider again which models it opens.
 pub fn account_key(tsv: &str, i: usize) -> Option<String> {
@@ -161,6 +169,14 @@ mod tests {
         assert_eq!(with_model(tsv, 0, "a\tb"), None, "a name with a tab is refused");
         assert_eq!(account_key(tsv, 1).as_deref(), Some("k2"));
         assert_eq!(provider_named("Ollama"), Some(OLLAMA));
+        assert_eq!(provider_named("Gemini"), Some(GEMINI));
+        assert_eq!(aios_proto::v1(GEMINI.url), "https://generativelanguage.googleapis.com/v1beta/openai");
+        assert_eq!(aios_proto::v1(GROQ.url), "https://api.groq.com/openai/v1");
+        let gemini = ["models/gemini-2.5-flash", "models/text-embedding-004", "models/imagen-4"].map(String::from).to_vec();
+        assert_eq!(chat_models(GEMINI, gemini), vec!["gemini-2.5-flash"]);
+        let groq = ["llama-3.3-70b-versatile", "whisper-large-v3", "openai/gpt-oss-120b", "meta-llama/llama-guard-4-12b"].map(String::from).to_vec();
+        assert_eq!(chat_models(GROQ, groq), vec!["llama-3.3-70b-versatile", "openai/gpt-oss-120b"]);
+        for p in PROVIDERS { assert!(safe(p.url), "{}", p.url); }
         let three = "A\tollama\tu\tm\tk\nB\topenai\tu\tm\tk\nC\topenai\tu\tm\tk\n";
         assert_eq!(to_front(three, 2), "C\topenai\tu\tm\tk\nA\tollama\tu\tm\tk\nB\topenai\tu\tm\tk\n");
         assert_eq!(to_front(three, 0), three);

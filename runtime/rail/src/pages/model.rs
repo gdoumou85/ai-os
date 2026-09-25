@@ -69,15 +69,22 @@ pub(crate) fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gt
         row.append(&rm);
         b.append(&row);
     }
-    let add = gtk::Label::new(Some("Add an account: paste its key here and press its provider.
-• NVIDIA: make a key at build.nvidia.com (sign in, then Get API Key).
-• OpenRouter: openrouter.ai → Keys (its free models end in \":free\").
-• Ollama: ollama.com → Settings → Keys."));
+    // Each provider's key page as a link (the owner, 2026-09-25): a click opens the browser there.
+    let add = gtk::Label::new(None);
+    add.set_markup("Add an account: make a free key on the provider's page, paste it here, and press that provider's button.
+• <a href=\"https://build.nvidia.com/settings/api-keys\">NVIDIA</a>: sign in, then Generate API Key.
+• <a href=\"https://openrouter.ai/settings/keys\">OpenRouter</a>: Create Key. Its free models end in \":free\" and allow about 50 answers a day.
+• <a href=\"https://console.groq.com/keys\">Groq</a>: Create API Key. Very fast.
+• <a href=\"https://console.mistral.ai/api-keys\">Mistral</a>: choose the free Experiment plan, then Create new key.
+• <a href=\"https://aistudio.google.com/apikey\">Gemini</a>: Create API key. Its models can look at pictures.
+• <a href=\"https://cloud.cerebras.ai/platform\">Cerebras</a>: API Keys. Very fast.
+• <a href=\"https://ollama.com/settings/keys\">Ollama</a>: its cloud models need paid credits.");
     add.set_xalign(0.0); add.set_wrap(true);
     let entry = gtk::PasswordEntry::new(); entry.set_show_peek_icon(true);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    // Seven providers wrap onto more lines rather than widen the window.
+    let row = gtk::FlowBox::new(); row.set_selection_mode(gtk::SelectionMode::None); row.set_max_children_per_line(4); row.set_column_spacing(6); row.set_row_spacing(6);
     b.append(&add); b.append(&entry); b.append(&row);
-    for provider in [aios_rail::models::NVIDIA, aios_rail::models::OPENROUTER, aios_rail::models::OLLAMA] {
+    for provider in aios_rail::models::PROVIDERS {
         let go = gtk::Button::with_label(&format!("{} key", provider.name));
         row.append(&go);
         let (col, me, tx, st, entry) = (column.clone(), w.clone(), to_ui.clone(), status.clone(), entry.clone());
