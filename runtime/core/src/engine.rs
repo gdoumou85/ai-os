@@ -125,7 +125,9 @@ fn promises_work(text: &str) -> bool {
     let under_way = t.split(|c: char| !c.is_alphanumeric() && c != '\'').collect::<Vec<_>>()
         .windows(2).any(|w| matches!(w[0], "i'm" | "am" | "we're") && w[1].len() > 4 && w[1].ends_with("ing"));
     under_way || ["i will ", "i'll ", "let me ", "proceeding"].iter().any(|w| t.contains(w))
-        || (["i cannot ", "i can't ", "i am unable", "i'm unable", "outside what i can"].iter().any(|w| t.contains(w)) && !t.contains("clear"))
+        || (["i cannot ", "i can't ", "i could not ", "i couldn't ", "i am unable", "i'm unable", "i was unable", "outside what i can"].iter().any(|w| t.contains(w)) && !t.contains("clear"))
+        // "no filesystem action tool", "no file or command tools are available" (free cloud models, 2026-09-25)
+        || (t.contains("tool") && ["no ", "not ", "unavailable", "unable"].iter().any(|w| t.contains(w)))
 }
 
 /// Whether the user's own words ask for something to hold from now on. The model filled
@@ -1465,6 +1467,8 @@ mod tests {
         assert!(promises_work("I'm reviewing the current files and all design documents together now"));
         assert!(promises_work("I'll summarize it next."));
         assert!(promises_work("I cannot delete that project"));
+        assert!(promises_work("I could not inspect the full blueprint because this turn exposed no filesystem action tool."));
+        assert!(promises_work("I'm unable to inspect the files because no file or command tools are available."));
         assert!(!promises_work("Hi! I'm ready to help. What would you like to do?"));
         assert!(!promises_work("Done: the game now has a score board."));
         assert!(!promises_work("I cannot forget that; press Clear."));
