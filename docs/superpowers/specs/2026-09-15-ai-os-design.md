@@ -612,3 +612,7 @@ Two things the owner hit on his first full-access run.
   coming ("I'm reviewing…", "I'll…", "I cannot…") is answered once with "a reply ends your turn
   and does nothing: do it now". The v0.8.6 front-door check (`promises_work`) had been lost in the
   one-loop rewrite; a free cloud model twice said it was reviewing files and read none. (v0.12.2)
+- **2026-09-25**, updates that stop say so: the installer finishes an interrupted dpkg
+  (`dpkg --configure -a`, the AI's own apt stopped half way) and waits up to 5 minutes on apt's
+  lock before installing packages; "Update now" says "did NOT finish" when the installer failed,
+  where it said "Finished" either way. (v0.12.3)
