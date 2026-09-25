@@ -619,6 +619,12 @@ impl<M: Model> Engine<M> {
             let mv = match answer {
                 Ok(m) => { unreadable = 0; m }
                 // A whole file past the runner's length limit: not a bad format, so said as what it is.
+                // A file too big for one answer: told to write it in parts, as often as it takes
+                // (MAX_MOVES still ends a model that never listens).
+                Err(ModelError::TooBig(words)) => {
+                    self.store.push_message("result", &crate::model::too_big(words))?;
+                    continue;
+                }
                 Err(ModelError::CutOff(words)) if unreadable == 0 => {
                     unreadable = 1;
                     self.store.push_message("result", &format!("your answer was cut off at the model's length limit after {words} words, so nothing was done. Write a big file in parts: write_file the first part, then append_file each next part."))?;

@@ -86,6 +86,8 @@ fn one(t: &HelperTask, models: &[Account], order: Vec<usize>, dir: Option<&Path>
         let mv = match m.next_move_watched(&p, &mut |_| !stop.load(Ordering::SeqCst)) {
             Ok(mv) => { if let Some(d) = dir { crate::cloud::note_speed(d, &a.url, &a.model, began.elapsed()) } mv }
             Err(ModelError::Stopped) => return report(&a.model, false, "stopped".into()),
+            // Not the model failing: the same model is told to write the file in parts.
+            Err(ModelError::TooBig(w)) => { user = format!("{user}\n{}", crate::model::too_big(w)); continue }
             Err(e) => {
                 last_err = cut(&e.to_string(), 200);
                 at += 1;

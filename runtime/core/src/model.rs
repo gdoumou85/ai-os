@@ -35,6 +35,7 @@ pub enum ModelError {
     #[error("the answer was stopped")] Stopped,
     /// The runner stopped the answer at its length limit: said as that, not as a bad format.
     #[error("the answer was cut off at the model's length limit, {0} words in")] CutOff(usize),
+    #[error("the file in the answer passed {0} words; big files go in parts")] TooBig(usize),
     /// The answer went on and on with nothing to read: blank space, the loop a model held to a
     /// JSON format can fall into (the owner's 27B, 2026-09-25: 40,000 tokens, 33 words, 4 hours).
     #[error("the answer got stuck writing blank space, {0} words in")] Stuck(usize),
@@ -438,6 +439,17 @@ fn whole_body_content(kind: Kind, body: &str) -> Result<Option<String>, ModelErr
 /// none ever parsed, that raw body is tried once as a whole, non-streamed answer — a runner that
 /// ignored `stream: true` and just sent its ordinary response still answers. Only when that also
 /// yields nothing is it said as what it is, with the body's start.
+/// Words a file may have in one answer before the answer is stopped. The brief asks for parts of
+/// about 150 lines; some models write 5000 words in one go anyway, a long wait that one bad
+/// character throws away (the owner, 2026-09-25: "didn't we make it to break big jobs in smaller
+/// sections?"). Replies and other answers are not held to it.
+pub const FILE_WORDS: usize = 1500;
+
+/// What the model is told when its file was stopped at `FILE_WORDS`.
+pub fn too_big(words: usize) -> String {
+    format!("your file passed {words} words in one answer, so it was stopped and nothing was written. Write it in parts of about 150 lines: write_file the first part, then append_file each next part, one per answer.")
+}
+
 pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Duration, watch: &mut dyn FnMut(Heard) -> bool) -> Result<String, ModelError> {
     use std::io::BufRead;
     let cap = loaded_context() * 4;
@@ -484,6 +496,8 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
         if cut { return Err(ModelError::CutOff(words(&content, &calls))) }
         if told.elapsed() >= every {
             told = std::time::Instant::now();
+            let file = calls.iter().any(|c| matches!(c.0.as_str(), "write_file" | "append_file")) || content.contains("\"write_file\"") || content.contains("\"append_file\"");
+            if file && words(&content, &calls) > FILE_WORDS { return Err(ModelError::TooBig(words(&content, &calls))) }
             // A slow thinker shows its thinking words, so it does not look frozen (the owner, 2026-09-25).
             if !watch(Heard { thinking: thinking.split_whitespace().count(), writing: words(&content, &calls) }) { return Err(ModelError::Stopped) }
         }
@@ -800,6 +814,16 @@ mod tests {
         let s = "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"move\\\":\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\\"reply\\\",\\\"thought\\\":\\\"t\\\",\\\"text\\\":\\\"hi\\\",\\\"outcome\\\":\\\"done\\\"}\"}}]}\n\ndata: [DONE]\n";
         let got = read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true).unwrap();
         assert!(matches!(parse_content(&got).unwrap(), Move::Reply { text, .. } if text == "hi"), "{got}");
+    }
+
+    #[test]
+    fn a_file_too_big_for_one_answer_is_stopped_but_a_long_reply_is_not() {
+        let piece = |name: Option<&str>, args: &str| format!("data: {}\n\n", serde_json::json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "function": match name { Some(n) => serde_json::json!({ "name": n, "arguments": args }), None => serde_json::json!({ "arguments": args }) } }] } }] }));
+        let mut s = piece(Some("write_file"), "{\"path\":\"a.py\",\"contents\":\"");
+        for _ in 0..400 { s += &piece(None, "x = 1 + 2 ") }
+        assert!(matches!(read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::TooBig(w)) if w > FILE_WORDS));
+        let long = format!("{{\"message\":{{\"content\":\"{}\"}},\"done\":true}}", "word ".repeat(3000));
+        assert!(read_stream(Kind::Ollama, long.as_bytes(), std::time::Duration::ZERO, &mut |_| true).is_ok(), "a long reply is the model's to write");
     }
 
     #[test]

@@ -658,3 +658,6 @@ Two things the owner hit on his first full-access run.
   tabs or backslashes JSON has no escape for (`\d` in a regex) is repaired before it is read; the
   retry tells a tool-calling model how to write its arguments, and the second failure says what was
   wrong. The owner's trading assistant failed after some work, writing its files. (v0.15.1)
+- **2026-09-25**, big files in parts, held to: an answer writing a file (write_file/append_file, as a
+  tool call or in JSON) is stopped past `FILE_WORDS` (1500) and the model is told to write it in
+  parts; replies stay unlimited. A helper is told the same, on the same model. (v0.15.2)
