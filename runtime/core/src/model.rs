@@ -215,6 +215,17 @@ fn format_for(prompt: &Prompt) -> serde_json::Value {
     if prompt.no_screen { schema::without_screen(s) } else { s }
 }
 
+/// The prompt with the answer's shape written out in words too. ollama.com takes `format` only as
+/// "some JSON" (nemotron-3-super answered `{"move": {"type": "greeting"}}`, the owner, 2026-09-25),
+/// and a free OpenRouter model's provider may drop `response_format` the same way; read, the schema
+/// is followed. Only for cloud accounts: a home runner holds the model to it already, and a slow
+/// one would pay for the longer prompt.
+pub fn format_spelled(prompt: &Prompt) -> Prompt {
+    let mut p = prompt.clone();
+    p.system.push_str(&format!("\n\nYour answer is one JSON object matching this JSON Schema exactly, with no other text:\n{}", format_for(prompt)));
+    p
+}
+
 /// `prompt.history` as chat messages, oldest first — the conversation between the system prompt
 /// and the newest `user` message.
 fn history(prompt: &Prompt) -> impl Iterator<Item = serde_json::Value> + '_ {
@@ -568,6 +579,14 @@ mod tests {
         let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![], image: None, ..Default::default() });
         assert_eq!(b["options"]["num_ctx"], m.context_tokens());
         assert_eq!(FakeModel::new(vec![]).context_tokens(), 8192, "the trait default");
+    }
+
+    #[test]
+    fn a_cloud_prompt_spells_out_the_answers_shape() {
+        let p = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply"], image: None, ..Default::default() };
+        let told = format_spelled(&p);
+        assert!(told.system.starts_with("s\n\n") && told.system.contains(r#""enum":["reply"]"#), "{}", told.system);
+        assert_eq!(told.user, "u");
     }
 
     #[test]

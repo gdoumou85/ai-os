@@ -666,6 +666,10 @@ impl<M: Model> Engine<M> {
                     self.emit(Event::NeedsAnswer { job_id: turn.id.clone(), questions: vec![question], options: vec![options] });
                     return Ok(());
                 }
+                // Nothing on the list: no card for it, so a plain reply after still reads as one.
+                Move::Todo { items, .. } if prompt::todo_lines(&items).is_empty() => {
+                    self.store.push_message("result", "your to-do list was empty: act, or reply")?;
+                }
                 Move::Todo { items, .. } => {
                     turn.plan = prompt::todo_lines(&items);
                     self.emit(Event::Plan { job_id: turn.id.clone(), steps: turn.plan.clone() });
