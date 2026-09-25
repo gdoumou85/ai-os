@@ -41,10 +41,12 @@ pub fn check() -> Option<String> {
 }
 
 /// The command a terminal runs for "Update now": the installer in update mode, which keeps the
-/// model already chosen, then a pause so the person can read how it went.
+/// model already chosen, then a pause so the person can read how it went — and whether it did:
+/// a stopped update said "Finished" too (the owner, 2026-09-25, dpkg interrupted).
 pub fn update_command() -> String {
-    format!("curl -fsSL https://raw.githubusercontent.com/{REPO}/master/install/get.sh | bash -s -- --update; \
-             echo; read -rp 'Finished. Restart the computer for the new version, then press Enter to close this window. '")
+    format!("if curl -fsSL https://raw.githubusercontent.com/{REPO}/master/install/get.sh | bash -s -- --update; \
+             then echo; read -rp 'Finished. Restart the computer for the new version, then press Enter to close this window. '; \
+             else echo; read -rp 'The update did NOT finish: the lines above say why. Your old version still works. Press Enter to close this window. '; fi")
 }
 
 #[cfg(test)]

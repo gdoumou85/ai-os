@@ -24,8 +24,11 @@ echo "== installing the AI OS for $owner (sudo will ask for your password)"
 sudo -v
 
 echo "== packages"
-sudo env DEBIAN_FRONTEND=noninteractive apt-get update
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y btrfs-progs libgtk-4-1 curl gnome-text-editor \
+# An install cut off half way (the AI's own apt, stopped) leaves dpkg waiting; finish it first,
+# and wait for an apt still running rather than fail on its lock (the owner, 2026-09-25).
+sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update
+sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y btrfs-progs libgtk-4-1 curl gnome-text-editor \
   python3-venv npm cargo at-spi2-core \
   gstreamer1.0-tools gstreamer1.0-pipewire imagemagick   # the screen hand: a frame, and the grid drawn on it
 
