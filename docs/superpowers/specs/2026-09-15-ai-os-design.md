@@ -632,3 +632,7 @@ Two things the owner hit on his first full-access run.
   use" and gives every other one "Use this one", which moves it first in `cloud.tsv`; the rest
   stay behind it for when it fails or runs out (the owner: "I can't manually swap between cloud
   providers"). (v0.12.7)
+- **2026-09-25**, "no tool" is caught too: a free cloud model answered "I could not inspect the
+  full blueprint because this turn exposed no filesystem action tool" and guessed the rest.
+  `promises_work` now also takes "I could not / couldn't / was unable" and any claim that a tool
+  is missing, so the reply is sent back once with "act runs an action". (v0.12.8)
