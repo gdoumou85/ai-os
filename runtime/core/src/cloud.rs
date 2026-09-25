@@ -62,7 +62,7 @@ impl<M: Model> Pooled<M> {
     /// One account's answer from `model`; a used-up model is left to rest.
     fn ask(&self, a: &Account, model: &str, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
         let m = RemoteModel { key: Some(a.key.clone()), ..RemoteModel::at(a.kind, &a.url, model) };
-        let answer = m.next_move_watched(prompt, watch);
+        let answer = m.next_move_watched(&crate::model::format_spelled(prompt), watch);
         if let Err(ModelError::Quota(why)) = &answer {
             eprintln!("cloud: {} {model} is used up ({why})", a.name);
             self.resting.borrow_mut().insert(format!("{} {model}", a.url), Instant::now());

@@ -603,3 +603,12 @@ Two things the owner hit on his first full-access run.
   up, the pool asks the provider what else the key opens (`aios_proto::chat_models`, the same
   filter as the card), tries up to three, keeps the first that answers in `cloud.tsv`, and says
   so once in the chat (`Model::news`). (v0.12.1)
+- **2026-09-25**, cloud answers in shape: ollama.com takes `format` as plain JSON mode
+  (nemotron-3-super answered `{"move":"respond"}` under a `oneOf` schema, and ignored a flat one).
+  A cloud account's prompt now carries the narrowed schema in words (`model::format_spelled`);
+  with it the same model answered a correct `reply`. Home runners still only get `format`. A
+  to-do list with only blank items opens no card. (v0.12.2)
+- **2026-09-25**, promised work is done: a reply before any step that says work is under way or
+  coming ("I'm reviewing…", "I'll…", "I cannot…") is answered once with "a reply ends your turn
+  and does nothing: do it now". The v0.8.6 front-door check (`promises_work`) had been lost in the
+  one-loop rewrite; a free cloud model twice said it was reviewing files and read none. (v0.12.2)

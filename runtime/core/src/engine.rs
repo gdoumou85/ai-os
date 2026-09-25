@@ -115,6 +115,19 @@ pub fn is_stop(text: &str) -> bool {
 pub fn is_keep_learned(text: &str) -> bool { normalize(text) == "keep what you learned" }
 pub fn is_discard_learned(text: &str) -> bool { normalize(text) == "discard what you learned" }
 
+/// Whether a reply says work is under way or coming instead of doing it: a reply ends the turn and
+/// runs nothing. The owner, 2026-09-23 ("I will…" and nothing happened) and again on a free cloud
+/// model, 2026-09-25: "I'm reviewing the current files … now" twice, and nothing read. "I cannot"
+/// on a machine it has root on is the same (full-access rule); forgetting, which Clear does, is not.
+// ponytail: phrase list, a model's words in English; widen it when a live one slips past.
+fn promises_work(text: &str) -> bool {
+    let t = text.to_lowercase().replace('’', "'");
+    let under_way = t.split(|c: char| !c.is_alphanumeric() && c != '\'').collect::<Vec<_>>()
+        .windows(2).any(|w| matches!(w[0], "i'm" | "am" | "we're") && w[1].len() > 4 && w[1].ends_with("ing"));
+    under_way || ["i will ", "i'll ", "let me ", "proceeding"].iter().any(|w| t.contains(w))
+        || (["i cannot ", "i can't ", "i am unable", "i'm unable", "outside what i can"].iter().any(|w| t.contains(w)) && !t.contains("clear"))
+}
+
 /// Whether the user's own words ask for something to hold from now on. The model filled
 /// `remember` on its own — a project's description, "Blender is installed" — and every one of
 /// those notes pulled the next chat back to the old work (the owner, 2026-09-23).
@@ -547,7 +560,7 @@ impl<M: Model> Engine<M> {
     fn run_turn(&mut self, turn: &mut Job) -> Result<(), EngineError> {
         let _awake = executor::awake::hold("the AI is working");
         let mut unreadable = 0;
-        let mut reminded = false;
+        let (mut reminded, mut nudged) = (false, false);
         let mut moves = 0;
         // The last move, when it changes nothing done twice (todo, remember): the next may not be
         // the same. A 27B re-sent one to-do list every 20 seconds and never acted (the owner,
@@ -638,6 +651,11 @@ impl<M: Model> Engine<M> {
                 Move::Todo { .. } | Move::Remember { .. } if before.is_some() && before == last => {
                     self.store.push_message("result", "you just did that: now act on the first open item of your to-do list, or reply")?;
                 }
+                // Work promised before any was done: asked once to do it instead.
+                Move::Reply { text, .. } if !nudged && turn.steps.is_empty() && promises_work(&text) => {
+                    nudged = true;
+                    self.store.push_message("result", "a reply ends your turn and does nothing: you said you would do the work, so do it now with act (or todo first), or reply with what you actually found")?;
+                }
                 Move::Reply { text, outcome, .. } => {
                     if !reminded {
                         if let Some(note) = self.notes_not_updated(turn)? {
@@ -665,6 +683,10 @@ impl<M: Model> Engine<M> {
 (their answer) ", turn.request));
                     self.emit(Event::NeedsAnswer { job_id: turn.id.clone(), questions: vec![question], options: vec![options] });
                     return Ok(());
+                }
+                // Nothing on the list: no card for it, so a plain reply after still reads as one.
+                Move::Todo { items, .. } if prompt::todo_lines(&items).is_empty() => {
+                    self.store.push_message("result", "your to-do list was empty: act, or reply")?;
                 }
                 Move::Todo { items, .. } => {
                     turn.plan = prompt::todo_lines(&items);
@@ -1194,10 +1216,10 @@ mod tests {
 
     #[test]
     fn an_answer_cut_at_the_length_limit_is_told_to_write_in_parts() {
-        let model = CutOnce { inner: crate::model::FakeModel::new(vec![reply("I will write it in parts.")]), cut: Default::default() };
+        let model = CutOnce { inner: crate::model::FakeModel::new(vec![reply("Written in parts.")]), cut: Default::default() };
         let (mut e, _, _) = crate::testing::engine_with_model(model, "cut-off");
         let ev = e.handle_events("write the whole page").unwrap();
-        assert_eq!(ev, vec![Event::Said { text: "I will write it in parts.".into() }]);
+        assert_eq!(ev, vec![Event::Said { text: "Written in parts.".into() }]);
         let rows = e.store.all_messages().unwrap();
         assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("cut off at the model's length limit after 900 words")), "{rows:?}");
     }
@@ -1439,6 +1461,16 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_that_promises_work_is_told_to_do_it() {
+        assert!(promises_work("I'm reviewing the current files and all design documents together now"));
+        assert!(promises_work("I'll summarize it next."));
+        assert!(promises_work("I cannot delete that project"));
+        assert!(!promises_work("Hi! I'm ready to help. What would you like to do?"));
+        assert!(!promises_work("Done: the game now has a score board."));
+        assert!(!promises_work("I cannot forget that; press Clear."));
+    }
+
+    #[test]
     fn journal_lines_are_found_by_telling_words_only() {
         let j = "- done: asked \"make a flappy bird game\" → made it. Paths: /home/g/Projects/game.js.\n- done: asked \"a car rental site\" → built.\n";
         assert!(journal_for(j, "delete the flappy files").contains("flappy bird game"));
@@ -1449,7 +1481,7 @@ mod tests {
     #[test]
     fn watch_makes_the_watcher_the_owner_asked_for_and_unwatch_removes_it() {
         let w = |when: &str| act(Action::Watch { name: "time".into(), reason: "say the time".into(), urgent: false, when: when.into(), command: vec![] });
-        let (mut e, _, _) = engine_with(vec![w("every 30 seconds"), w("every 2 minutes"), reply("I will tell you the time.")], "watch");
+        let (mut e, _, _) = engine_with(vec![w("every 30 seconds"), w("every 2 minutes"), reply("You will hear the time.")], "watch");
         let ev = events_of(&mut e, "every 2 minutes tell me the time");
         let rows = e.store.all_messages().unwrap();
         assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("failed") && t.contains("every N minutes")), "{rows:?}");

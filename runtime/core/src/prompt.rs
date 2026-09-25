@@ -83,7 +83,8 @@ pub fn context_block(c: &Context) -> String {
 
 /// The to-do list as the card and the context block show it.
 pub fn todo_lines(items: &[TodoItem]) -> Vec<String> {
-    items.iter().map(|i| format!("[{}] {}", if i.done { "x" } else { " " }, i.text.trim())).collect()
+    // A blank item would be an empty line on the card (a free cloud model's "hi", 2026-09-25).
+    items.iter().filter(|i| !i.text.trim().is_empty()).map(|i| format!("[{}] {}", if i.done { "x" } else { " " }, i.text.trim())).collect()
 }
 
 /// What an alert turn works on (watchers design §2): what happened, and why the watcher was there.
@@ -202,6 +203,12 @@ mod tests {
     use super::*;
     use crate::job::{Job, StepRecord};
     use executor::action::Action;
+
+    #[test]
+    fn a_blank_todo_item_is_no_line() {
+        let items = [TodoItem { text: " ".into(), done: false }, TodoItem { text: "greet".into(), done: true }];
+        assert_eq!(todo_lines(&items), vec!["[x] greet".to_string()]);
+    }
 
     #[test]
     fn the_learning_turn_numbers_every_step_and_asks_only_for_learn() {
