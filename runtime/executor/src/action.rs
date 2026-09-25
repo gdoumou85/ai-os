@@ -114,7 +114,14 @@ pub enum Action {
         command: Vec<String>,
     },
     Unwatch { name: String },
+    /// Pieces of work for role helpers that do them at the same time, each on a cloud model of
+    /// its own (helpers design). The engine's own.
+    Delegate { helpers: Vec<HelperTask> },
 }
+
+/// One piece of work for a helper: its role and a task that stands alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HelperTask { pub role: String, pub task: String }
 
 fn one() -> u32 { 1 }
 
@@ -192,6 +199,8 @@ mod tests {
         assert_eq!(a, Action::Watch { name: "time".into(), reason: "say the time".into(), urgent: false, when: "every 2 minutes".into(), command: vec![] });
         let u: Action = serde_json::from_str(r#"{"kind":"unwatch","name":"time"}"#).unwrap();
         assert_eq!(u, Action::Unwatch { name: "time".into() });
+        let d: Action = serde_json::from_str(r#"{"kind":"delegate","helpers":[{"role":"coding","task":"write a.py"}]}"#).unwrap();
+        assert_eq!(d, Action::Delegate { helpers: vec![HelperTask { role: "coding".into(), task: "write a.py".into() }] });
     }
 
     #[test]

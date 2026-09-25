@@ -640,3 +640,10 @@ Two things the owner hit on his first full-access run.
   an OpenAI-style cloud account gets the moves and every action as function tools, and its tool
   call is read back as the move; a provider that refuses tools is asked in JSON from then on. The
   brief says the AI may build any tool it is missing. (v0.13.0)
+- **2026-09-25**, helpers (spec `2026-09-25-helpers-design.md`): `delegate` hands 1-6 tasks to role
+  helpers (coding, design, reasoning, review, debugging, art) that run at once, one thread and one
+  cloud model each, spread over the OpenAI-style accounts; a failing model hands over to the next.
+  Machine hand only; steps show on the card; offered only while Cloud has such an account. (v0.14.0)
+- **2026-09-25**, a broken cloud account hands over: a key refused (NVIDIA 401 mid-work) or a model
+  gone rests the account 15 minutes like a spent one, the next account takes over, and the chat says
+  why once; only when no account answers is the failure the turn's. (v0.14.0)

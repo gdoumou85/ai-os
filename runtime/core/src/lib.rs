@@ -4,6 +4,7 @@ pub mod cloud;
 pub mod engine;
 pub mod event;
 pub mod find;
+pub mod helpers;
 pub mod job;
 pub mod learn;
 pub mod machine;

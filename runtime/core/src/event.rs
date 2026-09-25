@@ -38,6 +38,7 @@ pub fn describe(action: &Action) -> String {
         Action::Wait { seconds } => format!("waited {seconds} s"),
         Action::Watch { name, when, .. } => format!("set the watcher {name} ({when})"),
         Action::Unwatch { name } => format!("removed the watcher {name}"),
+        Action::Delegate { helpers } => format!("handed work to {} helper{}", helpers.len(), if helpers.len() == 1 { "" } else { "s" }),
     }
 }
 
@@ -75,6 +76,7 @@ pub fn doing(action: &Action) -> String {
         Action::Wait { seconds } => format!("waiting {seconds} s"),
         Action::Watch { name, .. } => format!("setting the watcher {name}"),
         Action::Unwatch { name } => format!("removing the watcher {name}"),
+        Action::Delegate { helpers } => format!("{} helper{} working", helpers.len(), if helpers.len() == 1 { "" } else { "s" }),
     }
 }
 
