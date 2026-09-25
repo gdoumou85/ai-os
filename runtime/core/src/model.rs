@@ -283,7 +283,15 @@ pub fn parse_openai(resp: &serde_json::Value) -> Result<Move, ModelError> {
 
 /// A move from the whole of an answer's text.
 pub fn parse_content(content: &str) -> Result<Move, ModelError> {
-    serde_json::from_str(content).map_err(|e| ModelError::BadJson(format!("{e}: {content}")))
+    serde_json::from_str(content).or_else(|e| found_in(content).ok_or_else(|| ModelError::BadJson(format!("{e}: {content}"))))
+}
+
+/// The first move inside an answer that is more than the move: in a ```json block, after a sentence,
+/// after its thinking. Most free OpenRouter models take no `response_format` (2026-09-25: 13 of
+/// 20) and write the JSON as prose would; the owner saw "could not read my own answer twice".
+/// ponytail: the first 50 `{`, so a long broken answer full of code is not parsed from every brace.
+fn found_in(content: &str) -> Option<Move> {
+    content.match_indices('{').take(50).find_map(|(i, _)| serde_json::Deserializer::from_str(&content[i..]).into_iter::<Move>().next()?.ok())
 }
 
 /// A 429, however the runner shapes it — `error.code`, a top-level `code`, or just words in the
@@ -579,6 +587,15 @@ mod tests {
         let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![], image: None, ..Default::default() });
         assert_eq!(b["options"]["num_ctx"], m.context_tokens());
         assert_eq!(FakeModel::new(vec![]).context_tokens(), 8192, "the trait default");
+    }
+
+    #[test]
+    fn a_move_is_found_inside_words_and_code_fences() {
+        let fenced = "Here is my move:\n```json\n{\"move\":\"reply\",\"thought\":\"t\",\"text\":\"hi\",\"outcome\":\"done\"}\n```";
+        assert!(matches!(parse_content(fenced).unwrap(), Move::Reply { text, .. } if text == "hi"));
+        let after_thinking = "<think>the {schema} says reply</think>{\"move\":\"reply\",\"thought\":\"t\",\"text\":\"ok\"}";
+        assert!(matches!(parse_content(after_thinking).unwrap(), Move::Reply { text, .. } if text == "ok"));
+        assert!(matches!(parse_content("no move here {\"move\":\"respond\"}"), Err(ModelError::BadJson(_))), "a move that is not one is still refused");
     }
 
     #[test]

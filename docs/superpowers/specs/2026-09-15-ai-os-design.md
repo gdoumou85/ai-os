@@ -624,3 +624,7 @@ Two things the owner hit on his first full-access run.
   often before the network was up, and a failed ask stayed silent until the next login (the
   owner's rail showed no card). It now asks every 10 minutes and offers each new version once;
   the guide says how to see the installed version. (v0.12.5)
+- **2026-09-25**, a move inside words: 13 of OpenRouter's 20 free models take no
+  `response_format`, and write the JSON with a sentence around it or in a code block; the owner
+  got "could not read my own answer twice". An answer that is not a move as a whole is searched
+  for the first move inside it (`found_in`, the first 50 `{`). (v0.12.6)
