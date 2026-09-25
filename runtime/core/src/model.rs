@@ -499,7 +499,13 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
             let file = calls.iter().any(|c| matches!(c.0.as_str(), "write_file" | "append_file")) || content.contains("\"write_file\"") || content.contains("\"append_file\"");
             if file && words(&content, &calls) > FILE_WORDS { return Err(ModelError::TooBig(words(&content, &calls))) }
             // A slow thinker shows its thinking words, so it does not look frozen (the owner, 2026-09-25).
-            if !watch(Heard { thinking: thinking.split_whitespace().count(), writing: words(&content, &calls) }) { return Err(ModelError::Stopped) }
+            // A runner that leaves the thinking in the answer (`<think>…`, LM Studio without its
+            // reasoning setting) is thinking until the tag closes.
+            let heard = match content.trim_start().strip_prefix("<think>") {
+                Some(t) if !t.contains("</think>") => Heard { thinking: thinking.split_whitespace().count() + t.split_whitespace().count(), writing: 0 },
+                _ => Heard { thinking: thinking.split_whitespace().count(), writing: words(&content, &calls) },
+            };
+            if !watch(heard) { return Err(ModelError::Stopped) }
         }
     }
     if let Some((name, args)) = calls.iter().find(|c| !c.0.is_empty()) { return tool_move(name, args) }
@@ -510,10 +516,9 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
     Ok(content)
 }
 
-impl Model for RemoteModel {
-    fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> { self.next_move_watched(prompt, &mut |_| true) }
-
-    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(Heard) -> bool) -> Result<Move, ModelError> {
+impl RemoteModel {
+    /// One ask, with the moved-runner and timed-out retries.
+    fn asked(&self, prompt: &Prompt, watch: &mut dyn FnMut(Heard) -> bool) -> Result<Move, ModelError> {
         let url = self.url.borrow().clone();
         match self.ask_at(&url, prompt, watch) {
             Err((true, gone)) => {
@@ -535,6 +540,29 @@ impl Model for RemoteModel {
             }
             answer => answer.map_err(|(_, e)| e),
         }
+    }
+}
+
+/// Words a model may think before it starts its answer. A Qwen in LM Studio thought 10k tokens
+/// over one step on the owner's VM before he stopped it (2026-09-25); kimi-k3 in the cloud took
+/// two minutes to say hi. Past this, the answer is dropped and asked again with Qwen's own switch
+/// for no thinking (`/no_think`) and words any model reads: answer now.
+pub const THINK_WORDS: usize = 2000;
+const ANSWER_NOW: &str = "/no_think You have thought long enough: answer now with your move, thinking only briefly.";
+
+impl Model for RemoteModel {
+    fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> { self.next_move_watched(prompt, &mut |_| true) }
+
+    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(Heard) -> bool) -> Result<Move, ModelError> {
+        let mut over = 0;
+        let answer = self.asked(prompt, &mut |h: Heard| {
+            if h.writing == 0 && h.thinking > THINK_WORDS { over = h.thinking; return false }
+            watch(h)
+        });
+        if over == 0 { return answer }
+        eprintln!("the model thought {over} words without answering; asking it to answer now");
+        // ponytail: once; a model that thinks as long again is let be, since its answer is the work.
+        self.asked(&Prompt { user: format!("{}\n\n{ANSWER_NOW}", prompt.user), ..prompt.clone() }, watch)
     }
 
     fn context_tokens(&self) -> usize { loaded_context() }
@@ -845,6 +873,9 @@ mod tests {
         let mut h = Heard::default();
         assert!(matches!(read_stream(Kind::Ollama, t.as_bytes(), std::time::Duration::ZERO, &mut |w| { h = w; false }), Err(ModelError::Stopped)));
         assert_eq!(h, Heard { thinking: 4, writing: 0 }, "a thinker's words are heard before its answer starts");
+        let inline = r#"{"message":{"content":"<think>hmm let me see"},"done":false}"#;
+        assert!(matches!(read_stream(Kind::Ollama, inline.as_bytes(), std::time::Duration::ZERO, &mut |w| { h = w; false }), Err(ModelError::Stopped)));
+        assert_eq!(h, Heard { thinking: 4, writing: 0 }, "thinking left in the answer (LM Studio) counts as thinking");
         let e = r#"{"error":"model runner has unexpectedly stopped"}"#;
         assert!(matches!(read_stream(Kind::Ollama, e.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::Http(w)) if w.contains("unexpectedly")));
     }

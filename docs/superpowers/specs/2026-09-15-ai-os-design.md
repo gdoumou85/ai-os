@@ -665,3 +665,6 @@ Two things the owner hit on his first full-access run.
   models) keep the spinner turning; an alert's learning turn leaves the owner's Keep/Discard in
   place, as the engine already did; open Watchers rows stay open when the page redraws; a watcher's
   alert still waiting is replaced by its newer one instead of queueing behind it. (v0.15.3)
+- **2026-09-25**, a thinking budget: a model that thinks past `THINK_WORDS` (2000) before answering
+  is dropped and asked once more with `/no_think` and "answer now"; thinking left inside the answer
+  (`<think>`, LM Studio) counts as thinking. The owner stopped a Qwen in LM Studio at 10k tokens. (v0.15.4)
