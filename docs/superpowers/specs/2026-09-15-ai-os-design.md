@@ -654,3 +654,7 @@ Two things the owner hit on his first full-access run.
   time is kept in `speeds.tsv`; each helper role starts on the owner's pick (`roles.tsv`, the
   Helpers' models card) or a model whose name fits the role, fastest first, and models slower than
   2 minutes an answer go last (`aios_proto::rank`). The status line counts thinking words. (v0.15.0)
+- **2026-09-25**, big files survive a sloppy model: a tool call or JSON answer with raw line breaks,
+  tabs or backslashes JSON has no escape for (`\d` in a regex) is repaired before it is read; the
+  retry tells a tool-calling model how to write its arguments, and the second failure says what was
+  wrong. The owner's trading assistant failed after some work, writing its files. (v0.15.1)
