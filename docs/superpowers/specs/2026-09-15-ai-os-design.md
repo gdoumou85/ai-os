@@ -628,3 +628,7 @@ Two things the owner hit on his first full-access run.
   `response_format`, and write the JSON with a sentence around it or in a code block; the owner
   got "could not read my own answer twice". An answer that is not a move as a whole is searched
   for the first move inside it (`found_in`, the first 50 `{`). (v0.12.6)
+- **2026-09-25**, pick the cloud provider: the Cloud accounts card marks the first account "in
+  use" and gives every other one "Use this one", which moves it first in `cloud.tsv`; the rest
+  stay behind it for when it fails or runs out (the owner: "I can't manually swap between cloud
+  providers"). (v0.12.7)

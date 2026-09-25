@@ -25,13 +25,27 @@ pub(crate) fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gt
     let tsv = cloud_accounts();
     let list = aios_rail::models::accounts(&tsv);
     let text = if list.is_empty() { "No cloud accounts yet. While Cloud is on, they are tried in order, and the next takes over when one's free allowance runs out.".to_string() }
-        else { "Tried in this order while Cloud is on; the next takes over when one's free allowance runs out.".to_string() };
+        else { "While Cloud is on, the AI uses the first account; Use this one puts another first. When one fails or its free allowance runs out, the next takes over.".to_string() };
     let b = plain_card("Cloud accounts", &text);
     let w: gtk::Widget = b.clone().upcast();
     for (i, (name, model)) in list.into_iter().enumerate() {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let l = gtk::Label::new(Some(&format!("{}. {name}: {model}", i + 1))); l.set_xalign(0.0); l.set_hexpand(true); l.set_wrap(true);
+        let l = gtk::Label::new(Some(&format!("{}. {name}: {model}{}", i + 1, if i == 0 { " — in use" } else { "" }))); l.set_xalign(0.0); l.set_hexpand(true); l.set_wrap(true);
         row.append(&l);
+        if i > 0 {
+            let first = gtk::Button::with_label("Use this one");
+            let (col, me, st, tx, stt, who) = (column.clone(), w.clone(), status.clone(), to_ui.clone(), status.clone(), name.clone());
+            first.connect_clicked(move |_| {
+                let msg = match write_private(&format!("{}/cloud.tsv", config_dir()), &aios_rail::models::to_front(&cloud_accounts(), i)) {
+                    Ok(()) => format!("The AI now uses {who}."),
+                    Err(e) => format!("Could not save the order: {e}"),
+                };
+                st.set_text(&msg);
+                col.remove(&me);
+                col.append(&cloud_card(&col, &tx, &stt));
+            });
+            row.append(&first);
+        }
         // Every model the key opens, to pick another (the owner, 2026-09-25).
         if let (Some(provider), Some(key)) = (aios_rail::models::provider_named(&name), aios_rail::models::account_key(&tsv, i)) {
             let change = gtk::Button::with_label("Change model");
