@@ -7,16 +7,20 @@
 //! take effect with no restart:
 //!   ~/.config/ai-os/cloud-on     exists while the switch is on
 //!   ~/.config/ai-os/cloud.tsv    `name<TAB>kind<TAB>url<TAB>model<TAB>key` per account, mode 0600
+//!   ~/.config/ai-os/speeds.tsv   `url<TAB>model<TAB>seconds` an answer took, kept here (model per role)
+//!   ~/.config/ai-os/roles.tsv    `role<TAB>url<TAB>model`, the owner's picks for the helpers
 use crate::find::{self, Kind};
-use crate::model::{Model, ModelError, Prompt, RemoteModel};
+use crate::model::{Heard, Model, ModelError, Prompt, RemoteModel};
 use crate::moves::Move;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const SWITCH: &str = "cloud-on";
 pub const ACCOUNTS: &str = "cloud.tsv";
+pub const SPEEDS: &str = "speeds.tsv";
+pub const PICKS: &str = "roles.tsv";
 /// How long a used-up account is left alone before it is tried again.
 /// ponytail: one rest for every provider; per-provider reset times if a provider's window matters.
 pub const REST: Duration = Duration::from_secs(15 * 60);
@@ -32,7 +36,23 @@ pub fn parse(tsv: &str) -> Vec<Account> {
     }).collect()
 }
 
-/// The folder both files live in.
+/// Keeps how long `model` at `url` took to answer, halfway between the last time and this one, for
+/// the Roles card and the helpers' picks. Timed on real work: a test request would spend the free
+/// allowance. Helpers write it from their threads, hence the lock.
+pub fn note_speed(dir: &Path, url: &str, model: &str, took: Duration) {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE.lock();
+    let path = dir.join(SPEEDS);
+    let mut speeds = aios_proto::speeds(&std::fs::read_to_string(&path).unwrap_or_default());
+    let now = took.as_secs() as u32;
+    let key = format!("{url} {model}");
+    let kept = speeds.get(&key).map_or(now, |old| (old + now) / 2);
+    speeds.insert(key, kept);
+    let text: String = speeds.iter().filter_map(|(k, s)| k.split_once(' ').map(|(u, m)| format!("{u}\t{m}\t{s}\n"))).collect();
+    if let Err(e) = std::fs::write(&path, text) { eprintln!("cloud: could not keep speeds: {e}") }
+}
+
+/// The folder the files live in.
 pub fn dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/ai-os")
 }
@@ -62,21 +82,23 @@ impl<M: Model> Pooled<M> {
     }
 
     /// One account's answer from `model`; a used-up model is left to rest.
-    fn ask(&self, a: &Account, model: &str, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
+    fn ask(&self, a: &Account, model: &str, prompt: &Prompt, watch: &mut dyn FnMut(Heard) -> bool) -> Result<Move, ModelError> {
         let id = format!("{} {model}", a.url);
         // Native tools for an OpenAI-style account (cloud native tools spec); the answer's shape in
         // words on the JSON path, for a provider that took no tools.
-        let ask = |tools: bool, watch: &mut dyn FnMut(usize) -> bool| {
+        let ask = |tools: bool, watch: &mut dyn FnMut(Heard) -> bool| {
             let m = RemoteModel { key: Some(a.key.clone()), tools, ..RemoteModel::at(a.kind, &a.url, model) };
             if tools { m.next_move_watched(prompt, watch) } else { m.next_move_watched(&crate::model::format_spelled(prompt), watch) }
         };
         let tools = a.kind == Kind::OpenAi && !self.no_tools.borrow().contains(&id);
+        let began = Instant::now();
         let mut answer = ask(tools, watch);
         if tools && matches!(&answer, Err(ModelError::Http(e)) if e.to_lowercase().contains("tool")) {
             eprintln!("cloud: {} {model} takes no tools; answering in JSON from now on", a.name);
             self.no_tools.borrow_mut().insert(id);
             answer = ask(false, watch);
         }
+        if answer.is_ok() { note_speed(&self.dir, &a.url, model, began.elapsed()) }
         if let Err(ModelError::Quota(why)) = &answer {
             eprintln!("cloud: {} {model} is used up ({why})", a.name);
             self.resting.borrow_mut().insert(format!("{} {model}", a.url), Instant::now());
@@ -99,7 +121,7 @@ impl<M: Model> Pooled<M> {
 impl<M: Model> Model for Pooled<M> {
     fn next_move(&self, prompt: &Prompt) -> Result<Move, ModelError> { self.next_move_watched(prompt, &mut |_| true) }
 
-    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, ModelError> {
+    fn next_move_watched(&self, prompt: &Prompt, watch: &mut dyn FnMut(Heard) -> bool) -> Result<Move, ModelError> {
         if !self.dir.join(SWITCH).exists() { return self.local.next_move_watched(prompt, watch) }
         let accounts = parse(&std::fs::read_to_string(self.dir.join(ACCOUNTS)).unwrap_or_default());
         // The first account that failed for a reason other than its allowance, said if no account answers.
@@ -156,6 +178,8 @@ impl<M: Model> Model for Pooled<M> {
 
     fn other_models(&self, account: &Account) -> Vec<String> { (self.others)(account) }
 
+    fn cloud_dir(&self) -> Option<PathBuf> { Some(self.dir.clone()) }
+
     /// A cloud account may not see, so with the Cloud switch on the screen is not offered.
     fn sees(&self) -> bool { !self.dir.join(SWITCH).exists() && self.local.sees() }
 }
@@ -198,6 +222,8 @@ mod tests {
         let p = Pooled::new(local(), d);
         assert_eq!(text(p.next_move(&prompt()).unwrap()), "second");
         assert_eq!(text(p.next_move(&prompt()).unwrap()), "second", "the spent account is resting, not asked again (its server would not answer)");
+        let speeds = aios_proto::speeds(&std::fs::read_to_string(p.dir.join(SPEEDS)).unwrap());
+        assert_eq!(speeds.keys().collect::<Vec<_>>(), vec![&format!("http://{fresh} m")], "the answer's time is kept; the spent one has none");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 
-pub const ROLES: [&str; 6] = ["coding", "design", "reasoning", "review", "debugging", "art"];
+pub const ROLES: [&str; 6] = aios_proto::HELPER_ROLES;
 /// Moves one helper may make before it hands back what it has.
 const MAX_MOVES: usize = 40;
 /// Models one helper tries before it gives up.
@@ -45,15 +45,22 @@ fn cut(s: &str, n: usize) -> String {
 }
 
 /// Every helper at once, one thread each. `models` starts with one model per account (`starts`
-/// of them) and goes on with the other models those keys open: helper *i* begins on account *i*,
-/// so the helpers spread over the providers, then walks on when a model fails. `progress` hears
-/// each helper's steps as they happen, on the calling thread.
-pub fn run(tasks: &[HelperTask], models: &[Account], starts: usize, folder: &Path, stop: &AtomicBool, progress: &mut dyn FnMut(String)) -> Vec<Report> {
+/// of them) and goes on with the other models those keys open. Each helper takes them in
+/// `aios_proto::rank`'s order — the owner's pick for its role, models made for the role, then the
+/// rest from account *i* on, so the helpers spread over the providers — and walks on when a model
+/// fails. `dir` holds the owner's picks and the speeds, and gets each answer's time. `progress`
+/// hears each helper's steps as they happen, on the calling thread.
+pub fn run(tasks: &[HelperTask], models: &[Account], starts: usize, dir: Option<&Path>, folder: &Path, stop: &AtomicBool, progress: &mut dyn FnMut(String)) -> Vec<Report> {
+    let read = |f: &str| dir.and_then(|d| std::fs::read_to_string(d.join(f)).ok()).unwrap_or_default();
+    let (speeds, picks) = (aios_proto::speeds(&read(crate::cloud::SPEEDS)), aios_proto::role_picks(&read(crate::cloud::PICKS)));
+    let pairs: Vec<(&str, &str)> = models.iter().map(|a| (a.url.as_str(), a.model.as_str())).collect();
     let (tx, rx) = channel::<String>();
     std::thread::scope(|s| {
         let handles: Vec<_> = tasks.iter().enumerate().map(|(i, t)| {
             let tx = tx.clone();
-            s.spawn(move || one(i, t, models, starts, folder, stop, &tx))
+            let mut order = aios_proto::rank(&t.role, &pairs, i, starts, &speeds, &picks);
+            order.truncate(MAX_MODELS);
+            s.spawn(move || one(t, models, order, dir, folder, stop, &tx))
         }).collect();
         drop(tx);
         for line in rx { progress(line) }
@@ -61,11 +68,7 @@ pub fn run(tasks: &[HelperTask], models: &[Account], starts: usize, folder: &Pat
     })
 }
 
-fn one(i: usize, t: &HelperTask, models: &[Account], starts: usize, folder: &Path, stop: &AtomicBool, tx: &Sender<String>) -> Report {
-    let starts = starts.min(models.len());
-    let mut order: Vec<usize> = (0..starts).map(|k| (i + k) % starts).collect();
-    order.extend(starts..models.len());
-    order.truncate(MAX_MODELS);
+fn one(t: &HelperTask, models: &[Account], order: Vec<usize>, dir: Option<&Path>, folder: &Path, stop: &AtomicBool, tx: &Sender<String>) -> Report {
     let report = |model: &str, done: bool, text: String| Report { role: t.role.clone(), model: model.to_string(), done, text };
     let hand = MachineWorker { workspace: folder.to_path_buf() };
     let system = brief(&t.role, folder);
@@ -79,8 +82,9 @@ fn one(i: usize, t: &HelperTask, models: &[Account], starts: usize, folder: &Pat
         // ponytail: the whole helper history every call; a long helper run costs tokens, and a
         // cloud window holds 40 moves.
         let p = Prompt { system: system.clone(), user: user.clone(), history: history.clone(), allowed: vec!["reply", "act"], no_screen: true, machine_only: true, ..Default::default() };
+        let began = std::time::Instant::now();
         let mv = match m.next_move_watched(&p, &mut |_| !stop.load(Ordering::SeqCst)) {
-            Ok(mv) => mv,
+            Ok(mv) => { if let Some(d) = dir { crate::cloud::note_speed(d, &a.url, &a.model, began.elapsed()) } mv }
             Err(ModelError::Stopped) => return report(&a.model, false, "stopped".into()),
             Err(e) => {
                 last_err = cut(&e.to_string(), 200);
@@ -136,12 +140,25 @@ mod tests {
         ]);
         let b = serve_each(vec![says(serde_json::json!({ "move": "reply", "text": "looks fine" }))]);
         let (mut lines, stop) = (vec![], AtomicBool::new(false));
-        let r = run(&[task("coding", "write a.txt"), task("review", "check it")], &[account(a, "mA"), account(b, "mB")], 2, &d, &stop, &mut |l| lines.push(l));
+        let r = run(&[task("coding", "write a.txt"), task("review", "check it")], &[account(a, "mA"), account(b, "mB")], 2, Some(&d), &d, &stop, &mut |l| lines.push(l));
         assert_eq!(r[0], Report { role: "coding".into(), model: "mA".into(), done: true, text: "wrote a.txt".into() });
         assert_eq!((r[1].model.as_str(), r[1].text.as_str()), ("mB", "looks fine"));
         assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "hi");
         assert!(lines.iter().any(|l| l.starts_with("coding · mA: ")), "{lines:?}");
         assert!(summary(&r).contains("- review helper (mB): finished. looks fine"));
+        let speeds = std::fs::read_to_string(d.join(crate::cloud::SPEEDS)).unwrap();
+        assert!(speeds.contains("\tmA\t") && speeds.contains("\tmB\t"), "each answer's time is kept: {speeds}");
+    }
+
+    #[test]
+    fn the_owners_pick_for_a_role_goes_first() {
+        let d = temp_root("helpers-pick");
+        let a = serve_each(vec![]);
+        let b = serve_each(vec![says(serde_json::json!({ "move": "reply", "text": "done on B" }))]);
+        std::fs::write(d.join(crate::cloud::PICKS), format!("coding\thttp://{b}\tmB\n")).unwrap();
+        let stop = AtomicBool::new(false);
+        let r = run(&[task("coding", "code")], &[account(a, "mA"), account(b, "mB")], 2, Some(&d), &d, &stop, &mut |_| {});
+        assert_eq!((r[0].model.as_str(), r[0].done), ("mB", true));
     }
 
     #[test]
@@ -150,7 +167,7 @@ mod tests {
         let a = serve_each(vec![json_response("400 Bad Request", r#"{"error":{"message":"model refused"}}"#)]);
         let b = serve_each(vec![says(serde_json::json!({ "move": "reply", "text": "done on B" }))]);
         let (mut lines, stop) = (vec![], AtomicBool::new(false));
-        let r = run(&[task("reasoning", "think")], &[account(a, "mA"), account(b, "mB")], 2, &d, &stop, &mut |l| lines.push(l));
+        let r = run(&[task("reasoning", "think")], &[account(a, "mA"), account(b, "mB")], 2, Some(&d), &d, &stop, &mut |l| lines.push(l));
         assert_eq!((r[0].model.as_str(), r[0].done), ("mB", true));
         assert!(lines.iter().any(|l| l.contains("mA: failed") && l.contains("switching to mB")), "{lines:?}");
     }
@@ -163,7 +180,7 @@ mod tests {
             says(serde_json::json!({ "move": "reply", "text": "ok", "outcome": "could_not" })),
         ]);
         let stop = AtomicBool::new(false);
-        let r = run(&[task("design", "look at it")], &[account(a, "mA")], 1, &d, &stop, &mut |_| {});
+        let r = run(&[task("design", "look at it")], &[account(a, "mA")], 1, None, &d, &stop, &mut |_| {});
         assert!(!r[0].done && r[0].text == "ok");
     }
 }
