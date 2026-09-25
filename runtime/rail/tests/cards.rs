@@ -146,6 +146,15 @@ fn the_spinner_runs_from_your_message_until_the_turn_comes_back() {
 }
 
 #[test]
+fn words_said_mid_job_keep_the_spinner_turning() {
+    let mut cards = Cards::default();
+    let said = Event::Said { text: "(Cloud: switched to another model.)".into() };
+    assert_eq!(cards.busy_after(&said), Some(false), "no job: said is the answer");
+    cards.apply(&Event::Understood { job_id: j(), name: "p".into(), text: "Starting p".into(), housekeeping: false });
+    assert_eq!(cards.busy_after(&said), None, "a job is still working");
+}
+
+#[test]
 fn learned_lines_join_the_jobs_done_card_and_pending_ones_offer_keep_and_discard() {
     let mut cards = Cards::default();
     cards.apply(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] });
@@ -160,6 +169,17 @@ fn learned_lines_join_the_jobs_done_card_and_pending_ones_offer_keep_and_discard
     let ch = cards.apply(&Event::Learned { job_id: "other".into(), lines: vec!["Marked as not working: this computer/x".into()], pending: false });
     assert_eq!(ch, vec![Change::Updated(0), Change::Added(1)]);
     assert!(cards.apply(&Event::Skills { notebooks: vec![] }).is_empty());
+}
+
+#[test]
+fn keep_and_discard_stay_through_an_alert() {
+    let mut cards = Cards::default();
+    cards.apply(&Event::Done { job_id: j(), text: "done".into(), check: None, files: vec![], windows: vec![] });
+    cards.apply(&Event::Learned { job_id: j(), lines: vec!["Learned, if you keep it: x".into()], pending: true });
+    cards.apply(&Event::Alert { job_id: "a".into(), watcher: "time".into(), text: "12:00".into(), reason: "say the time".into(), urgent: false });
+    cards.apply(&Event::Done { job_id: "a".into(), text: "It is 12:00.".into(), check: None, files: vec![], windows: vec![] });
+    cards.apply(&Event::Learned { job_id: "a".into(), lines: vec![], pending: false });
+    assert_eq!(cards.list[0].buttons.len(), 2, "the owner's Keep and Discard are still there: {:?}", cards.list[0].buttons);
 }
 
 #[test]

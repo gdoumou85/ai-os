@@ -202,8 +202,11 @@ pub fn views(c: &Connection) -> Result<Vec<aios_proto::WatcherView>, StoreError>
 /// The background program a live watcher runs as.
 pub fn program_name(watcher: &str) -> String { format!("watch-{watcher}") }
 
-/// Urgent alerts ahead of the others, each kind in the order it came.
+/// Urgent alerts ahead of the others, each kind in the order it came. A watcher whose last alert
+/// still waits has it replaced by the new one: a slow model answering "the time every 2 minutes"
+/// would otherwise fall further behind with every alert (the owner's VM, 2026-09-25).
 pub fn enqueue(q: &mut VecDeque<Alert>, a: Alert) {
+    if let Some(old) = q.iter_mut().find(|x| x.watcher == a.watcher && x.urgent == a.urgent) { *old = a; return }
     let at = if a.urgent { q.iter().position(|x| !x.urgent).unwrap_or(q.len()) } else { q.len() };
     q.insert(at, a);
 }
@@ -413,5 +416,8 @@ mod tests {
         let mut q = VecDeque::new();
         for (w, u) in [("1", false), ("2", true), ("3", false), ("4", true)] { enqueue(&mut q, a(w, u)); }
         assert_eq!(q.iter().map(|a| a.watcher.as_str()).collect::<Vec<_>>(), ["2", "4", "1", "3"]);
+        enqueue(&mut q, Alert { text: "newer".into(), ..a("1", false) });
+        assert_eq!(q.len(), 4, "a waiting alert is replaced, not joined");
+        assert_eq!(q[2].text, "newer");
     }
 }

@@ -414,7 +414,8 @@ fn main() {
                             unseen2.set(unseen2.get() + 1);
                             watchers_nav2.set_label(&aios_rail::sidebar::watchers_label(unseen2.get()));
                         }
-                        match aios_rail::cards::busy_after(&ev) {
+                        let busy = cards2.borrow().busy_after(&ev);
+                        match busy {
                             Some(true) => { spinner2.start(); set_status(&status2, &live2, "The AI is thinking…"); }
                             Some(false) => { spinner2.stop(); set_status(&status2, &live2, ""); }
                             None => {}
