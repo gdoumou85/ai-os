@@ -602,6 +602,11 @@ impl<M: Model> Engine<M> {
                     self.store.push_message("result", &format!("your answer was cut off at the model's length limit after {words} words, so nothing was done. Write a big file in parts: write_file the first part, then append_file each next part."))?;
                     continue;
                 }
+                Err(ModelError::Stuck(words)) if unreadable == 0 => {
+                    unreadable = 1;
+                    self.store.push_message("result", &format!("your answer got stuck writing blank space after {words} words, so nothing was done. Answer again, and keep it short."))?;
+                    continue;
+                }
                 Err(ModelError::BadJson(e)) if unreadable == 0 => {
                     unreadable = 1;
                     self.store.push_message("result", &not_a_move(&e))?;

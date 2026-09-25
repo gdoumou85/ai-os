@@ -592,3 +592,8 @@ Two things the owner hit on his first full-access run.
   turn. A project's top-level files come with its notes; a new file in a project is noted in its
   BLUEPRINT.md at once, from the move's own thought; writing one file again and again counts as
   the same action for the repeat guard. (v0.12.0)
+- **2026-09-25**, stuck answers and cloud caps (the owner's v0.12.0 run): an answer that streams
+  300 pieces in a row with nothing to read (no letter, no thought) is dropped as stuck and asked
+  once more; the 27B had written 40,000 tokens of blank space in 4 hours behind "33 words".
+  Ollama requests no longer send `num_predict`: ollama.com refused the window's size as a length
+  limit (nemotron-3-super caps at 65536). (v0.12.1)
