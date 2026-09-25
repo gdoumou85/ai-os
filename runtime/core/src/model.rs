@@ -52,6 +52,9 @@ pub trait Model {
     fn context_tokens(&self) -> usize { 8192 }
     /// Whether the model takes pictures (one-loop design §2): only then is the screen offered.
     fn sees(&self) -> bool { false }
+    /// Something the owner should be told about the model itself, once: the cloud pool switched
+    /// to another model on its own.
+    fn news(&self) -> Option<String> { None }
 }
 
 /// Scripted moves for tests; records every prompt it was given.

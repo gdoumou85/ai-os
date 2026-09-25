@@ -136,12 +136,15 @@ pub fn before_learned(ev: &[aios_proto::Event]) -> &aios_proto::Event {
 /// A fake HTTP server on an ephemeral 127.0.0.1 port: answers the next `times` connections with
 /// `response` verbatim. Each request is read to the end of its body (by Content-Length), so a big
 /// POST is never cut short by a reset; a connection that sends nothing (a port probe) still counts.
-pub fn serve(response: String, times: usize) -> std::net::SocketAddr {
+pub fn serve(response: String, times: usize) -> std::net::SocketAddr { serve_each(vec![response; times]) }
+
+/// `serve`, with a response of its own for each request in turn.
+pub fn serve_each(responses: Vec<String>) -> std::net::SocketAddr {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
-        for _ in 0..times {
+        for response in responses {
             let Ok((mut stream, _)) = listener.accept() else { return };
             let mut received = Vec::new();
             let mut buf = [0u8; 4096];

@@ -594,6 +594,8 @@ impl<M: Model> Engine<M> {
                 sink(&Event::Busy { job_id: id.clone(), text: format!("Writing its answer… {words} words") });
                 true
             });
+            // The cloud pool switched models on its own: the owner hears which (2026-09-25).
+            if let Some(text) = self.model.news() { self.emit(Event::Said { text }); }
             let mv = match answer {
                 Ok(m) => { unreadable = 0; m }
                 // A whole file past the runner's length limit: not a bad format, so said as what it is.

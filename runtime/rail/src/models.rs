@@ -97,22 +97,28 @@ pub const OLLAMA: Provider = Provider { name: "Ollama", kind: "ollama", url: "ht
 /// OpenRouter: many providers behind one key, OpenAI-style under `/api` (so `/api/v1/…`).
 pub const OPENROUTER: Provider = Provider { name: "OpenRouter", kind: "openai", url: "https://openrouter.ai/api" };
 
-/// The models worth offering from a provider's list. NVIDIA lists everything it hosts —
-/// embedders, safety filters, rerankers — and only some of those can hold a conversation. A model
-/// that can also see is still a model to chat with.
-/// OpenRouter lists hundreds, most of them paid: only the free ones (`…:free`) are offered.
-/// ponytail: a name filter; NVIDIA's own model types if its list ever says them.
-pub fn chat_models(provider: Provider, names: Vec<String>) -> Vec<String> {
-    if provider == OPENROUTER { return names.into_iter().filter(|n| n.ends_with(":free")).collect(); }
-    if provider != NVIDIA { return names; }
-    // A model that can see still holds a conversation (the owner, 2026-09-24: picture-reading
-    // matters more than the finder's old blanket "no vision models" guess).
-    const NOT_CHAT: [&str; 12] = ["embed", "rerank", "retriev", "guard", "safety", "reward", "clip", "parse", "detect", "translat", "pii", "content-"];
-    const CHAT: [&str; 9] = ["instruct", "chat", "-it", "deepseek", "kimi", "qwen3", "gpt-oss", "nemotron", "coder"];
-    names.into_iter().filter(|n| {
-        let l = n.to_lowercase();
-        !NOT_CHAT.iter().any(|w| l.contains(w)) && CHAT.iter().any(|w| l.contains(w))
-    }).collect()
+/// The models worth offering from a provider's list (`aios_proto::chat_models`).
+pub fn chat_models(provider: Provider, names: Vec<String>) -> Vec<String> { aios_proto::chat_models(provider.url, names) }
+
+/// The provider an account was added with, by the name its line keeps.
+pub fn provider_named(name: &str) -> Option<Provider> { [NVIDIA, OPENROUTER, OLLAMA].into_iter().find(|p| p.name == name) }
+
+/// The key of the `i`th account, to ask its provider again which models it opens.
+pub fn account_key(tsv: &str, i: usize) -> Option<String> {
+    tsv.lines().filter(|l| l.split('	').count() == 5).nth(i).and_then(|l| l.split('	').nth(4)).map(String::from)
+}
+
+/// `cloud.tsv` with the `i`th account on another model; `None` when the name is not safe to write.
+pub fn with_model(tsv: &str, i: usize, model: &str) -> Option<String> {
+    if !safe(model) { return None }
+    Some(tsv.lines().filter(|l| l.split('	').count() == 5).enumerate().map(|(n, l)| {
+        if n != i { return format!("{l}
+") }
+        let mut f: Vec<&str> = l.split('	').collect();
+        f[3] = model;
+        format!("{}
+", f.join("	"))
+    }).collect())
 }
 
 /// `cloud.tsv` without its `i`th account.
@@ -145,6 +151,13 @@ mod tests {
         assert_eq!(chat_models(OLLAMA, names.clone()), names, "Ollama's list is already its chat models");
         let or = ["nvidia/nemotron-nano-9b-v2:free", "openai/gpt-4o", "qwen/qwen3-coder:free"].map(String::from).to_vec();
         assert_eq!(chat_models(OPENROUTER, or), vec!["nvidia/nemotron-nano-9b-v2:free", "qwen/qwen3-coder:free"], "free ones only");
+        let tsv = "Ollama	ollama	https://ollama.com	nemotron-3-super	k1
+NVIDIA	openai	https://integrate.api.nvidia.com	m	k2
+";
+        assert_eq!(with_model(tsv, 0, "gpt-oss:120b").unwrap(), tsv.replace("nemotron-3-super", "gpt-oss:120b"));
+        assert_eq!(with_model(tsv, 0, "a	b"), None, "a name with a tab is refused");
+        assert_eq!(account_key(tsv, 1).as_deref(), Some("k2"));
+        assert_eq!(provider_named("Ollama"), Some(OLLAMA));
         assert!(account_line(OPENROUTER.name, OPENROUTER.kind, OPENROUTER.url, "nvidia/nemotron-nano-9b-v2:free", "sk-or-v1-abc123").is_some());
         assert!(account_line(NVIDIA.name, NVIDIA.kind, NVIDIA.url, "meta/llama-3.3-70b-instruct", "nvapi-abc_DEF-123").is_some(), "NVIDIA's names and keys are writable");
     }

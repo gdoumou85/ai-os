@@ -597,3 +597,9 @@ Two things the owner hit on his first full-access run.
   once more; the 27B had written 40,000 tokens of blank space in 4 hours behind "33 words".
   Ollama requests no longer send `num_predict`: ollama.com refused the window's size as a length
   limit (nemotron-3-super caps at 65536). (v0.12.1)
+- **2026-09-25**, cloud models found and switched (the owner: "the user should see what models
+  exist and should be able to also manually pick a different model"): each Cloud account has
+  Change model, the provider's list for its key again. When an account's model fails or is used
+  up, the pool asks the provider what else the key opens (`aios_proto::chat_models`, the same
+  filter as the card), tries up to three, keeps the first that answers in `cloud.tsv`, and says
+  so once in the chat (`Model::news`). (v0.12.1)
