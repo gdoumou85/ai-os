@@ -105,19 +105,17 @@ pub fn provider_named(name: &str) -> Option<Provider> { [NVIDIA, OPENROUTER, OLL
 
 /// The key of the `i`th account, to ask its provider again which models it opens.
 pub fn account_key(tsv: &str, i: usize) -> Option<String> {
-    tsv.lines().filter(|l| l.split('	').count() == 5).nth(i).and_then(|l| l.split('	').nth(4)).map(String::from)
+    tsv.lines().filter(|l| l.split('\t').count() == 5).nth(i).and_then(|l| l.split('\t').nth(4)).map(String::from)
 }
 
 /// `cloud.tsv` with the `i`th account on another model; `None` when the name is not safe to write.
 pub fn with_model(tsv: &str, i: usize, model: &str) -> Option<String> {
     if !safe(model) { return None }
-    Some(tsv.lines().filter(|l| l.split('	').count() == 5).enumerate().map(|(n, l)| {
-        if n != i { return format!("{l}
-") }
-        let mut f: Vec<&str> = l.split('	').collect();
+    Some(tsv.lines().filter(|l| l.split('\t').count() == 5).enumerate().map(|(n, l)| {
+        if n != i { return format!("{l}\n") }
+        let mut f: Vec<&str> = l.split('\t').collect();
         f[3] = model;
-        format!("{}
-", f.join("	"))
+        format!("{}\n", f.join("\t"))
     }).collect())
 }
 
@@ -151,11 +149,9 @@ mod tests {
         assert_eq!(chat_models(OLLAMA, names.clone()), names, "Ollama's list is already its chat models");
         let or = ["nvidia/nemotron-nano-9b-v2:free", "openai/gpt-4o", "qwen/qwen3-coder:free"].map(String::from).to_vec();
         assert_eq!(chat_models(OPENROUTER, or), vec!["nvidia/nemotron-nano-9b-v2:free", "qwen/qwen3-coder:free"], "free ones only");
-        let tsv = "Ollama	ollama	https://ollama.com	nemotron-3-super	k1
-NVIDIA	openai	https://integrate.api.nvidia.com	m	k2
-";
+        let tsv = "Ollama\tollama\thttps://ollama.com\tnemotron-3-super\tk1\nNVIDIA\topenai\thttps://integrate.api.nvidia.com\tm\tk2\n";
         assert_eq!(with_model(tsv, 0, "gpt-oss:120b").unwrap(), tsv.replace("nemotron-3-super", "gpt-oss:120b"));
-        assert_eq!(with_model(tsv, 0, "a	b"), None, "a name with a tab is refused");
+        assert_eq!(with_model(tsv, 0, "a\tb"), None, "a name with a tab is refused");
         assert_eq!(account_key(tsv, 1).as_deref(), Some("k2"));
         assert_eq!(provider_named("Ollama"), Some(OLLAMA));
         assert!(account_line(OPENROUTER.name, OPENROUTER.kind, OPENROUTER.url, "nvidia/nemotron-nano-9b-v2:free", "sk-or-v1-abc123").is_some());

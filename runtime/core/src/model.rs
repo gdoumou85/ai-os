@@ -616,16 +616,12 @@ mod tests {
 
     #[test]
     fn an_answer_stuck_on_blank_space_is_dropped_but_thinking_is_not() {
-        let mut body = r#"{"message":{"content":"{\"move\":\"act\","},"done":false}"#.to_string() + "
-";
-        let thinking = format!("{}
-", r#"{"message":{"content":"","thinking":"hmm"},"done":false}"#).repeat(400);
+        let mut body = r#"{"message":{"content":"{\"move\":\"act\","},"done":false}"#.to_string() + "\n";
+        let thinking = format!("{}\n", r#"{"message":{"content":"","thinking":"hmm"},"done":false}"#).repeat(400);
         let words = r#"{"message":{"content":"\"thought\":\"x\"}"},"done":true}"#;
         let fine = body.clone() + &thinking + words;
         assert!(read_stream(Kind::Ollama, fine.as_bytes(), std::time::Duration::ZERO, &mut |_| true).is_ok(), "a long thought is not blank");
-        body.push_str(&format!("{}
-", r#"{"message":{"content":"
-  "},"done":false}"#).repeat(301));
+        body.push_str(&format!("{}\n", r#"{"message":{"content":"\n  "},"done":false}"#).repeat(301));
         assert!(matches!(read_stream(Kind::Ollama, body.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::Stuck(1))));
     }
 
