@@ -119,6 +119,13 @@ pub fn with_model(tsv: &str, i: usize, model: &str) -> Option<String> {
     }).collect())
 }
 
+/// `cloud.tsv` with its `i`th account first: the one the AI uses, the others behind it in order
+/// for when it runs out (the owner, 2026-09-25: "I can't manually swap between cloud providers").
+pub fn to_front(tsv: &str, i: usize) -> String {
+    let lines: Vec<&str> = tsv.lines().filter(|l| l.split('\t').count() == 5).collect();
+    lines.get(i).into_iter().chain(lines.iter().enumerate().filter(|(n, _)| *n != i).map(|(_, l)| l)).map(|l| format!("{l}\n")).collect()
+}
+
 /// `cloud.tsv` without its `i`th account.
 pub fn without(tsv: &str, i: usize) -> String {
     tsv.lines().filter(|l| l.split('\t').count() == 5).enumerate().filter(|(n, _)| *n != i).map(|(_, l)| format!("{l}\n")).collect()
@@ -154,6 +161,9 @@ mod tests {
         assert_eq!(with_model(tsv, 0, "a\tb"), None, "a name with a tab is refused");
         assert_eq!(account_key(tsv, 1).as_deref(), Some("k2"));
         assert_eq!(provider_named("Ollama"), Some(OLLAMA));
+        let three = "A\tollama\tu\tm\tk\nB\topenai\tu\tm\tk\nC\topenai\tu\tm\tk\n";
+        assert_eq!(to_front(three, 2), "C\topenai\tu\tm\tk\nA\tollama\tu\tm\tk\nB\topenai\tu\tm\tk\n");
+        assert_eq!(to_front(three, 0), three);
         assert!(account_line(OPENROUTER.name, OPENROUTER.kind, OPENROUTER.url, "nvidia/nemotron-nano-9b-v2:free", "sk-or-v1-abc123").is_some());
         assert!(account_line(NVIDIA.name, NVIDIA.kind, NVIDIA.url, "meta/llama-3.3-70b-instruct", "nvapi-abc_DEF-123").is_some(), "NVIDIA's names and keys are writable");
     }
