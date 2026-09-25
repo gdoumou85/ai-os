@@ -34,7 +34,8 @@ pub const MOVE_SCHEMA: &str = r##"{
       { "type":"object", "properties": { "kind": {"enum":["drag"]}, "from_cell": {"type":"integer","minimum":1,"maximum":48}, "from_spot": {"type":"integer","minimum":1,"maximum":16}, "to_cell": {"type":"integer","minimum":1,"maximum":48}, "to_spot": {"type":"integer","minimum":1,"maximum":16} }, "required":["kind","from_cell","from_spot","to_cell","to_spot"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["wait"]}, "seconds": {"type":"integer","minimum":1,"maximum":300} }, "required":["kind","seconds"], "additionalProperties": false },
       { "type":"object", "properties": { "kind": {"enum":["watch"]}, "name": {"type":"string"}, "reason": {"type":"string"}, "urgent": {"type":"boolean"}, "when": {"type":"string"}, "command": {"type":"array","items":{"type":"string"}} }, "required":["kind","name","reason","urgent","when"], "additionalProperties": false },
-      { "type":"object", "properties": { "kind": {"enum":["unwatch"]}, "name": {"type":"string"} }, "required":["kind","name"], "additionalProperties": false }
+      { "type":"object", "properties": { "kind": {"enum":["unwatch"]}, "name": {"type":"string"} }, "required":["kind","name"], "additionalProperties": false },
+      { "type":"object", "properties": { "kind": {"enum":["delegate"]}, "helpers": {"type":"array","minItems":1,"maxItems":6,"items":{"type":"object","properties":{"role":{"enum":["coding","design","reasoning","review","debugging","art"]},"task":{"type":"string"}},"required":["role","task"],"additionalProperties": false}} }, "required":["kind","helpers"], "additionalProperties": false }
     ] }
   },
   "oneOf": [
@@ -55,9 +56,15 @@ pub fn value() -> serde_json::Value {
 pub const SCREEN_KINDS: [&str; 5] = ["screen_look", "screen_click", "screen_type", "scroll", "drag"];
 
 /// The schema with the screen actions taken out, for a model that cannot see.
-pub fn without_screen(mut schema: serde_json::Value) -> serde_json::Value {
+pub fn without_screen(schema: serde_json::Value) -> serde_json::Value { only_kinds(schema, |k| !SCREEN_KINDS.contains(&k)) }
+
+/// What a helper may do (helpers design §3): the machine hand's actions.
+pub const MACHINE_KINDS: [&str; 10] = ["run_command", "read_file", "write_file", "edit_file", "append_file", "web_read", "web_search", "start_program", "program_output", "stop_program"];
+
+/// The schema with only the action kinds `keep` says yes to.
+pub fn only_kinds(mut schema: serde_json::Value, keep: impl Fn(&str) -> bool) -> serde_json::Value {
     if let Some(a) = schema["$defs"]["action"]["oneOf"].as_array() {
-        let kept: Vec<serde_json::Value> = a.iter().filter(|o| !o["properties"]["kind"]["enum"][0].as_str().is_some_and(|k| SCREEN_KINDS.contains(&k))).cloned().collect();
+        let kept: Vec<serde_json::Value> = a.iter().filter(|o| o["properties"]["kind"]["enum"][0].as_str().is_none_or(&keep)).cloned().collect();
         schema["$defs"]["action"]["oneOf"] = serde_json::Value::Array(kept);
     }
     schema

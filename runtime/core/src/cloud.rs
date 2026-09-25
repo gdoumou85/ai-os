@@ -137,6 +137,13 @@ impl<M: Model> Model for Pooled<M> {
 
     fn news(&self) -> Option<String> { self.news.borrow_mut().take() }
 
+    fn helper_accounts(&self) -> Vec<Account> {
+        if !self.dir.join(SWITCH).exists() { return vec![] }
+        parse(&std::fs::read_to_string(self.dir.join(ACCOUNTS)).unwrap_or_default()).into_iter().filter(|a| a.kind == Kind::OpenAi).collect()
+    }
+
+    fn other_models(&self, account: &Account) -> Vec<String> { (self.others)(account) }
+
     /// A cloud account may not see, so with the Cloud switch on the screen is not offered.
     fn sees(&self) -> bool { !self.dir.join(SWITCH).exists() && self.local.sees() }
 }

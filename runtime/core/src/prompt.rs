@@ -9,6 +9,12 @@ const LEARN_SYSTEM: &str = "You are the AI that uses this computer for its user.
 
 /// The standing brief (one-loop design §1): who it is, its moves, its hands, a few habits. Under
 /// 1800 tokens (a test holds it), since at 8k every token here is one the chat does not get.
+/// Added to the brief while helpers can be had (helpers design §6).
+pub const HELPERS: &str = "
+
+Helpers (Cloud is on, so you have them):
+- delegate helpers [{role, task}] (1-6): hands pieces of the work to helpers that do them at the same time, each on another cloud model, with commands, files, the web and background programs (not the desktop or the screen). Roles: coding, design, reasoning, review, debugging, art. Use them when the work splits into parts that can be done apart, and for a second look (review, reasoning). A helper sees only its task, not this chat: name the folder and files, what to make, and how to check it. Their results come back to you together: check them before you tell the user it is done.";
+
 pub fn brief(sees: bool) -> String {
     let screen = if sees {
         "- screen_look (cell): the screen under numbered squares 1-48; with a cell, that square enlarged under spots 1-16. screen_click cell spot name (double): click a spot in the square you just enlarged. screen_type text (enter): types into what has the focus. scroll cell spot direction amount, and drag from_cell from_spot to_cell to_spot, aim the same way after a look at the whole screen. The screen is for what look cannot reach (a web page in a browser, a program that lists no controls): look, enlarge, click, look again."
@@ -246,6 +252,7 @@ mod tests {
         let blind = brief(false);
         assert!(blind.contains("cannot see pictures") && !blind.contains("screen_click"));
         assert!(brief(false).contains("unwatch name"));
+        assert!(!brief(false).contains("delegate") && HELPERS.contains("delegate helpers"));
         assert!(brief(false).contains("append_file each next part"));
     }
 

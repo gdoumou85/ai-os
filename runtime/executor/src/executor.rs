@@ -19,7 +19,7 @@ pub fn lane(action: &Action) -> Lane {
         | Action::AppendFile { .. }
         | Action::WebRead { .. } | Action::WebSearch { .. }
         | Action::StartProgram { .. } | Action::ProgramOutput { .. } | Action::StopProgram { .. } => Lane::Machine,
-        Action::SetSetting { .. } | Action::Wait { .. } | Action::Watch { .. } | Action::Unwatch { .. } => Lane::Engine,
+        Action::SetSetting { .. } | Action::Wait { .. } | Action::Watch { .. } | Action::Unwatch { .. } | Action::Delegate { .. } => Lane::Engine,
         // Listed, not `_`: a new action kind must fail to compile here rather than land
         // silently on the wrong hand.
         Action::Look { .. } | Action::Press { .. } | Action::Type { .. } | Action::Read { .. } | Action::OpenApp { .. }

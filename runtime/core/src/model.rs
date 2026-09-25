@@ -19,6 +19,10 @@ pub struct Prompt {
     pub history: Vec<Msg>,
     /// The model cannot see: the screen actions are left out of the grammar.
     pub no_screen: bool,
+    /// Helpers can be had (Cloud on, an OpenAI-style account): `delegate` is offered.
+    pub helpers: bool,
+    /// A helper's call: only the machine hand's actions.
+    pub machine_only: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +59,10 @@ pub trait Model {
     /// Something the owner should be told about the model itself, once: the cloud pool switched
     /// to another model on its own.
     fn news(&self) -> Option<String> { None }
+    /// The cloud accounts helpers can run on (helpers design §2): none unless Cloud is on.
+    fn helper_accounts(&self) -> Vec<crate::cloud::Account> { vec![] }
+    /// The other models an account's key opens, for a helper to move on to.
+    fn other_models(&self, _account: &crate::cloud::Account) -> Vec<String> { vec![] }
 }
 
 /// Scripted moves for tests; records every prompt it was given.
@@ -221,7 +229,9 @@ pub fn base64(data: &[u8]) -> String {
 /// The schema narrowed to `allowed`, and with the screen actions dropped for a blind model.
 fn format_for(prompt: &Prompt) -> serde_json::Value {
     let s = narrow_schema(schema::value(), &prompt.allowed);
-    if prompt.no_screen { schema::without_screen(s) } else { s }
+    let s = if prompt.no_screen { schema::without_screen(s) } else { s };
+    let s = if prompt.helpers { s } else { schema::only_kinds(s, |k| k != "delegate") };
+    if prompt.machine_only { schema::only_kinds(s, |k| schema::MACHINE_KINDS.contains(&k)) } else { s }
 }
 
 /// The prompt with the answer's shape written out in words too. ollama.com takes `format` only as
@@ -669,6 +679,17 @@ mod tests {
         let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![], image: None, ..Default::default() });
         assert_eq!(b["options"]["num_ctx"], m.context_tokens());
         assert_eq!(FakeModel::new(vec![]).context_tokens(), 8192, "the trait default");
+    }
+
+    #[test]
+    fn delegate_is_offered_only_with_helpers_and_helpers_get_the_machine_only() {
+        let names = |p: &Prompt| tools_for(p).as_array().unwrap().iter().map(|x| x["function"]["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let home = Prompt { allowed: vec!["reply", "act"], ..Default::default() };
+        assert!(!names(&home).contains(&"delegate".to_string()));
+        assert!(names(&Prompt { helpers: true, ..home.clone() }).contains(&"delegate".to_string()));
+        let helper = names(&Prompt { machine_only: true, no_screen: true, ..home });
+        assert!(helper.contains(&"write_file".to_string()) && helper.contains(&"web_search".to_string()) && helper.contains(&"reply".to_string()), "{helper:?}");
+        assert!(!helper.iter().any(|n| ["look", "press", "key", "open_app", "watch", "delegate", "wait"].contains(&n.as_str())), "{helper:?}");
     }
 
     #[test]

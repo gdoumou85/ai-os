@@ -717,7 +717,9 @@ impl<M: Model> Engine<M> {
     /// newest message — the context block, where the request and the to-do list are pinned.
     fn prompt_for(&mut self, turn: &Job) -> Result<Prompt, EngineError> {
         let sees = self.model.sees();
-        let system = prompt::brief(sees);
+        // Helpers while Cloud has an account for them; an alert's turn does its own work.
+        let helpers = !self.in_alert && !self.model.helper_accounts().is_empty();
+        let system = prompt::brief(sees) + if helpers { prompt::HELPERS } else { "" };
         let (machine, places) = (self.machine_block(), self.places()?);
         let (instructions, journal, notes) = (self.store.instructions()?, self.journal(&turn.request), self.named_notes(&turn.request)?);
         let programs = executor::programs::running();
@@ -730,7 +732,7 @@ impl<M: Model> Engine<M> {
         let budget = window.saturating_sub((window / 4).max(1500) + (system.len() + ctx.len()) / 4);
         let mut chat = prompt::fit(&self.store.all_messages()?, budget);
         let last = chat.pop().map(|m| m.content).unwrap_or_default();
-        Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: if self.answered || self.in_alert { vec!["reply", "todo", "act", "remember"] } else { vec!["reply", "ask", "todo", "act", "remember"] }, image: self.image.take(), no_screen: !sees })
+        Ok(Prompt { system, user: format!("{ctx}\n{last}"), history: chat, allowed: if self.answered || self.in_alert { vec!["reply", "todo", "act", "remember"] } else { vec!["reply", "ask", "todo", "act", "remember"] }, image: self.image.take(), no_screen: !sees, helpers, machine_only: false })
     }
 
     /// Runs one action and puts its result in the conversation. `true`: the turn ended here.
@@ -742,6 +744,7 @@ impl<M: Model> Engine<M> {
             Action::SetSetting { key, value } => self.apply_setting(key, value)?,
             Action::Watch { name, reason, urgent, when, command } => self.watch(turn, name, reason, *urgent, when, command)?,
             Action::Unwatch { name } => self.unwatch(name)?,
+            Action::Delegate { helpers } => self.delegate(turn, helpers),
             _ => {
                 let exec = self.executor_for(turn)?;
                 let mut o = exec.execute(&turn.id, &action)?;
@@ -900,6 +903,28 @@ impl<M: Model> Engine<M> {
         let running = executor::programs::running();
         let now = if running.is_empty() { String::new() } else { format!(" Running in the background now: {}.", running.join(", ")) };
         Outcome::ok(format!("waited {waited} s of {n}.{now}"))
+    }
+
+    /// Pieces of work to role helpers, all at once, spread over the cloud accounts (helpers
+    /// design): each account's own model first, then the other models its key opens.
+    fn delegate(&mut self, turn: &Job, tasks: &[executor::action::HelperTask]) -> Outcome {
+        let accounts = self.model.helper_accounts();
+        if accounts.is_empty() { return Outcome::err("helpers need Cloud on with an OpenRouter or NVIDIA account: do the work yourself") }
+        if tasks.is_empty() || tasks.len() > 6 { return Outcome::err("delegate takes 1 to 6 helpers") }
+        if let Some(t) = tasks.iter().find(|t| !crate::helpers::ROLES.contains(&t.role.as_str())) {
+            return Outcome::err(format!("no helper role '{}'; the roles are {}", t.role, crate::helpers::ROLES.join(", ")))
+        }
+        let mut models = accounts.clone();
+        for a in &accounts {
+            for m in self.model.other_models(a) {
+                if !models.iter().any(|x| x.url == a.url && x.model == m) { models.push(crate::cloud::Account { model: m, ..a.clone() }) }
+            }
+        }
+        self.tick(&turn.id, format!("{} helper{} working…", tasks.len(), if tasks.len() == 1 { "" } else { "s" }));
+        let (id, stop, folder) = (turn.id.clone(), self.stop.clone(), PathBuf::from(&turn.folder));
+        let reports = crate::helpers::run(tasks, &models, accounts.len(), &folder, &stop, &mut |text| self.emit(Event::Step { job_id: id.clone(), plan_step: 0, text, ok: true }));
+        let text = format!("the helpers are back:\n{}", crate::helpers::summary(&reports));
+        if reports.iter().any(|r| r.done) { Outcome::ok(text) } else { Outcome::err(text) }
     }
 
     /// The machine hand works in the user's home.
@@ -1460,6 +1485,15 @@ mod tests {
         let o = e.wait(300);
         assert!(t.elapsed() < std::time::Duration::from_secs(3) && o.detail.starts_with("waited 0 s"), "{}", o.detail);
         assert!(e.stop_flag().load(Ordering::SeqCst), "the flag is left for the loop to end the turn");
+    }
+
+    #[test]
+    fn delegate_without_cloud_says_so() {
+        let (mut e, _, _) = engine_with(vec![act(Action::Delegate { helpers: vec![executor::action::HelperTask { role: "coding".into(), task: "t".into() }] }), reply("Done myself.")], "delegate");
+        events_of(&mut e, "build it with helpers");
+        let rows = e.store.all_messages().unwrap();
+        assert!(rows.iter().any(|(r, t)| r == "result" && t.contains("helpers need Cloud")), "{rows:?}");
+        assert!(!e.model.prompts.borrow()[0].helpers, "no cloud: delegate is not offered");
     }
 
     #[test]
