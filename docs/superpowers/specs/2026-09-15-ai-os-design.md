@@ -608,3 +608,7 @@ Two things the owner hit on his first full-access run.
   A cloud account's prompt now carries the narrowed schema in words (`model::format_spelled`);
   with it the same model answered a correct `reply`. Home runners still only get `format`. A
   to-do list with only blank items opens no card. (v0.12.2)
+- **2026-09-25**, promised work is done: a reply before any step that says work is under way or
+  coming ("I'm reviewing…", "I'll…", "I cannot…") is answered once with "a reply ends your turn
+  and does nothing: do it now". The v0.8.6 front-door check (`promises_work`) had been lost in the
+  one-loop rewrite; a free cloud model twice said it was reviewing files and read none. (v0.12.2)
