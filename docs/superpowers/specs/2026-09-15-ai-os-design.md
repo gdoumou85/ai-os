@@ -649,4 +649,4 @@ Two things the owner hit on his first full-access run.
   why once; only when no account answers is the failure the turn's. (v0.14.0)
 - **2026-09-25**, more free providers: Groq, Mistral, Gemini and Cerebras buttons on the Cloud card
   (all OpenAI-style; `aios_proto::v1` because Gemini's address carries its own version); the chat
-  filter drops speech, image and moderation models for every provider. (v0.14.1)
+  filter drops speech, image and moderation models for every provider; each provider links to its key page on the card and in the guide. (v0.14.1)
