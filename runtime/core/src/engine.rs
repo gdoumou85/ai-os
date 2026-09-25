@@ -654,7 +654,7 @@ impl<M: Model> Engine<M> {
                 // Work promised before any was done: asked once to do it instead.
                 Move::Reply { text, .. } if !nudged && turn.steps.is_empty() && promises_work(&text) => {
                     nudged = true;
-                    self.store.push_message("result", "a reply ends your turn and does nothing: you said you would do the work, so do it now with act (or todo first), or reply with what you actually found")?;
+                    self.store.push_message("result", "a reply ends your turn and does nothing: you said you would do the work, or that you could not. You have what you need: act runs an action (run_command, read_file, write_file, web_search…) on this computer as the user, with sudo. Do the work now with act (or todo first), or reply with what you actually found")?;
                 }
                 Move::Reply { text, outcome, .. } => {
                     if !reminded {

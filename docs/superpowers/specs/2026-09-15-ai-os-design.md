@@ -616,3 +616,7 @@ Two things the owner hit on his first full-access run.
   (`dpkg --configure -a`, the AI's own apt stopped half way) and waits up to 5 minutes on apt's
   lock before installing packages; "Update now" says "did NOT finish" when the installer failed,
   where it said "Finished" either way. (v0.12.3)
+- **2026-09-25**, the actions are its tools: a free cloud model answered "I'm unable to inspect the
+  files … because no file or command tools are available", taking tools to mean an API's function
+  calls. The brief now says the act actions are its tools, always there, with none other to wait
+  for; the promised-work reminder names them too. (v0.12.4)
