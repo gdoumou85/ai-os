@@ -31,6 +31,9 @@ pub enum ModelError {
     #[error("the answer was stopped")] Stopped,
     /// The runner stopped the answer at its length limit: said as that, not as a bad format.
     #[error("the answer was cut off at the model's length limit, {0} words in")] CutOff(usize),
+    /// The answer went on and on with nothing to read: blank space, the loop a model held to a
+    /// JSON format can fall into (the owner's 27B, 2026-09-25: 40,000 tokens, 33 words, 4 hours).
+    #[error("the answer got stuck writing blank space, {0} words in")] Stuck(usize),
     #[error("fake model has no more scripted moves")] Exhausted,
 }
 
@@ -49,6 +52,9 @@ pub trait Model {
     fn context_tokens(&self) -> usize { 8192 }
     /// Whether the model takes pictures (one-loop design §2): only then is the screen offered.
     fn sees(&self) -> bool { false }
+    /// Something the owner should be told about the model itself, once: the cloud pool switched
+    /// to another model on its own.
+    fn news(&self) -> Option<String> { None }
 }
 
 /// Scripted moves for tests; records every prompt it was given.
@@ -224,11 +230,11 @@ pub fn ollama_body(model: &str, prompt: &Prompt) -> serde_json::Value {
         "think": false,
         "format": format_for(prompt),
         // Ollama loads the model at what each request asks for, so a fixed 8192 here undid the
-        // Model card's bar on every question (the owner, 2026-09-23). `num_predict: loaded_context()`:
-        // no length limit but the window itself — a whole file is one answer (2026-09-24). Ollama
-        // then stops itself there with `done_reason: "length"`, the same cap `read_stream` enforces
-        // on what it actually reads, belt and braces.
-        "options": { "temperature": 0.0, "num_ctx": loaded_context(), "num_predict": loaded_context() },
+        // Model card's bar on every question (the owner, 2026-09-23). No `num_predict`: Ollama's own
+        // default is no length limit, and `read_stream` cuts an answer bigger than the window.
+        // Asking for the window's size broke ollama.com, whose models cap what one answer may be
+        // (nemotron-3-super: 65536 < 131072, the owner, 2026-09-25).
+        "options": { "temperature": 0.0, "num_ctx": loaded_context() },
         "messages": std::iter::once(serde_json::json!({ "role": "system", "content": prompt.system }))
             .chain(history(prompt)).chain(std::iter::once(user)).collect::<Vec<_>>()
     })
@@ -306,6 +312,8 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
     let cap = loaded_context() * 4;
     let (mut content, mut seen, mut raw) = (String::new(), false, String::new());
     let mut told = std::time::Instant::now();
+    // Pieces in a row that added nothing to read: no letter of the answer and no thought.
+    let mut blank = 0;
     for line in std::io::BufReader::new(from).lines() {
         let line = line.map_err(|e| ModelError::Http(match e.kind() {
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => format!("timed out: the model said nothing for {} s", answer_timeout().as_secs()),
@@ -321,6 +329,12 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
         let cut = match kind { Kind::Ollama => v["done_reason"] == "length", Kind::OpenAi => v["choices"][0]["finish_reason"] == "length" };
         let piece = match kind { Kind::Ollama => &v["message"]["content"], Kind::OpenAi => &v["choices"][0]["delta"]["content"] };
         if let Some(p) = piece.as_str() { content.push_str(p); }
+        // A thinking model's thoughts come with empty answer pieces; those are not blank.
+        let thought = match kind { Kind::Ollama => &v["message"]["thinking"], Kind::OpenAi => { let d = &v["choices"][0]["delta"]; if d["reasoning_content"].is_string() { &d["reasoning_content"] } else { &d["reasoning"] } } };
+        let said = |x: &serde_json::Value| x.as_str().is_some_and(|t| !t.trim().is_empty());
+        blank = if said(piece) || said(thought) { 0 } else { blank + 1 };
+        // ponytail: 300 pieces, a few minutes on a slow model; no real answer has that many blanks in a row.
+        if blank > 300 { return Err(ModelError::Stuck(content.split_whitespace().count())) }
         // Bigger than the whole context window could never be kept in the chat anyway, so this is
         // the window, not a limit on how much the AI may write — and it stops a model repeating
         // itself forever, which the learning turn has no Stop button to catch (engine.rs's `learn`).
@@ -532,7 +546,7 @@ mod tests {
         assert_eq!(b["think"], false);
         assert_eq!(b["options"]["temperature"], 0.0);
         assert_eq!(b["options"]["num_ctx"], 8192);
-        assert_eq!(b["options"]["num_predict"], loaded_context(), "no length limit but the window");
+        assert!(b["options"]["num_predict"].is_null(), "no length limit asked: a cloud model refuses one past its own cap");
         assert_eq!(b["format"]["oneOf"].as_array().unwrap().len(), 6);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
@@ -598,6 +612,17 @@ mod tests {
         assert!(matches!(read_stream(Kind::Ollama, o.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::CutOff(2))));
         let s = r#"data: {"choices":[{"delta":{"content":"a b c"},"finish_reason":"length"}]}"#;
         assert!(matches!(read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::CutOff(3))));
+    }
+
+    #[test]
+    fn an_answer_stuck_on_blank_space_is_dropped_but_thinking_is_not() {
+        let mut body = r#"{"message":{"content":"{\"move\":\"act\","},"done":false}"#.to_string() + "\n";
+        let thinking = format!("{}\n", r#"{"message":{"content":"","thinking":"hmm"},"done":false}"#).repeat(400);
+        let words = r#"{"message":{"content":"\"thought\":\"x\"}"},"done":true}"#;
+        let fine = body.clone() + &thinking + words;
+        assert!(read_stream(Kind::Ollama, fine.as_bytes(), std::time::Duration::ZERO, &mut |_| true).is_ok(), "a long thought is not blank");
+        body.push_str(&format!("{}\n", r#"{"message":{"content":"\n  "},"done":false}"#).repeat(301));
+        assert!(matches!(read_stream(Kind::Ollama, body.as_bytes(), std::time::Duration::ZERO, &mut |_| true), Err(ModelError::Stuck(1))));
     }
 
     #[test]

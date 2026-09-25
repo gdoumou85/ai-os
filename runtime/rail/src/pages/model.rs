@@ -31,6 +31,19 @@ pub(crate) fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gt
     for (i, (name, model)) in list.into_iter().enumerate() {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let l = gtk::Label::new(Some(&format!("{}. {name}: {model}", i + 1))); l.set_xalign(0.0); l.set_hexpand(true); l.set_wrap(true);
+        row.append(&l);
+        // Every model the key opens, to pick another (the owner, 2026-09-25).
+        if let (Some(provider), Some(key)) = (aios_rail::models::provider_named(&name), aios_rail::models::account_key(&tsv, i)) {
+            let change = gtk::Button::with_label("Change model");
+            let (col, me, tx, st) = (column.clone(), w.clone(), to_ui.clone(), status.clone());
+            change.connect_clicked(move |_| {
+                col.remove(&me);
+                st.set_text(&format!("Asking {} which models your key opens…", provider.name));
+                let (tx, key) = (tx.clone(), key.clone());
+                std::thread::spawn(move || { let found = run("ai-os-find", &["--url", provider.url], Some(&key)); let _ = tx.send(FromNet::Cloud { provider, key, found, replace: Some(i) }); });
+            });
+            row.append(&change);
+        }
         let rm = gtk::Button::with_label("Remove");
         let (col, me, st, tx, stt) = (column.clone(), w.clone(), status.clone(), to_ui.clone(), status.clone());
         rm.connect_clicked(move |_| {
@@ -39,7 +52,7 @@ pub(crate) fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gt
             col.remove(&me);
             col.append(&cloud_card(&col, &tx, &stt));
         });
-        row.append(&l); row.append(&rm);
+        row.append(&rm);
         b.append(&row);
     }
     let add = gtk::Label::new(Some("Add an account: paste its key here and press its provider.
@@ -60,14 +73,15 @@ pub(crate) fn cloud_card(column: &gtk::Box, to_ui: &Sender<FromNet>, status: &gt
             col.remove(&me);
             st.set_text(&format!("Asking {} which models your key opens…", provider.name));
             let tx = tx.clone();
-            std::thread::spawn(move || { let found = run("ai-os-find", &["--url", provider.url], Some(&key)); let _ = tx.send(FromNet::Cloud { provider, key, found }); });
+            std::thread::spawn(move || { let found = run("ai-os-find", &["--url", provider.url], Some(&key)); let _ = tx.send(FromNet::Cloud { provider, key, found, replace: None }); });
         });
     }
     w
 }
 
-/// The models a provider's key opens, a button each: a click adds the account and turns Cloud on.
-pub(crate) fn cloud_models_card(provider: aios_rail::models::Provider, found: &str, key: String, column: &gtk::Box, status: &gtk::Label, switch: &gtk::ToggleButton) -> gtk::Widget {
+/// The models a provider's key opens, a button each: a click adds the account and turns Cloud on,
+/// or, for `replace`, puts that account on the model picked.
+pub(crate) fn cloud_models_card(provider: aios_rail::models::Provider, found: &str, key: String, replace: Option<usize>, column: &gtk::Box, status: &gtk::Label, switch: &gtk::ToggleButton) -> gtk::Widget {
     let choices = aios_rail::models::chat_models(provider, aios_rail::models::parse_found(found).into_iter().filter_map(|c| c.model).collect());
     let empty = format!("{} did not list any models for that key. Check the key and try again.", provider.name);
     let b = plain_card("Pick a cloud model", if choices.is_empty() { &empty } else { "The bigger the model, the better it works, and the sooner its free allowance runs out." });
@@ -77,6 +91,16 @@ pub(crate) fn cloud_models_card(provider: aios_rail::models::Provider, found: &s
         let (col, me, st, sw, key) = (column.clone(), w.clone(), status.clone(), switch.clone(), key.clone());
         btn.connect_clicked(move |_| {
             col.remove(&me);
+            if let Some(i) = replace {
+                let msg = match aios_rail::models::with_model(&cloud_accounts(), i, &m).map(|t| write_private(&format!("{}/cloud.tsv", config_dir()), &t)) {
+                    Some(Ok(())) => format!("{} now uses {m}.", provider.name),
+                    Some(Err(e)) => format!("Could not save the account: {e}"),
+                    None => "That model's name has characters it may not.".to_string(),
+                };
+                st.set_text(&msg);
+                col.append(&super::msg(&msg));
+                return
+            }
             let Some(line) = aios_rail::models::account_line(provider.name, provider.kind, provider.url, &m, &key) else {
                 let msg = "That model's name has characters it may not.";
                 st.set_text(msg);

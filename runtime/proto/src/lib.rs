@@ -6,6 +6,23 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+/// The models worth offering from a cloud provider's list, by the provider's address. NVIDIA lists
+/// everything it hosts — embedders, safety filters, rerankers — and only some of those can hold a
+/// conversation; a model that can also see still can. OpenRouter lists hundreds, most of them
+/// paid: only the free ones (`…:free`). Shared by the Cloud card's list and the engine's own switch
+/// to another model when the picked one fails (the owner, 2026-09-25).
+/// ponytail: a name filter; NVIDIA's own model types if its list ever says them.
+pub fn chat_models(url: &str, names: Vec<String>) -> Vec<String> {
+    if url.contains("openrouter.ai") { return names.into_iter().filter(|n| n.ends_with(":free")).collect(); }
+    if !url.contains("nvidia.com") { return names; }
+    const NOT_CHAT: [&str; 12] = ["embed", "rerank", "retriev", "guard", "safety", "reward", "clip", "parse", "detect", "translat", "pii", "content-"];
+    const CHAT: [&str; 9] = ["instruct", "chat", "-it", "deepseek", "kimi", "qwen3", "gpt-oss", "nemotron", "coder"];
+    names.into_iter().filter(|n| {
+        let l = n.to_lowercase();
+        !NOT_CHAT.iter().any(|w| l.contains(w)) && CHAT.iter().any(|w| l.contains(w))
+    }).collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileKind { Text, Image, Other }

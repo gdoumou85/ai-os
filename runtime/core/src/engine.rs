@@ -594,12 +594,19 @@ impl<M: Model> Engine<M> {
                 sink(&Event::Busy { job_id: id.clone(), text: format!("Writing its answer… {words} words") });
                 true
             });
+            // The cloud pool switched models on its own: the owner hears which (2026-09-25).
+            if let Some(text) = self.model.news() { self.emit(Event::Said { text }); }
             let mv = match answer {
                 Ok(m) => { unreadable = 0; m }
                 // A whole file past the runner's length limit: not a bad format, so said as what it is.
                 Err(ModelError::CutOff(words)) if unreadable == 0 => {
                     unreadable = 1;
                     self.store.push_message("result", &format!("your answer was cut off at the model's length limit after {words} words, so nothing was done. Write a big file in parts: write_file the first part, then append_file each next part."))?;
+                    continue;
+                }
+                Err(ModelError::Stuck(words)) if unreadable == 0 => {
+                    unreadable = 1;
+                    self.store.push_message("result", &format!("your answer got stuck writing blank space after {words} words, so nothing was done. Answer again, and keep it short."))?;
                     continue;
                 }
                 Err(ModelError::BadJson(e)) if unreadable == 0 => {
