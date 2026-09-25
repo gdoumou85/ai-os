@@ -37,7 +37,7 @@ While the AI is working, the circle at the bottom turns and the line beside it s
 • <b>Cloud</b> turns your cloud accounts on and off (see Cloud models below).
 • <b>Help</b> opens this guide.
 
-When a new version is out, a card at login says so. Press <b>Update now</b>, type your password in the window that opens, then restart the computer.
+When a new version is out, a card in the chat says so, within about ten minutes. Press <b>Update now</b>, type your password in the window that opens, then restart the computer. If the window says the update did not finish, its last lines say why. To see which version you have, type <tt>cat /usr/local/share/ai-os/VERSION</tt> in a terminal.
 
 
 <big><b>What it can do</b></big>

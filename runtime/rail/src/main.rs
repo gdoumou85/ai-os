@@ -310,9 +310,19 @@ fn main() {
         });
 
         let (to_ui, from_net) = channel::<FromNet>();
-        // Once per login, off the GTK thread: a slow network never holds the window up.
+        // Off the GTK thread: a slow network never holds the window up. Asked again every 10 minutes,
+        // not once per login: at login the network is often not up yet, and a release can come out
+        // while the window is open (the owner, 2026-09-25). Each new version is offered once.
         let up = to_ui.clone();
-        std::thread::spawn(move || { if let Some(v) = aios_rail::update::check() { let _ = up.send(FromNet::Update(v)); } });
+        std::thread::spawn(move || {
+            let mut offered = String::new();
+            loop {
+                if let Some(v) = aios_rail::update::check() {
+                    if v != offered { offered = v.clone(); if up.send(FromNet::Update(v)).is_err() { return } }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(600));
+            }
+        });
         let (to_ui_models, to_ui2, to_ui_cloud) = (to_ui.clone(), to_ui.clone(), to_ui.clone());
         let say = net_thread(to_ui);
         let cards = Rc::new(RefCell::new(Cards::default()));
