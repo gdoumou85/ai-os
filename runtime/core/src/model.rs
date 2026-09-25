@@ -111,12 +111,15 @@ pub struct RemoteModel {
     pub finder: Box<dyn Fn() -> Vec<Found>>,
     /// Whether this runner sees, asked once per process and then kept (see `sees()`).
     pub sees: std::cell::OnceCell<bool>,
+    /// The moves and actions go as native tools (cloud native tools spec): OpenAI-style cloud
+    /// accounts only, set by the cloud pool.
+    pub tools: bool,
 }
 
 impl RemoteModel {
     /// A runner at a known address that is never looked for elsewhere.
     pub fn at(kind: Kind, url: &str, model: &str) -> Self {
-        Self { kind, url: RefCell::new(url.into()), model: model.into(), key: None, finder: Box::new(Vec::new), sees: std::cell::OnceCell::new() }
+        Self { kind, url: RefCell::new(url.into()), model: model.into(), key: None, finder: Box::new(Vec::new), sees: std::cell::OnceCell::new(), tools: false }
     }
     pub fn local(model: &str) -> Self { Self::at(Kind::Ollama, "http://127.0.0.1:11434", model) }
     /// What the installer wrote into the unit: `AI_OS_MODEL_URL` (else this machine),
@@ -138,12 +141,18 @@ impl RemoteModel {
     fn ask_at(&self, url: &str, prompt: &Prompt, watch: &mut dyn FnMut(usize) -> bool) -> Result<Move, (bool, ModelError)> {
         let (endpoint, body) = match self.kind {
             Kind::Ollama => (format!("{url}/api/chat"), ollama_body(&self.model, prompt)),
-            Kind::OpenAi => (format!("{url}/v1/chat/completions"), openai_body(&self.model, prompt)),
+            Kind::OpenAi => (format!("{url}/v1/chat/completions"), openai_body(&self.model, prompt, self.tools)),
         };
         let mut req = ureq::AgentBuilder::new().timeout_read(answer_timeout()).timeout_write(answer_timeout()).build().post(&endpoint);
         if let Some(k) = &self.key { req = req.set("Authorization", &format!("Bearer {k}")); }
         match req.send_json(body) {
-            Ok(r) => read_stream(self.kind, r.into_reader(), std::time::Duration::from_secs(2), watch).and_then(|c| parse_content(&c)).map_err(|e| (false, e)),
+            // With tools, words and no call are a plain reply: the model just talked.
+            Ok(r) => read_stream(self.kind, r.into_reader(), std::time::Duration::from_secs(2), watch)
+                .and_then(|c| parse_content(&c).or_else(|e| match c.trim() {
+                    t if self.tools && !t.is_empty() && !t.starts_with('{') => Ok(Move::Reply { thought: String::new(), text: t.into(), outcome: crate::moves::Ending::Done }),
+                    _ => Err(e),
+                }))
+                .map_err(|e| (false, e)),
             Err(ureq::Error::Transport(t)) if t.kind() == ureq::ErrorKind::ConnectionFailed => Err((true, ModelError::Http(t.to_string()))),
             // The runner's own reason, not just its number: a 402 from a signed-in Ollama means a
             // cloud model's allowance ran out, and only the body says so.
@@ -257,7 +266,7 @@ pub fn parse_ollama(resp: &serde_json::Value) -> Result<Move, ModelError> {
 
 /// LM Studio's OpenAI-style request: the same narrowed schema, forced through `response_format`.
 /// No context size: LM Studio fixes it when it loads the model (the installer asks for ≥ 8192).
-pub fn openai_body(model: &str, prompt: &Prompt) -> serde_json::Value {
+pub fn openai_body(model: &str, prompt: &Prompt, tools: bool) -> serde_json::Value {
     // A picture makes the content a list of parts; without one it stays the plain string it was.
     let content = match &prompt.image {
         None => serde_json::json!(prompt.user),
@@ -266,7 +275,7 @@ pub fn openai_body(model: &str, prompt: &Prompt) -> serde_json::Value {
             { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", base64(png)) } }
         ]),
     };
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "stream": true,
         "temperature": 0.0,
@@ -274,11 +283,73 @@ pub fn openai_body(model: &str, prompt: &Prompt) -> serde_json::Value {
             "name": "move", "strict": true, "schema": format_for(prompt) } },
         "messages": std::iter::once(serde_json::json!({ "role": "system", "content": prompt.system }))
             .chain(history(prompt)).chain(std::iter::once(serde_json::json!({ "role": "user", "content": content }))).collect::<Vec<_>>()
-    })
+    });
+    // Native tools in place of the answer format (cloud native tools spec §2).
+    if tools {
+        if let Some(o) = body.as_object_mut() { o.remove("response_format"); }
+        body["tools"] = tools_for(prompt);
+        body["tool_choice"] = "auto".into();
+    }
+    body
 }
 
 pub fn parse_openai(resp: &serde_json::Value) -> Result<Move, ModelError> {
     parse_content(resp["choices"][0]["message"]["content"].as_str().unwrap_or(""))
+}
+
+/// What each move is, for its tool (cloud native tools spec §1). The actions' own words stay in
+/// the brief, under Actions.
+fn move_tool_text(name: &str) -> &'static str {
+    match name {
+        "reply" => "Say something to the user and end your turn. After work: what you did and how it came out.",
+        "ask" => "One question to the user, with up to 5 suggested answers. Ends your turn.",
+        "todo" => "Your to-do list for work of several steps, whole, each time it changes.",
+        "remember" => "An instruction to keep for every later conversation, only when the user says so.",
+        _ => "What to keep from this work.",
+    }
+}
+
+/// The allowed moves as native tools: `act` as one tool per action kind, the rest one each, all
+/// taken from the one schema (so a new move or action is a tool by itself).
+pub fn tools_for(prompt: &Prompt) -> serde_json::Value {
+    let s = format_for(prompt);
+    let tool = |name: &str, text: &str, entry: &serde_json::Value, key: &str, thought: bool| {
+        let mut props = entry["properties"].as_object().cloned().unwrap_or_default();
+        props.remove(key);
+        let mut required: Vec<serde_json::Value> = entry["required"].as_array().cloned().unwrap_or_default().into_iter().filter(|r| r != key).collect();
+        if thought {
+            props.insert("thought".into(), serde_json::json!({ "type": "string", "description": "one short sentence on what you are doing and why" }));
+            required.insert(0, "thought".into());
+        }
+        serde_json::json!({ "type": "function", "function": { "name": name, "description": text,
+            "parameters": { "type": "object", "properties": props, "required": required } } })
+    };
+    let mut out = vec![];
+    for m in s["oneOf"].as_array().into_iter().flatten() {
+        let Some(name) = m["properties"]["move"]["enum"][0].as_str() else { continue };
+        if name != "act" { out.push(tool(name, move_tool_text(name), m, "move", false)); continue }
+        for a in s["$defs"]["action"]["oneOf"].as_array().into_iter().flatten() {
+            if let Some(kind) = a["properties"]["kind"]["enum"][0].as_str() {
+                out.push(tool(kind, "An action on this computer, as the user with sudo; see Actions in your instructions.", a, "kind", true));
+            }
+        }
+    }
+    serde_json::Value::Array(out)
+}
+
+/// A native tool call as the move JSON the engine reads: a move tool is that move, an action tool
+/// is `act` with that action.
+fn tool_move(name: &str, args: &str) -> Result<String, ModelError> {
+    let mut a: serde_json::Map<String, serde_json::Value> = if args.trim().is_empty() { Default::default() }
+        else { serde_json::from_str(args).map_err(|e| ModelError::BadJson(format!("{e}: {name}({args})")))? };
+    Ok(if ["reply", "ask", "todo", "remember", "learn"].contains(&name) {
+        a.insert("move".into(), name.into());
+        serde_json::Value::Object(a)
+    } else {
+        let thought = a.remove("thought").filter(|t| t.is_string()).unwrap_or_else(|| "".into());
+        a.insert("kind".into(), name.into());
+        serde_json::json!({ "move": "act", "thought": thought, "action": a })
+    }.to_string())
 }
 
 /// A move from the whole of an answer's text.
@@ -333,6 +404,9 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
     let mut told = std::time::Instant::now();
     // Pieces in a row that added nothing to read: no letter of the answer and no thought.
     let mut blank = 0;
+    // Native tool calls, by index: the name, then the arguments in pieces (OpenAI-style streams).
+    let mut calls: Vec<(String, String)> = vec![];
+    let words = |content: &str, calls: &[(String, String)]| content.split_whitespace().count() + calls.iter().map(|c| c.1.split_whitespace().count()).sum::<usize>();
     for line in std::io::BufReader::new(from).lines() {
         let line = line.map_err(|e| ModelError::Http(match e.kind() {
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => format!("timed out: the model said nothing for {} s", answer_timeout().as_secs()),
@@ -351,19 +425,27 @@ pub fn read_stream(kind: Kind, from: impl std::io::Read, every: std::time::Durat
         // A thinking model's thoughts come with empty answer pieces; those are not blank.
         let thought = match kind { Kind::Ollama => &v["message"]["thinking"], Kind::OpenAi => { let d = &v["choices"][0]["delta"]; if d["reasoning_content"].is_string() { &d["reasoning_content"] } else { &d["reasoning"] } } };
         let said = |x: &serde_json::Value| x.as_str().is_some_and(|t| !t.trim().is_empty());
-        blank = if said(piece) || said(thought) { 0 } else { blank + 1 };
+        let mut args = false;
+        for c in v["choices"][0]["delta"]["tool_calls"].as_array().into_iter().flatten() {
+            let i = c["index"].as_u64().unwrap_or(0) as usize;
+            if calls.len() <= i { calls.resize(i + 1, Default::default()) }
+            if let Some(n) = c["function"]["name"].as_str() { calls[i].0.push_str(n) }
+            if let Some(p) = c["function"]["arguments"].as_str() { calls[i].1.push_str(p); args |= !p.trim().is_empty() }
+        }
+        blank = if said(piece) || said(thought) || args { 0 } else { blank + 1 };
         // ponytail: 300 pieces, a few minutes on a slow model; no real answer has that many blanks in a row.
-        if blank > 300 { return Err(ModelError::Stuck(content.split_whitespace().count())) }
+        if blank > 300 { return Err(ModelError::Stuck(words(&content, &calls))) }
         // Bigger than the whole context window could never be kept in the chat anyway, so this is
         // the window, not a limit on how much the AI may write — and it stops a model repeating
         // itself forever, which the learning turn has no Stop button to catch (engine.rs's `learn`).
-        if content.len() / 4 > loaded_context() { return Err(ModelError::CutOff(content.split_whitespace().count())) }
-        if cut { return Err(ModelError::CutOff(content.split_whitespace().count())) }
+        if (content.len() + calls.iter().map(|c| c.1.len()).sum::<usize>()) / 4 > loaded_context() { return Err(ModelError::CutOff(words(&content, &calls))) }
+        if cut { return Err(ModelError::CutOff(words(&content, &calls))) }
         if told.elapsed() >= every {
             told = std::time::Instant::now();
-            if !watch(content.split_whitespace().count()) { return Err(ModelError::Stopped) }
+            if !watch(words(&content, &calls)) { return Err(ModelError::Stopped) }
         }
     }
+    if let Some((name, args)) = calls.iter().find(|c| !c.0.is_empty()) { return tool_move(name, args) }
     if !seen {
         if let Some(whole) = whole_body_content(kind, &raw)? { return Ok(whole) }
         return Err(ModelError::Http(format!("the runner's answer was not a stream: {}", raw.chars().take(300).collect::<String>().trim())))
@@ -452,7 +534,7 @@ mod tests {
 
     #[test]
     fn openai_request_is_grammar_forced_and_deterministic() {
-        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "ask"], image: None, ..Default::default() });
+        let b = openai_body("bonsai-8b", &Prompt { system: "s".into(), user: "hello".into(), allowed: vec!["reply", "ask"], image: None, ..Default::default() }, false);
         assert_eq!(b["model"], "bonsai-8b");
         assert_eq!(b["stream"], true);
         assert_eq!(b["temperature"], 0.0);
@@ -477,13 +559,13 @@ mod tests {
         let o = ollama_body("m", &with);
         assert_eq!(o["messages"][1]["images"], serde_json::json!(["cG5n"]));
         assert_eq!(o["messages"][1]["content"], "look");
-        let a = openai_body("m", &with);
+        let a = openai_body("m", &with, false);
         assert_eq!(a["messages"][1]["content"][0], serde_json::json!({"type":"text","text":"look"}));
         assert_eq!(a["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,cG5n");
         // No picture: the bodies are exactly what they were before pictures existed.
         let without = Prompt { image: None, ..with };
         assert!(ollama_body("m", &without)["messages"][1].get("images").is_none());
-        assert_eq!(openai_body("m", &without)["messages"][1]["content"], "look");
+        assert_eq!(openai_body("m", &without, false)["messages"][1]["content"], "look");
     }
 
     #[test]
@@ -587,6 +669,40 @@ mod tests {
         let b = ollama_body("x", &Prompt { system: String::new(), user: String::new(), allowed: vec![], image: None, ..Default::default() });
         assert_eq!(b["options"]["num_ctx"], m.context_tokens());
         assert_eq!(FakeModel::new(vec![]).context_tokens(), 8192, "the trait default");
+    }
+
+    #[test]
+    fn the_moves_and_actions_are_native_tools() {
+        let p = Prompt { system: "s".into(), user: "u".into(), allowed: vec!["reply", "act"], no_screen: true, ..Default::default() };
+        let t = tools_for(&p);
+        let names: Vec<&str> = t.as_array().unwrap().iter().map(|x| x["function"]["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"reply") && names.contains(&"read_file") && names.contains(&"run_command"), "{names:?}");
+        assert!(!names.contains(&"ask") && !names.contains(&"act") && !names.contains(&"screen_look"), "{names:?}");
+        let read = t.as_array().unwrap().iter().find(|x| x["function"]["name"] == "read_file").unwrap();
+        let params = &read["function"]["parameters"];
+        assert!(params["properties"]["path"].is_object() && params["properties"]["thought"].is_object() && params["properties"]["kind"].is_null(), "{params}");
+        let reply = t.as_array().unwrap().iter().find(|x| x["function"]["name"] == "reply").unwrap();
+        assert!(reply["function"]["parameters"]["properties"]["move"].is_null());
+        let body = openai_body("m", &p, true);
+        assert!(body["response_format"].is_null() && body["tools"].is_array() && body["tool_choice"] == "auto", "{body}");
+        assert!(openai_body("m", &p, false)["tools"].is_null());
+    }
+
+    #[test]
+    fn a_streamed_tool_call_reads_as_its_move() {
+        let s = [
+            r#"data: {"choices":[{"delta":{"content":"","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"thought\":\"look first\","}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\":\"/home/g/BLUEPRINT.md\"}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "data: [DONE]",
+        ].join("\n\n");
+        let got = read_stream(Kind::OpenAi, s.as_bytes(), std::time::Duration::ZERO, &mut |_| true).unwrap();
+        match parse_content(&got).unwrap() {
+            Move::Act { thought, action: executor::action::Action::ReadFile { path, .. } } => { assert_eq!(thought, "look first"); assert_eq!(path, "/home/g/BLUEPRINT.md") }
+            m => panic!("{m:?}"),
+        }
+        assert!(matches!(parse_content(&tool_move("reply", r#"{"thought":"t","text":"hi","outcome":"done"}"#).unwrap()).unwrap(), Move::Reply { text, .. } if text == "hi"));
     }
 
     #[test]
@@ -710,7 +826,7 @@ mod tests {
             Msg { role: "user".into(), content: "show my projects".into() },
             Msg { role: "assistant".into(), content: r#"{"move":"reply"}"#.into() },
         ], ..Default::default() };
-        for b in [ollama_body("m", &p), openai_body("m", &p)] {
+        for b in [ollama_body("m", &p), openai_body("m", &p, false)] {
             let m = b["messages"].as_array().unwrap();
             let roles: Vec<&str> = m.iter().map(|x| x["role"].as_str().unwrap()).collect();
             assert_eq!(roles, ["system", "user", "assistant", "user"]);
@@ -725,7 +841,7 @@ mod tests {
         let kinds: Vec<&str> = b["format"]["$defs"]["action"]["oneOf"].as_array().unwrap().iter().map(|o| o["properties"]["kind"]["enum"][0].as_str().unwrap()).collect();
         for k in crate::schema::SCREEN_KINDS { assert!(!kinds.contains(&k), "{k} offered to a blind model"); }
         assert!(kinds.contains(&"key") && kinds.contains(&"look"), "{kinds:?}");
-        let o = openai_body("m", &p);
+        let o = openai_body("m", &p, false);
         assert!(o["response_format"]["json_schema"]["schema"]["$defs"]["action"]["oneOf"].as_array().unwrap().iter().all(|a| a["properties"]["kind"]["enum"][0] != "screen_look"));
     }
 

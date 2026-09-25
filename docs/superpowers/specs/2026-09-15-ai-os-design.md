@@ -636,3 +636,7 @@ Two things the owner hit on his first full-access run.
   full blueprint because this turn exposed no filesystem action tool" and guessed the rest.
   `promises_work` now also takes "I could not / couldn't / was unable" and any claim that a tool
   is missing, so the reply is sent back once with "act runs an action". (v0.12.8)
+- **2026-09-25**, cloud models use native tools (spec `2026-09-25-cloud-native-tools-design.md`):
+  an OpenAI-style cloud account gets the moves and every action as function tools, and its tool
+  call is read back as the move; a provider that refuses tools is asked in JSON from then on. The
+  brief says the AI may build any tool it is missing. (v0.13.0)
